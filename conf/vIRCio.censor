@@ -1,0 +1,18 @@
+################################
+# Nao edite nada neste arquivo #
+################################
+#    Arquivo de configuracao   #
+################################
+
+#
+# OBS.: Se alterar o modelo padrao deste arquivo
+# adotado por toda Rede vIRCio vai causar incom-
+# patibilidade e  se refletira em todos os IRCds
+# linkados na rede. Caso isso ocorra (alteracoes
+# nao autorizadas) o servidor devera ser automa-
+# ticamente deslinkado da Rede vIRCio.net
+# Att, RooT @ vIRCio.net
+#
+
+#<badword text="virtualife" replace="(spam)">
+#<badword text="brasirc" replace="(spam)">

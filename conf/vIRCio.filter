@@ -1,0 +1,30 @@
+################################
+# id: vircio-config-ok         #
+################################
+# Nao edite nada neste arquivo #
+################################
+#    Arquivo de configuracao   #
+################################
+
+#
+# OBS.: Se alterar o modelo padrao deste arquivo
+# adotado por toda Rede vIRCio vai causar incom-
+# patibilidade e  se refletira em todos os IRCds
+# linkados na rede. Caso isso ocorra (alteracoes
+# nao autorizadas) o servidor devera ser automa-
+# ticamente deslinkado da Rede vIRCio.net
+# Att, RooT @ vIRCio.net
+#
+
+#<keyword pattern="irc.brasirc" reason="Spam de outra Rede" action="block" flags="qPopn">
+#<keyword pattern="irc.virtualife" reason="Spam de outra Rede" action="block" flags="qPopn">
+
+<keyword pattern="abrege.eu" reason="Spam de Virus" action="block" flags="qPopn">
+<keyword pattern="weba.im" reason="Spam de Virus" action="block" flags="qPopn">
+
+#<keyword pattern="vircio" reason="Warning" action="warningopers" flags="pqoPn">
+<keyword pattern="irc." reason="Warning" action="warningopers" flags="pqoPn">
+
+# Canais isentos de filtro
+#<exemptfromfilter channel="#Brasil">
+<exemptfromfilter channel="#IRCops,#Ajuda">
