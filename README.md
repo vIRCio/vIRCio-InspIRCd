@@ -1,3 +1,15 @@
+## Sobre
+
+vIRCio-InspIRCd é o IRCd utilizado na Rede vIRCio.net.
+
+Trata-se de um Fork do projeto https://github.com/vIRCio/vIRCio-InspIRCd com alguns módulos escritos para serem utilizados na rede vIRCio.
+
+
+## Instalação
+
+Leia o arquivo instalacao.txt
+
+
 ## About
 
 InspIRCd is a modular C++ Internet Relay Chat (IRC) server for UNIX-like and Windows systems.

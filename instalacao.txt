@@ -1,0 +1,49 @@
+﻿
+# Download
+wget https://github.com/vIRCio/vIRCio-InspIRCd/archive/master.zip
+
+
+# Descompactar
+unzip master.zip
+
+
+# Entrar na pasta
+cd vIRCio-InspIRCd-master
+
+
+# Compilar
+./configure
+./configure --prefix=/home/vircio/ircd/ --enable-extras=m_geoip.cpp,m_mysql.cpp,m_regex_pcre.cpp,m_ssl_openssl.cpp
+make
+make install
+
+
+
+# Arquivos de configuração
+
+# Entrar na pasta
+cd ~/ircd
+
+# Apagar pasta conf padrão
+rm -rf conf/
+
+# Enviar a pasta modelo de conf da vIRCio
+cp -R ~/vIRCio-InspIRCd-master/conf ~/ircd/conf
+
+
+# Entrar na pasta
+cd conf
+
+# Editar arquivos na pasta /conf
+
+# ircd.conf colocar o nome e ips v4 e v6
+nano ircd.conf
+
+#links.conf colocar os dados para linkar
+nano links.conf
+
+#ircops.conf colocar o-line
+nano ircops.conf
+
+#OBS.: Não edite os demais arquivos sem autorização da staff
+#todos os servidores linkados devem ter a mesma configuração
