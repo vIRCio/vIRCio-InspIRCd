@@ -19,6 +19,11 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+/**
+ * 2018-03-05
+ * Added action WARNING OPERS without block message
+ * --Diego <diego@agudo.eti.br>
+ */
 
 #include "inspircd.h"
 #include "xline.h"
@@ -42,12 +47,14 @@ enum FilterAction
 	FA_BLOCK,
 	FA_SILENT,
 	FA_KILL,
-	FA_NONE
+	FA_NONE,
+	FA_WARNINGOPERS
+
 };
 
 class FilterResult
 {
- public:
+public:
 	std::string freeform;
 	std::string reason;
 	FilterAction action;
@@ -69,7 +76,7 @@ class FilterResult
 	char FillFlags(const std::string &fl)
 	{
 		flag_no_opers = flag_part_message = flag_quit_message = flag_privmsg =
-			flag_notice = flag_strip_color = false;
+		flag_notice = flag_strip_color = false;
 
 		for (std::string::const_iterator n = fl.begin(); n != fl.end(); ++n)
 		{
@@ -77,29 +84,29 @@ class FilterResult
 			{
 				case 'o':
 					flag_no_opers = true;
-				break;
+					break;
 				case 'P':
 					flag_part_message = true;
-				break;
+					break;
 				case 'q':
 					flag_quit_message = true;
-				break;
+					break;
 				case 'p':
 					flag_privmsg = true;
-				break;
+					break;
 				case 'n':
 					flag_notice = true;
-				break;
+					break;
 				case 'c':
 					flag_strip_color = true;
-				break;
+					break;
 				case '*':
 					flag_no_opers = flag_part_message = flag_quit_message =
-						flag_privmsg = flag_notice = flag_strip_color = true;
-				break;
+					flag_privmsg = flag_notice = flag_strip_color = true;
+					break;
 				default:
 					return *n;
-				break;
+					break;
 			}
 		}
 		return 0;
@@ -139,9 +146,9 @@ class FilterResult
 
 class CommandFilter : public Command
 {
- public:
+public:
 	CommandFilter(Module* f)
-		: Command(f, "FILTER", 1, 5)
+			: Command(f, "FILTER", 1, 5)
 	{
 		flags_needed = 'o';
 		this->syntax = "<filter-definition> <action> <flags> [<gline-duration>] :<reason>";
@@ -156,7 +163,7 @@ class CommandFilter : public Command
 
 class ImplFilter : public FilterResult
 {
- public:
+public:
 	Regex* regex;
 
 	ImplFilter(ModuleFilter* mymodule, const std::string &rea, FilterAction act, long glinetime, const std::string &pat, const std::string &flgs);
@@ -169,7 +176,7 @@ class ModuleFilter : public Module
 	RegexFactory* factory;
 	void FreeFilters();
 
- public:
+public:
 	CommandFilter filtcommand;
 	dynamic_reference<RegexFactory> RegexEngine;
 
@@ -259,8 +266,8 @@ CmdResult CommandFilter::Handle(const std::vector<std::string> &parameters, User
 			if (result.first)
 			{
 				user->WriteServ("NOTICE %s :*** Added filter '%s', type '%s'%s%s, flags '%s', reason: '%s'", user->nick.c_str(), freeform.c_str(),
-						parameters[1].c_str(), (duration ? ", duration " : ""), (duration ? parameters[3].c_str() : ""),
-						flags.c_str(), parameters[reasonindex].c_str());
+								parameters[1].c_str(), (duration ? ", duration " : ""), (duration ? parameters[3].c_str() : ""),
+								flags.c_str(), parameters[reasonindex].c_str());
 
 				ServerInstance->SNO->WriteToSnoMask(IS_LOCAL(user) ? 'a' : 'A', "FILTER: "+user->nick+" added filter '"+freeform+"', type '"+parameters[1]+"', "+(duration ? "duration "+parameters[3]+", " : "")+"flags '"+flags+"', reason: "+parameters[reasonindex]);
 
@@ -297,7 +304,7 @@ bool ModuleFilter::AppliesToMe(User* user, FilterResult* filter, int iflags)
 }
 
 ModuleFilter::ModuleFilter()
-	: initing(true), filtcommand(this), RegexEngine(this, "regex")
+		: initing(true), filtcommand(this), RegexEngine(this, "regex")
 {
 }
 
@@ -357,6 +364,11 @@ ModResult ModuleFilter::OnUserPreNotice(User* user,void* dest,int target_type, s
 				return MOD_RES_PASSTHRU;
 
 			target = t->name;
+		}
+		if (f->action == FA_WARNINGOPERS)
+		{
+			ServerInstance->SNO->WriteGlobalSno('a', "FILTER: Possible SPAM from "+user->nick+" to "+target+" - Message: " + text);
+			return MOD_RES_PASSTHRU;
 		}
 		if (f->action == FA_BLOCK)
 		{
@@ -432,7 +444,7 @@ ModResult ModuleFilter::OnPreCommand(std::string &command, std::vector<std::stri
 			return MOD_RES_PASSTHRU;
 
 		/* We cant block a part or quit, so instead we change the reason to 'Reason filtered' */
-		parameters[parting ? 1 : 0] = "Reason filtered";
+		parameters[parting ? 1 : 0] = "Conenction closed";
 
 		/* We're blocking, OR theyre quitting and its a KILL action
 		 * (we cant kill someone whos already quitting, so filter them anyway)
@@ -660,6 +672,8 @@ bool ModuleFilter::StringToFilterAction(const std::string& str, FilterAction& fa
 		fa = FA_GLINE;
 	else if (s == "block")
 		fa = FA_BLOCK;
+	else if (s == "warningopers")
+		fa = FA_WARNINGOPERS;
 	else if (s == "silent")
 		fa = FA_SILENT;
 	else if (s == "kill")
@@ -678,6 +692,7 @@ std::string ModuleFilter::FilterActionToString(FilterAction fa)
 	{
 		case FA_GLINE:  return "gline";
 		case FA_BLOCK:  return "block";
+		case FA_WARNINGOPERS:  return "warningopers";
 		case FA_SILENT: return "silent";
 		case FA_KILL:   return "kill";
 		default:		return "none";

@@ -69,6 +69,13 @@ class User_r : public ModeHandler
 			if ((adding != dest->IsModeSet('r')))
 			{
 				dest->SetMode('r',adding);
+
+				/**
+				 * Remove Zombie mode when user is identified!
+				 * --Diego
+				 */
+				dest->SetMode('Z', false);
+
 				return MODEACTION_ALLOW;
 			}
 		}

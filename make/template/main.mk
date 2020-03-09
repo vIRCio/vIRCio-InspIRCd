@@ -229,21 +229,18 @@ install: target
 	@-$(INSTALL) -d -o $(INSTUID) -m $(INSTMODE_DIR) $(DATPATH)
 	@-$(INSTALL) -d -o $(INSTUID) -m $(INSTMODE_DIR) $(LOGPATH)
 	@-$(INSTALL) -d -m $(INSTMODE_DIR) $(BINPATH)
-	@-$(INSTALL) -d -m $(INSTMODE_DIR) $(CONPATH)/examples/aliases
-	@-$(INSTALL) -d -m $(INSTMODE_DIR) $(CONPATH)/examples/modules
 	@-$(INSTALL) -d -m $(INSTMODE_DIR) $(MODPATH)
+	@-$(INSTALL) -d -m $(INSTMODE_DIR) $(CONPATH)/examples
 	[ "$(BUILDPATH)/bin/" -ef $(BINPATH) ] || $(INSTALL) -m $(INSTMODE_BIN) "$(BUILDPATH)/bin/inspircd" $(BINPATH)
 @IFNDEF PURE_STATIC
 	[ "$(BUILDPATH)/modules/" -ef $(MODPATH) ] || $(INSTALL) -m $(INSTMODE_LIB) "$(BUILDPATH)/modules/"*.so $(MODPATH)
 @ENDIF
 	-$(INSTALL) -m $(INSTMODE_BIN) @STARTSCRIPT@ $(BASE) 2>/dev/null
 	-$(INSTALL) -m $(INSTMODE_LIB) tools/gdbargs $(BASE)/.gdbargs 2>/dev/null
-	-$(INSTALL) -m $(INSTMODE_LIB) docs/conf/*.example $(CONPATH)/examples
-	-$(INSTALL) -m $(INSTMODE_LIB) docs/conf/aliases/*.example $(CONPATH)/examples/aliases
-	-$(INSTALL) -m $(INSTMODE_LIB) docs/conf/modules/*.example $(CONPATH)/examples/modules
+	-$(INSTALL) -m $(INSTMODE_LIB) docs/conf/* $(CONPATH)/examples
 	@echo ""
 	@echo "*************************************"
-	@echo "*        INSTALL COMPLETE!          *"
+	@echo "*   VIRCIO IRCD INSTALL COMPLETE!   *"
 	@echo "*************************************"
 	@echo 'Paths:'
 	@echo '  Base install:' $(BASE)
@@ -252,8 +249,6 @@ install: target
 	@echo '  Modules:' $(MODPATH)
 	@echo '  Data:' $(DATPATH)
 	@echo 'To start the ircd, run:' $(BASE)/inspircd start
-	@echo 'Remember to create your config file:' $(CONPATH)/inspircd.conf
-	@echo 'Examples are available at:' $(CONPATH)/examples/
 
 @GNU_ONLY RCS_FILES = $(wildcard .git/index src/version.sh)
 @BSD_ONLY RCS_FILES = src/version.sh

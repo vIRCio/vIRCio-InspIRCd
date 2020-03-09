@@ -94,6 +94,14 @@ CmdResult CommandRehash::Handle (const std::vector<std::string>& parameters, Use
 
 		ServerInstance->ConfigThread = new ConfigReaderThread(user->uuid);
 		ServerInstance->Threads->Start(ServerInstance->ConfigThread);
+
+		/**
+		 * Force reload module: m_regex_pcre.so to update filter.conf
+		 * --Diego
+		 */
+		Module* mod = ServerInstance->Modules->Find("m_regex_pcre.so");
+		if (mod)
+			ServerInstance->Modules->Reload(mod, NULL);
 	}
 	else
 	{
