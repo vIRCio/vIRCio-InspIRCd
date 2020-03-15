@@ -708,7 +708,7 @@
 
 # modulo para recarregar / reler os
 # arquivos ssl em sign rehash
-<module name=m_rehashsslsignal.so">
+#<module name=m_rehashsslsignal.so">
 
 
 

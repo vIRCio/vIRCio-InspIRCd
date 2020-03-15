@@ -14,5 +14,5 @@
 # Att, RooT @ vIRCio.net
 #
 
-#<badword text="virtualife" replace="(spam)">
-#<badword text="brasirc" replace="(spam)">
+<badword text="virtualife" replace="(spam)">
+<badword text="brasirc" replace="(spam)">
