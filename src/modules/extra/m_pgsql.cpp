@@ -51,8 +51,9 @@ typedef std::map<std::string, SQLConn*> ConnMap;
  * WWRITE,	Connected/Working and wants write event
  * RREAD,	Resetting and wants read event
  * RWRITE,	Resetting and wants write event
+ * DEAD,	The connection has died
  */
-enum SQLstatus { CREAD, CWRITE, WREAD, WWRITE, RREAD, RWRITE };
+enum SQLstatus { CREAD, CWRITE, WREAD, WWRITE, RREAD, RWRITE, DEAD };
 
 class ReconnectTimer : public Timer
 {
@@ -178,6 +179,7 @@ class SQLConn : public SQLProvider, public EventHandler
 			q->OnError(err);
 			delete q;
 		}
+		Close();
 	}
 
 	virtual void HandleEvent(EventType et, int errornum)
@@ -265,6 +267,8 @@ class SQLConn : public SQLProvider, public EventHandler
 				status = CREAD;
 				return true;
 			case PGRES_POLLING_FAILED:
+				ServerInstance->SE->ChangeEventMask(this, FD_WANT_NO_READ | FD_WANT_NO_WRITE);
+				status = DEAD;
 				return false;
 			case PGRES_POLLING_OK:
 				ServerInstance->SE->ChangeEventMask(this, FD_WANT_POLL_READ | FD_WANT_NO_WRITE);
@@ -380,7 +384,7 @@ restart:
 		{
 			DoResetPoll();
 		}
-		else
+		else if (status == WREAD || status == WWRITE)
 		{
 			DoConnectedPoll();
 		}
@@ -488,7 +492,11 @@ restart:
 
 	void Close()
 	{
+		status = DEAD;
 		ServerInstance->SE->DelFd(this);
+
+		if (GetFd() != -1 && ServerInstance->SE->HasFd(GetFd()))
+			ServerInstance->SE->DelFd(this);
 
 		if(sql)
 		{
@@ -541,8 +549,13 @@ class ModulePgSQL : public Module
 			if (curr == connections.end())
 			{
 				SQLConn* conn = new SQLConn(this, i->second);
-				conns.insert(std::make_pair(id, conn));
-				ServerInstance->Modules->AddService(*conn);
+				if (conn->status != DEAD)
+				{
+					conns.insert(std::make_pair(id, conn));
+					ServerInstance->Modules->AddService(*conn);
+				}
+				// If the connection is dead it has already been queued for culling
+				// at the end of the main loop so we don't need to delete it here.
 			}
 			else
 			{
@@ -606,17 +619,18 @@ void ReconnectTimer::Tick(time_t time)
 
 void SQLConn::DelayReconnect()
 {
+	status = DEAD;
 	ModulePgSQL* mod = (ModulePgSQL*)(Module*)creator;
+
 	ConnMap::iterator it = mod->connections.find(conf->getString("id"));
 	if (it != mod->connections.end())
-	{
 		mod->connections.erase(it);
-		ServerInstance->GlobalCulls.AddItem((EventHandler*)this);
-		if (!mod->retimer)
-		{
-			mod->retimer = new ReconnectTimer(mod);
-			ServerInstance->Timers->AddTimer(mod->retimer);
-		}
+
+	ServerInstance->GlobalCulls.AddItem((EventHandler*)this);
+	if (!mod->retimer)
+	{
+		mod->retimer = new ReconnectTimer(mod);
+		ServerInstance->Timers->AddTimer(mod->retimer);
 	}
 }
 
