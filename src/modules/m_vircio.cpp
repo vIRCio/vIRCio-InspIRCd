@@ -35,68 +35,89 @@
 #include "inspircd.h"
 #include <stdarg.h>
 
+// Define macro para enviar  mensagem ao user "Zombie"
 #define ZOMBIE_MESSAGE(source) source->WriteServ("NOTICE %s :*** \002Atenção:\002 É necessário que você registre ou identifique-se junto ao NickServ para poder entrar nos canais ou falar com alguém. Para registrar seu nick, digite: \002/NICKSERV REGISTER senha email\002", source->nick.c_str());
+
+// Define serviço NickServ
 #define NICKSERV_NAME "nickserv"
+
+// Define o canal para os "Zombies" entrar
 #define ZOMBIE_CHAN "#vircio"
-/**
- * User mode +Z - mark a user as Zombie / Gringo
- */
+
+// Classe que representa user mode +Z (Zombie/Gringo)
 class User_Z : public ModeHandler
 {
-
 public:
-	User_Z(Module* Creator) : ModeHandler(Creator, "u_services_zombie", 'Z', PARAM_NONE, MODETYPE_USER) { }
+    // Construtor da classe que inicia o modo +Z
+    User_Z(Module* Creator) : ModeHandler(Creator, "u_services_zombie", 'Z', PARAM_NONE, MODETYPE_USER) { }
 
-	ModeAction OnModeChange(User* source, User* dest, Channel* channel, std::string &parameter, bool adding)
-	{
-		if (!IS_LOCAL(source))
-		{
-			if (dest->IsModeSet('r'))
-				return MODEACTION_DENY;
+    // Método chamado quando o modo +Z é alterado no user
+    ModeAction OnModeChange(User* source, User* dest, Channel* channel, std::string &parameter, bool adding)
+    {
+        // Verifica se o comando é originado de outro servidor e não de um usuário local
+        if (!IS_LOCAL(source))
+        {
+            // Impede a definição do modo +Z em users já registrados (+r)
+            if (dest->IsModeSet('r'))
+                return MODEACTION_DENY;
 
-			if ((adding != dest->IsModeSet('Z')))
-			{
-				ZOMBIE_MESSAGE(dest);
-				dest->SetMode('Z',adding);
+            // Verifica se o modo +Z está sendo adicionado e o usuário ainda não possui esse modo
+            if ((adding != dest->IsModeSet('Z')))
+            {
+                // Envia mensagem de aviso ao usuário
+                ZOMBIE_MESSAGE(dest);
+                // Define o modo +Z para o usuário
+                dest->SetMode('Z', adding);
 
+                // Se o usuário for local, força entrada no canal para "Zombies"
                 if (IS_LOCAL(dest)) {
                     Channel::JoinUser(dest, ZOMBIE_CHAN, false, "", false, ServerInstance->Time());
                 }
 
-				return MODEACTION_ALLOW;
-			}
-		}
-		else
-		{
-			source->WriteNumeric(500, "%s :Only a server may modify the +Z user mode", source->nick.c_str());
-		}
-		return MODEACTION_DENY;
-	}
+                return MODEACTION_ALLOW;
+            }
+        }
+        else
+        {
+            // Se o user tentar definir manualmente o modo +Z, retorna o erro de que apenas o servidor pode modificar esse modo
+            source->WriteNumeric(500, "%s :Only a server may modify the +Z user mode", source->nick.c_str());
+        }
+        return MODEACTION_DENY;
+    }
 };
 
+// Classe principal do módulo que define e gerencia o modo +Z
 class ModuleVircio : public Module
 {
-	User_Z user_Z;
+    // Instância do modo de usuário +Z
+    User_Z user_Z;
 
 public:
-	ModuleVircio() : user_Z(this)
-	{
-	}
+    // Construtor da classe que inicializa a instância do modo +Z
+    ModuleVircio() : user_Z(this)
+    {
+    }
 
-	void init()
-	{
-		ServiceProvider* providerlist[] = { &user_Z};
-		ServerInstance->Modules->AddServices(providerlist, sizeof(providerlist)/sizeof(ServiceProvider*));
+    // Método de inicialização do módulo
+    void init()
+    {
+        // Registra o modo +Z no servidor
+        ServiceProvider* providerlist[] = { &user_Z};
+        ServerInstance->Modules->AddServices(providerlist, sizeof(providerlist)/sizeof(ServiceProvider*));
 
-		Implementation eventlist[] = { I_OnWhois, I_OnUserPreMessage, I_OnUserPreNotice, I_OnUserPreJoin };
-		ServerInstance->Modules->Attach(eventlist, this, sizeof(eventlist)/sizeof(Implementation));
-	}
+        // Anexa os eventos ao módulo
+        Implementation eventlist[] = { I_OnWhois, I_OnUserPreMessage, I_OnUserPreNotice, I_OnUserPreJoin };
+        ServerInstance->Modules->Attach(eventlist, this, sizeof(eventlist)/sizeof(Implementation));
+    }
 
-	ModResult OnUserPreMessage(User *user, void *dest, int target_type, std::string &text, char status, CUList &exempt_list)
-	{
-		if(user->IsModeSet('Z')) {
+    // Evento chamado antes de um usuário enviar uma mensagem
+    ModResult OnUserPreMessage(User *user, void *dest, int target_type, std::string &text, char status, CUList &exempt_list)
+    {
+        // Verifica se o usuário está no modo +Z
+        if(user->IsModeSet('Z')) {
             std::string nickChan = "";
 
+            // Identifica o destino da mensagem, se é um canal ou outro usuário
             if (target_type == TYPE_CHANNEL) {
                 Channel *d = (Channel *) dest;
                 nickChan = d->name.c_str();
@@ -105,48 +126,60 @@ public:
                 nickChan = d->nick.c_str();
             }
 
+            // Converte o destino para minúsculas para comparação
             std::transform( nickChan.begin(), nickChan.end(), nickChan.begin(), ::tolower );
 
-			if(nickChan == NICKSERV_NAME || nickChan == ZOMBIE_CHAN)
-				return MOD_RES_PASSTHRU;
-
-			ZOMBIE_MESSAGE(user);
-			return MOD_RES_DENY;
-		}
-
-		return MOD_RES_PASSTHRU;
-	}
-
-	ModResult OnUserPreNotice(User* user,void* dest,int target_type, std::string &text, char status, CUList &exempt_list)
-	{
-		if(user->IsModeSet('Z')) {
-			ZOMBIE_MESSAGE(user);
-			return MOD_RES_DENY;
-		}
-
-		return MOD_RES_PASSTHRU;
-	}
-
-    ModResult OnUserPreJoin(User* user, Channel* chan, const char* cname, std::string &privs, const std::string &keygiven) {
-        if(user->IsModeSet('Z')) {
-            std::string channame = cname;
-            std::transform( channame.begin(), channame.end(), channame.begin(), ::tolower );
-
-            if(channame == ZOMBIE_CHAN)
+            // Permite mensagens apenas para o NickServ ou o canal ZOMBIE_CHAN
+            if(nickChan == NICKSERV_NAME || nickChan == ZOMBIE_CHAN)
                 return MOD_RES_PASSTHRU;
 
-			ZOMBIE_MESSAGE(user);
+            // Se o destino for diferente, bloqueia a mensagem e envia um aviso
+            ZOMBIE_MESSAGE(user);
             return MOD_RES_DENY;
         }
 
         return MOD_RES_PASSTHRU;
-	}
+    }
 
+    // Evento chamado antes de um usuário enviar um aviso (notice)
+    ModResult OnUserPreNotice(User* user, void* dest, int target_type, std::string &text, char status, CUList &exempt_list)
+    {
+        // Se o usuário está no modo +Z, bloqueia o envio do aviso e envia uma mensagem de alerta
+        if(user->IsModeSet('Z')) {
+            ZOMBIE_MESSAGE(user);
+            return MOD_RES_DENY;
+        }
 
-	Version GetVersion()
-	{
-		return Version("Provides support for VIRCIO Network user modes", VF_OPTCOMMON|VF_VENDOR);
-	}
+        return MOD_RES_PASSTHRU;
+    }
+
+    // Evento chamado antes de um usuário entrar em um canal
+    ModResult OnUserPreJoin(User* user, Channel* chan, const char* cname, std::string &privs, const std::string &keygiven)
+    {
+        // Verifica se o usuário está no modo +Z
+        if(user->IsModeSet('Z')) {
+            std::string channame = cname;
+            // Converte o nome do canal para minúsculas para comparação
+            std::transform( channame.begin(), channame.end(), channame.begin(), ::tolower );
+
+            // Permite a entrada apenas no canal ZOMBIE_CHAN
+            if(channame == ZOMBIE_CHAN)
+                return MOD_RES_PASSTHRU;
+
+            // Se o canal for diferente, bloqueia a entrada e envia um aviso
+            ZOMBIE_MESSAGE(user);
+            return MOD_RES_DENY;
+        }
+
+        return MOD_RES_PASSTHRU;
+    }
+
+    // Método que retorna a versão do módulo
+    Version GetVersion()
+    {
+        return Version("Fornece suporte aos modos de usuário da rede vIRCio", VF_OPTCOMMON|VF_VENDOR);
+    }
 };
 
+// Macro para inicializar o módulo no InspIRCd
 MODULE_INIT(ModuleVircio)
