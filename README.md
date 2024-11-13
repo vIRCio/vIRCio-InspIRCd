@@ -2,12 +2,14 @@
 
 vIRCio-InspIRCd é o IRCd utilizado na Rede vIRCio.net.
 
-Trata-se de um Fork do projeto https://github.com/vIRCio/vIRCio-InspIRCd com alguns módulos escritos para serem utilizados na rede vIRCio.
+Trata-se de um Fork do projeto https://github.com/inspircd/inspircd com alguns módulos escritos para serem utilizados na rede vIRCio.
+
+OBS.: A versão 2 do inspircd encontra-se obsoleta desde 30 de Dezembro de 2020.
 
 
 ## Instalação
 
-Leia o arquivo instalacao.txt
+Leia o arquivo instalacao.md
 
 
 ## About
