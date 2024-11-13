@@ -1,11 +1,15 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
- *   Copyright (C) 2004-2006, 2008 Craig Edwards <craigedwards@brainbox.cc>
- *   Copyright (C) 2008 Thomas Stagner <aquanight@inspircd.org>
+ *   Copyright (C) 2019 Matt Schatz <genius3000@g3k.solutions>
+ *   Copyright (C) 2017, 2020-2024 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
+ *   Copyright (C) 2012 DjSlash <djslash@djslash.org>
+ *   Copyright (C) 2012 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2009 Daniel De Graaf <danieldg@inspircd.org>
+ *   Copyright (C) 2008 Thomas Stagner <aquanight@gmail.com>
  *   Copyright (C) 2007 Dennis Friis <peavey@inspircd.org>
- *   Copyright (C) 2005, 2007 Robin Burchell <robin+git@viroteck.net>
- *   Copyright (C) 2006 Oliver Lupton <oliverlupton@gmail.com>
+ *   Copyright (C) 2006 Craig Edwards <brain@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -22,82 +26,74 @@
 
 
 #include "inspircd.h"
+#include "modules/exemption.h"
+#include "modules/extban.h"
+#include "numerichelper.h"
 
-/* $ModDesc: Provides channel mode +c to block color */
-
-/** Handles the +c channel mode
- */
-class BlockColor : public SimpleChannelModeHandler
+class ModuleBlockColor final
+	: public Module
 {
- public:
-	BlockColor(Module* Creator) : SimpleChannelModeHandler(Creator, "blockcolor", 'c') { }
-};
+private:
+	ExtBan::Acting extban;
+	CheckExemption::EventProvider exemptionprov;
+	SimpleChannelMode bc;
 
-class ModuleBlockColor : public Module
-{
-	BlockColor bc;
- public:
-
-	ModuleBlockColor() : bc(this)
+public:
+	ModuleBlockColor()
+		: Module(VF_VENDOR, "Adds channel mode c (blockcolor) which allows channels to block messages which contain IRC formatting codes.")
+		, extban(this, "blockcolor", 'c')
+		, exemptionprov(this)
+		, bc(this, "blockcolor", 'c')
 	{
 	}
 
-	void init()
+	ModResult OnUserPreMessage(User* user, MessageTarget& target, MessageDetails& details) override
 	{
-		ServerInstance->Modules->AddService(bc);
-		Implementation eventlist[] = { I_OnUserPreMessage, I_OnUserPreNotice, I_On005Numeric };
-		ServerInstance->Modules->Attach(eventlist, this, sizeof(eventlist)/sizeof(Implementation));
-	}
-
-	virtual void On005Numeric(std::string &output)
-	{
-		ServerInstance->AddExtBanChar('c');
-	}
-
-	virtual ModResult OnUserPreMessage(User* user,void* dest,int target_type, std::string &text, char status, CUList &exempt_list)
-	{
-		if ((target_type == TYPE_CHANNEL) && (IS_LOCAL(user)))
+		if ((target.type == MessageTarget::TYPE_CHANNEL) && (IS_LOCAL(user)))
 		{
-			Channel* c = (Channel*)dest;
-			ModResult res = ServerInstance->OnCheckExemption(user,c,"blockcolor");
+			auto* c = target.Get<Channel>();
 
+			ModResult res = exemptionprov.Check(user, c, "blockcolor");
 			if (res == MOD_RES_ALLOW)
 				return MOD_RES_PASSTHRU;
 
-			if (!c->GetExtBanStatus(user, 'c').check(!c->IsModeSet('c')))
+			bool modeset = c->IsModeSet(bc);
+			if (!extban.GetStatus(user, c).check(!modeset))
 			{
-				for (std::string::iterator i = text.begin(); i != text.end(); i++)
+				std::string_view ctcpname; // Unused.
+				std::string_view message;
+				if (!details.IsCTCP(ctcpname, message))
+					message = details.text;
+
+				auto it = std::find_if(message.begin(), message.end(), [](const char& chr)
 				{
-					switch (*i)
+					switch (chr)
 					{
-						case 2:
-						case 3:
-						case 15:
-						case 21:
-						case 22:
-						case 31:
-							user->WriteNumeric(404, "%s %s :Can't send colors to channel (+c set)",user->nick.c_str(), c->name.c_str());
-							return MOD_RES_DENY;
-						break;
+						case '\x02': // Bold
+						case '\x03': // Color
+						case '\x04': // Hex Color
+						case '\x1D': // Italic
+						case '\x11': // Monospace
+						case '\x16': // Reverse
+						case '\x1E': // Strikethrough
+						case '\x1F': // Underline
+						case '\x0F': // Reset
+							return true;
 					}
+					return false;
+				});
+
+				if (it != message.end())
+				{
+					if (modeset)
+						user->WriteNumeric(Numerics::CannotSendTo(c, "messages containing formatting characters", &bc));
+					else
+						user->WriteNumeric(Numerics::CannotSendTo(c, "messages containing formatting characters", extban));
+					return MOD_RES_DENY;
 				}
 			}
 		}
 		return MOD_RES_PASSTHRU;
-	}
-
-	virtual ModResult OnUserPreNotice(User* user,void* dest,int target_type, std::string &text, char status, CUList &exempt_list)
-	{
-		return OnUserPreMessage(user,dest,target_type,text,status,exempt_list);
-	}
-
-	virtual ~ModuleBlockColor()
-	{
-	}
-
-	virtual Version GetVersion()
-	{
-		return Version("Provides channel mode +c to block color",VF_VENDOR);
 	}
 };
 

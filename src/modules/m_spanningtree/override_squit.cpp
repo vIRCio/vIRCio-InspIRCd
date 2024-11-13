@@ -1,7 +1,13 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
- *   Copyright (C) 2007 Craig Edwards <craigedwards@brainbox.cc>
+ *   Copyright (C) 2013, 2018, 2023 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2013 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
+ *   Copyright (C) 2009 Daniel De Graaf <danieldg@inspircd.org>
+ *   Copyright (C) 2008 Thomas Stagner <aquanight@gmail.com>
+ *   Copyright (C) 2008 Robin Burchell <robin+git@viroteck.net>
+ *   Copyright (C) 2007 Craig Edwards <brain@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -17,48 +23,38 @@
  */
 
 
-/* $ModDesc: Provides a spanning tree server link protocol */
-
 #include "inspircd.h"
 #include "socket.h"
-#include "xline.h"
 
 #include "main.h"
 #include "utils.h"
 #include "treeserver.h"
 #include "treesocket.h"
 
-/* $ModDep: m_spanningtree/main.h m_spanningtree/utils.h m_spanningtree/treeserver.h m_spanningtree/treesocket.h */
-
-ModResult ModuleSpanningTree::HandleSquit(const std::vector<std::string>& parameters, User* user)
+ModResult ModuleSpanningTree::HandleSquit(const CommandBase::Params& parameters, User* user)
 {
 	TreeServer* s = Utils->FindServerMask(parameters[0]);
 	if (s)
 	{
-		if (s == Utils->TreeRoot)
+		if (s->IsRoot())
 		{
-			user->WriteServ("NOTICE %s :*** SQUIT: Foolish mortal, you cannot make a server SQUIT itself! (%s matches local server name)",user->nick.c_str(),parameters[0].c_str());
+			user->WriteNotice("*** SQUIT: Foolish mortal, you cannot make a server SQUIT itself! (" + parameters[0] + " matches local server name)");
 			return MOD_RES_DENY;
 		}
 
-		TreeSocket* sock = s->GetSocket();
-
-		if (sock)
+		if (s->IsLocal())
 		{
-			ServerInstance->SNO->WriteToSnoMask('l',"SQUIT: Server \002%s\002 removed from network by %s",parameters[0].c_str(),user->nick.c_str());
-			sock->Squit(s,"Server quit by " + user->GetFullRealHost());
-			ServerInstance->SE->DelFd(sock);
-			sock->Close();
+			ServerInstance->SNO.WriteToSnoMask('l', "SQUIT: Server \002{}\002 removed from network by {}", parameters[0], user->nick);
+			s->SQuit("Server quit by " + user->GetRealMask());
 		}
 		else
 		{
-			user->WriteServ("NOTICE %s :*** SQUIT may not be used to remove remote servers. Please use RSQUIT instead.",user->nick.c_str());
+			user->WriteNotice("*** SQUIT may not be used to remove remote servers. Please use RSQUIT instead.");
 		}
 	}
 	else
 	{
-		 user->WriteServ("NOTICE %s :*** SQUIT: The server \002%s\002 does not exist on the network.",user->nick.c_str(),parameters[0].c_str());
+		user->WriteNotice("*** SQUIT: The server \002" + parameters[0] + "\002 does not exist on the network.");
 	}
 	return MOD_RES_DENY;
 }
-

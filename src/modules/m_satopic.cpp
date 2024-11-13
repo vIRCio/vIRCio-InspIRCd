@@ -1,7 +1,14 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
- *   Copyright (C) 2008 Oliver Lupton <oliverlupton@gmail.com>
+ *   Copyright (C) 2019-2024 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2017 B00mX0r <b00mx0r@aureus.pw>
+ *   Copyright (C) 2016 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
+ *   Copyright (C) 2009 Uli Schlachter <psychon@znc.in>
+ *   Copyright (C) 2009 Daniel De Graaf <danieldg@inspircd.org>
+ *   Copyright (C) 2008 Robin Burchell <robin+git@viroteck.net>
+ *   Copyright (C) 2008 Oliver Lupton <om@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -17,66 +24,61 @@
  */
 
 
-/* $ModDesc: Provides a SATOPIC command */
-
 #include "inspircd.h"
+#include "numerichelper.h"
 
-/** Handle /SATOPIC
- */
-class CommandSATopic : public Command
+class CommandSATopic final
+	: public Command
 {
- public:
-	CommandSATopic(Module* Creator) : Command(Creator,"SATOPIC", 2, 2)
+public:
+	CommandSATopic(Module* Creator)
+		: Command(Creator, "SATOPIC", 2, 2)
 	{
-		flags_needed = 'o'; Penalty = 0; syntax = "<target> <topic>";
+		access_needed = CmdAccess::OPERATOR;
+		allow_empty_last_param = true;
+		syntax = { "<channel> :<topic>" };
 	}
 
-	CmdResult Handle (const std::vector<std::string>& parameters, User *user)
+	CmdResult Handle(User* user, const Params& parameters) override
 	{
 		/*
 		 * Handles a SATOPIC request. Notifies all +s users.
-	 	 */
-		Channel* target = ServerInstance->FindChan(parameters[0]);
+		 */
+		auto* target = ServerInstance->Channels.Find(parameters[0]);
 
 		if(target)
 		{
-			std::string newTopic = parameters[1];
+			const std::string newTopic(parameters[1], 0, ServerInstance->Config->Limits.MaxTopic);
+			if (target->topic == newTopic)
+			{
+				user->WriteNotice("The topic on {} is already what ou are trying to change it to.", target->name);
+				return CmdResult::SUCCESS;
+			}
 
-			// 3rd parameter overrides access checks
-			target->SetTopic(user, newTopic, true);
-			ServerInstance->SNO->WriteGlobalSno('a', user->nick + " used SATOPIC on " + target->name + ", new topic: " + newTopic);
+			target->SetTopic(user, newTopic, ServerInstance->Time(), nullptr);
+			ServerInstance->SNO.WriteGlobalSno('a', user->nick + " used SATOPIC on " + target->name + ", new topic: " + newTopic);
 
-			return CMD_SUCCESS;
+			return CmdResult::SUCCESS;
 		}
 		else
 		{
-			user->WriteNumeric(401, "%s %s :No such nick/channel", user->nick.c_str(), parameters[0].c_str());
-			return CMD_FAILURE;
+			user->WriteNumeric(Numerics::NoSuchChannel(parameters[0]));
+			return CmdResult::FAILURE;
 		}
 	}
 };
 
-class ModuleSATopic : public Module
+class ModuleSATopic final
+	: public Module
 {
+private:
 	CommandSATopic cmd;
- public:
+
+public:
 	ModuleSATopic()
-	: cmd(this)
+		: Module(VF_VENDOR, "Adds the /SATOPIC command which allows server operators to change the topic of a channel that they would not otherwise have the privileges to change.")
+		, cmd(this)
 	{
-	}
-
-	void init()
-	{
-		ServerInstance->Modules->AddService(cmd);
-	}
-
-	virtual ~ModuleSATopic()
-	{
-	}
-
-	virtual Version GetVersion()
-	{
-		return Version("Provides a SATOPIC command", VF_VENDOR);
 	}
 };
 

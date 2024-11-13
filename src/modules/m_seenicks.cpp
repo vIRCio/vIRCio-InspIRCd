@@ -1,9 +1,11 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
+ *   Copyright (C) 2019-2021, 2023 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
+ *   Copyright (C) 2009 Daniel De Graaf <danieldg@inspircd.org>
+ *   Copyright (C) 2007-2008 Craig Edwards <brain@inspircd.org>
  *   Copyright (C) 2007 Dennis Friis <peavey@inspircd.org>
- *   Copyright (C) 2007 Robin Burchell <robin+git@viroteck.net>
- *   Copyright (C) 2007 Craig Edwards <craigedwards@brainbox.cc>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -21,26 +23,23 @@
 
 #include "inspircd.h"
 
-/* $ModDesc: Provides support for seeing local and remote nickchanges via snomasks 'n' and 'N'. */
-
-class ModuleSeeNicks : public Module
+class ModuleSeeNicks final
+	: public Module
 {
- public:
-	void init()
+public:
+	ModuleSeeNicks()
+		: Module(VF_VENDOR, "Sends a notice to snomasks n (local) and N (remote) when a user changes their nickname.")
 	{
-		ServerInstance->SNO->EnableSnomask('n',"NICK");
-		Implementation eventlist[] = { I_OnUserPostNick };
-		ServerInstance->Modules->Attach(eventlist, this, sizeof(eventlist)/sizeof(Implementation));
 	}
 
-	virtual Version GetVersion()
+	void init() override
 	{
-		return Version("Provides support for seeing local and remote nickchanges via snomasks", VF_VENDOR);
+		ServerInstance->SNO.EnableSnomask('n', "NICK");
 	}
 
-	virtual void OnUserPostNick(User* user, const std::string &oldnick)
+	void OnUserPostNick(User* user, const std::string& oldnick) override
 	{
-		ServerInstance->SNO->WriteToSnoMask(IS_LOCAL(user) ? 'n' : 'N',"User %s changed their nickname to %s", oldnick.c_str(), user->nick.c_str());
+		ServerInstance->SNO.WriteToSnoMask(IS_LOCAL(user) ? 'n' : 'N', "User {} changed their nickname to {}", oldnick, user->nick);
 	}
 };
 

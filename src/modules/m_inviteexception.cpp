@@ -1,11 +1,12 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
- *   Copyright (C) 2009 Daniel De Graaf <danieldg@inspircd.org>
- *   Copyright (C) 2006-2008 Craig Edwards <craigedwards@brainbox.cc>
+ *   Copyright (C) 2017-2023 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2012-2013 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
+ *   Copyright (C) 2009-2010 Daniel De Graaf <danieldg@inspircd.org>
  *   Copyright (C) 2007 Dennis Friis <peavey@inspircd.org>
- *   Copyright (C) 2007 Robin Burchell <robin+git@viroteck.net>
- *   Copyright (C) 2006 Oliver Lupton <oliverlupton@gmail.com>
+ *   Copyright (C) 2006 Craig Edwards <brain@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -22,61 +23,79 @@
 
 
 #include "inspircd.h"
-#include "u_listmode.h"
+#include "listmode.h"
+#include "modules/extban.h"
+#include "modules/isupport.h"
 
-/* $ModDesc: Provides support for the +I channel mode */
-/* $ModDep: ../../include/u_listmode.h */
-
-/*
- * Written by Om <om@inspircd.org>, April 2005.
- * Based on m_exception, which was originally based on m_chanprotect and m_silence
- *
- * The +I channel mode takes a nick!ident@host, glob patterns allowed,
- * and if a user matches an entry on the +I list then they can join the channel,
- * ignoring if +i is set on the channel
- * Now supports CIDR and IP addresses -- Brain
- */
-
-/** Handles channel mode +I
- */
-class InviteException : public ListModeBase
+enum
 {
- public:
-	InviteException(Module* Creator) : ListModeBase(Creator, "invex", 'I', "End of Channel Invite Exception List", 346, 347, true) { }
+	// From RFC 2812.
+	RPL_INVEXLIST = 346,
+	RPL_ENDOFINVEXLIST = 347
 };
 
-class ModuleInviteException : public Module
+class InviteException final
+	: public ListModeBase
 {
+private:
+	ExtBan::ManagerRef extbanmgr;
+
+public:
+	InviteException(Module* Creator)
+		: ListModeBase(Creator, "invex", 'I', RPL_INVEXLIST, RPL_ENDOFINVEXLIST)
+		, extbanmgr(Creator)
+	{
+		syntax = "<mask>";
+	}
+
+	bool CompareEntry(const std::string& entry, const std::string& value) const override
+	{
+		if (extbanmgr)
+		{
+			auto res = extbanmgr->CompareEntry(this, entry, value);
+			if (res != ExtBan::Comparison::NOT_AN_EXTBAN)
+				return res == ExtBan::Comparison::MATCH;
+		}
+		return irc::equals(entry, value);
+	}
+
+	bool ValidateParam(LocalUser* user, Channel* channel, std::string& parameter) override
+	{
+		if (!extbanmgr || !extbanmgr->Canonicalize(parameter))
+			ModeParser::CleanMask(parameter);
+		return true;
+	}
+};
+
+class ModuleInviteException final
+	: public Module
+	, public ISupport::EventListener
+{
+private:
 	bool invite_bypass_key;
 	InviteException ie;
+
 public:
-	ModuleInviteException() : ie(this)
+	ModuleInviteException()
+		: Module(VF_VENDOR, "Adds channel mode I (invex) which allows channel operators to exempt user masks from channel mode i (inviteonly).")
+		, ISupport::EventListener(this)
+		, ie(this)
 	{
 	}
 
-	void init()
+	void OnBuildISupport(ISupport::TokenMap& tokens) override
 	{
-		ServerInstance->Modules->AddService(ie);
-
-		OnRehash(NULL);
-		ie.DoImplements(this);
-		Implementation eventlist[] = { I_On005Numeric, I_OnCheckInvite, I_OnCheckKey, I_OnRehash };
-		ServerInstance->Modules->Attach(eventlist, this, sizeof(eventlist)/sizeof(Implementation));
+		tokens["INVEX"] = ConvToStr(ie.GetModeChar());
 	}
 
-	void On005Numeric(std::string &output)
+	ModResult OnCheckInvite(User* user, Channel* chan) override
 	{
-		output.append(" INVEX=I");
-	}
-
-	ModResult OnCheckInvite(User* user, Channel* chan)
-	{
-		modelist* list = ie.extItem.get(chan);
+		ListModeBase::ModeList* list = ie.GetList(chan);
 		if (list)
 		{
-			for (modelist::iterator it = list->begin(); it != list->end(); it++)
+			for (const auto& entry : *list)
 			{
-				if (chan->CheckBan(user, it->mask))
+				if (chan->CheckBan(user, entry.mask))
 				{
 					return MOD_RES_ALLOW;
 				}
@@ -86,27 +105,17 @@ public:
 		return MOD_RES_PASSTHRU;
 	}
 
-	ModResult OnCheckKey(User* user, Channel* chan, const std::string& key)
+	ModResult OnCheckKey(User* user, Channel* chan, const std::string& key) override
 	{
 		if (invite_bypass_key)
 			return OnCheckInvite(user, chan);
 		return MOD_RES_PASSTHRU;
 	}
 
-	void OnSyncChannel(Channel* chan, Module* proto, void* opaque)
+	void ReadConfig(ConfigStatus& status) override
 	{
-		ie.DoSyncChannel(chan, proto, opaque);
-	}
-
-	void OnRehash(User* user)
-	{
-		invite_bypass_key = ServerInstance->Config->ConfValue("inviteexception")->getBool("bypasskey", true);
 		ie.DoRehash();
-	}
-
-	Version GetVersion()
-	{
-		return Version("Provides support for the +I channel mode", VF_VENDOR);
+		invite_bypass_key = ServerInstance->Config->ConfValue("inviteexception")->getBool("bypasskey", true);
 	}
 };
 

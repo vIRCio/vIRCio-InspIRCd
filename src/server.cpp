@@ -1,8 +1,12 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
+ *   Copyright (C) 2020-2024 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2013-2014 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
+ *   Copyright (C) 2012 ChrisTX <xpipe@hotmail.de>
  *   Copyright (C) 2009 Daniel De Graaf <danieldg@inspircd.org>
- *   Copyright (C) 2008 Craig Edwards <craigedwards@brainbox.cc>
+ *   Copyright (C) 2008 Craig Edwards <brain@inspircd.org>
  *   Copyright (C) 2007-2008 Robin Burchell <robin+git@viroteck.net>
  *   Copyright (C) 2007 Dennis Friis <peavey@inspircd.org>
  *
@@ -20,24 +24,26 @@
  */
 
 
-#include <signal.h>
-#include "exitcodes.h"
 #include "inspircd.h"
-#include "inspircd_version.h"
 
-void InspIRCd::SignalHandler(int signal)
+void InspIRCd::HandleSignal(sig_atomic_t signal)
 {
-#ifdef _WIN32
-	if (signal == SIGTERM)
-#else
-	if (signal == SIGHUP)
+	switch (signal)
 	{
-		Rehash("Caught SIGHUP");
-	}
-	else if (signal == SIGTERM)
+		case SIGTERM:
+			Exit(EXIT_FAILURE);
+
+#ifndef _WIN32
+		case SIGHUP:
+			ServerInstance->SNO.WriteGlobalSno('a', "Rehashing due to SIGHUP");
+			Rehash();
+			break;
 #endif
-	{
-		Exit(signal);
+
+		default:
+			ServerInstance->Logs.Debug("SIGNAL", "BUG: InspIRCd::SignalHandler: unknown signal: {}",
+				signal);
+			break;
 	}
 }
 
@@ -46,55 +52,37 @@ void InspIRCd::Exit(int status)
 #ifdef _WIN32
 	SetServiceStopped(status);
 #endif
-	this->SendError("Exiting with status " + ConvToStr(status) + " (" + std::string(ExitCodes[status]) + ")");
 	this->Cleanup();
+	ServerInstance = nullptr;
 	delete this;
-	ServerInstance = NULL;
-	exit (status);
+	exit(status);
 }
 
-void RehashHandler::Call(const std::string &reason)
+void InspIRCd::Rehash(const std::string& uuid)
 {
-	ServerInstance->SNO->WriteToSnoMask('a', "Rehashing config file %s %s",ServerConfig::CleanFilename(ServerInstance->ConfigFileName.c_str()), reason.c_str());
-	ServerInstance->RehashUsersAndChans();
-	FOREACH_MOD(I_OnGarbageCollect, OnGarbageCollect());
-	if (!ServerInstance->ConfigThread)
+	if (!ConfigThread)
 	{
-		ServerInstance->ConfigThread = new ConfigReaderThread("");
-		ServerInstance->Threads->Start(ServerInstance->ConfigThread);
+		ConfigThread = new ConfigReaderThread(uuid);
+		ConfigThread->Start();
 	}
 }
 
-std::string InspIRCd::GetVersionString(bool operstring)
+std::string UIDGenerator::GenerateSID(const std::string& servername, const std::string& serverdesc)
 {
-	char versiondata[MAXBUF];
-	if (operstring)
-	{
-		std::string sename = SE->GetName();
-		snprintf(versiondata,MAXBUF,"%s %s :%s [%s,%s,%s]",VERSION, Config->ServerName.c_str(), SYSTEM,REVISION, sename.c_str(), Config->sid.c_str());
-	}
-	else
-		snprintf(versiondata,MAXBUF,"%s %s :%s",BRANCH,Config->ServerName.c_str(),Config->CustomVersion.c_str());
-	return versiondata;
+	unsigned int sid = 0;
+
+	for (const auto chr : servername)
+		sid = 5 * sid + chr;
+
+	for (const auto chr : serverdesc)
+		sid = 5 * sid + chr;
+
+	std::string sidstr = ConvToStr(sid % 1000);
+	sidstr.insert(0, 3 - sidstr.length(), '0');
+	return sidstr;
 }
 
-const char InspIRCd::LogHeader[] =
-	"Log started for " VERSION " (" REVISION ", " MODULE_INIT_STR ")"
-	" - compiled on " SYSTEM;
-
-void InspIRCd::BuildISupport()
-{
-	// the neatest way to construct the initial 005 numeric, considering the number of configure constants to go in it...
-	std::stringstream v;
-	v << "WALLCHOPS WALLVOICES MODES=" << Config->Limits.MaxModes << " CHANTYPES=# PREFIX=" << this->Modes->BuildPrefixes() << " MAP MAXCHANNELS=" << Config->MaxChans << " MAXBANS=60 VBANLIST NICKLEN=" << Config->Limits.NickMax;
-	v << " CASEMAPPING=rfc1459 STATUSMSG=" << Modes->BuildPrefixes(false) << " CHARSET=ascii TOPICLEN=" << Config->Limits.MaxTopic << " KICKLEN=" << Config->Limits.MaxKick << " MAXTARGETS=" << Config->MaxTargets;
-	v << " AWAYLEN=" << Config->Limits.MaxAway << " CHANMODES=" << this->Modes->GiveModeList(MASK_CHANNEL) << " FNC NETWORK=" << Config->Network << " MAXPARA=32 ELIST=MU" << " CHANNELLEN=" << Config->Limits.ChanMax;
-	Config->data005 = v.str();
-	FOREACH_MOD(I_On005Numeric,On005Numeric(Config->data005));
-	Config->Update005();
-}
-
-void InspIRCd::IncrementUID(int pos)
+void UIDGenerator::IncrementUID(unsigned int pos)
 {
 	/*
 	 * Okay. The rules for generating a UID go like this...
@@ -103,85 +91,83 @@ void InspIRCd::IncrementUID(int pos)
 	 * A again, in an iterative fashion.. so..
 	 * AAA9 -> AABA, and so on. -- w00t
 	 */
-	if ((pos == 3) && (current_uid[3] == '9'))
+
+	// If we hit Z, wrap around to 0.
+	if (current_uid[pos] == 'Z')
 	{
-		// At pos 3, if we hit '9', we've run out of available UIDs, and need to reset to AAA..AAA.
-		for (int i = 3; i < UUID_LENGTH-1; i++)
+		current_uid[pos] = '0';
+	}
+	else if (current_uid[pos] == '9')
+	{
+		/*
+		 * Or, if we hit 9, wrap around to pos = 'A' and (pos - 1)++,
+		 * e.g. A9 -> BA -> BB ..
+		 */
+		current_uid[pos] = 'A';
+		if (pos == 3)
 		{
-			current_uid[i] = 'A';
+			// At pos 3, if we hit '9', we've run out of available UIDs, and reset to AAA..AAA.
+			return;
 		}
+		this->IncrementUID(pos - 1);
 	}
 	else
 	{
-		// If we hit Z, wrap around to 0.
-		if (current_uid[pos] == 'Z')
-		{
-			current_uid[pos] = '0';
-		}
-		else if (current_uid[pos] == '9')
-		{
-			/*
-			 * Or, if we hit 9, wrap around to pos = 'A' and (pos - 1)++,
-			 * e.g. A9 -> BA -> BB ..
-			 */
-			current_uid[pos] = 'A';
-			this->IncrementUID(pos - 1);
-		}
-		else
-		{
-			// Anything else, nobody gives a shit. Just increment.
-			current_uid[pos]++;
-		}
+		// Anything else, nobody gives a shit. Just increment.
+		current_uid[pos]++;
 	}
 }
 
-/*
- * Retrieve the next valid UUID that is free for this server.
- */
-std::string InspIRCd::GetUID()
+void UIDGenerator::init(const std::string& sid)
 {
-	static bool inited = false;
-
 	/*
-	 * If we're setting up, copy SID into the first three digits, 9's to the rest, null term at the end
+	 * Copy SID into the first three digits, 9's to the rest, null term at the end
 	 * Why 9? Well, we increment before we find, otherwise we have an unnecessary copy, and I want UID to start at AAA..AA
 	 * and not AA..AB. So by initialising to 99999, we force it to rollover to AAAAA on the first IncrementUID call.
 	 * Kind of silly, but I like how it looks.
 	 *		-- w
 	 */
-	if (!inited)
-	{
-		inited = true;
-		current_uid[0] = Config->sid[0];
-		current_uid[1] = Config->sid[1];
-		current_uid[2] = Config->sid[2];
 
-		for (int i = 3; i < (UUID_LENGTH - 1); i++)
-			current_uid[i] = '9';
-
-		// Null terminator. Important.
-		current_uid[UUID_LENGTH - 1] = '\0';
-	}
-
-	while (1)
-	{
-		// Add one to the last UID
-		this->IncrementUID(UUID_LENGTH - 2);
-
-		if (this->FindUUID(current_uid))
-		{
-			/*
-			 * It's in use. We need to try the loop again.
-			 */
-			continue;
-		}
-
-		return current_uid;
-	}
-
-	/* not reached. */
-	return "";
+	current_uid.resize(UUID_LENGTH, '9');
+	current_uid[0] = sid[0];
+	current_uid[1] = sid[1];
+	current_uid[2] = sid[2];
 }
 
+/*
+ * Retrieve the next valid UUID that is free for this server.
+ */
+std::string UIDGenerator::GetUID()
+{
+	while (true)
+	{
+		// Add one to the last UID
+		this->IncrementUID(UUID_LENGTH - 1);
 
+		if (!ServerInstance->Users.FindUUID(current_uid))
+			break;
 
+		/*
+		 * It's in use. We need to try the loop again.
+		 */
+	}
+
+	return current_uid;
+}
+
+const std::string& Server::GetPublicName() const
+{
+	if (!ServerInstance->Config->HideServer.empty())
+		return ServerInstance->Config->HideServer;
+	return GetName();
+}
+
+void Server::SendMetadata(const std::string& key, const std::string& data) const
+{
+	// Do nothing for the local server.
+}
+
+void Server::SendMetadata(const Extensible* ext, const std::string& key, const std::string& data) const
+{
+	// Do nothing for the local server.
+}

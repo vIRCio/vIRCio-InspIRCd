@@ -1,6 +1,11 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
+ *   Copyright (C) 2017, 2019-2022 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2012-2013 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
+ *   Copyright (C) 2009-2010 Daniel De Graaf <danieldg@inspircd.org>
+ *   Copyright (C) 2009 Matt Smith <dz@inspircd.org>
  *   Copyright (C) 2008 Robin Burchell <robin+git@viroteck.net>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
@@ -18,48 +23,35 @@
 
 
 #include "inspircd.h"
+#include "modules/extban.h"
 
-/* $ModDesc: Provides support for channel mode +A, allowing /invite freely on a channel and extban A to deny specific users it */
-
-class AllowInvite : public SimpleChannelModeHandler
+class ModuleAllowInvite final
+	: public Module
 {
- public:
-	AllowInvite(Module* Creator) : SimpleChannelModeHandler(Creator, "allowinvite", 'A') { }
-};
+private:
+	ExtBan::Acting extban;
+	SimpleChannelMode ni;
 
-class ModuleAllowInvite : public Module
-{
-	AllowInvite ni;
- public:
-
-	ModuleAllowInvite() : ni(this)
+public:
+	ModuleAllowInvite()
+		: Module(VF_VENDOR, "Adds channel mode A (allowinvite) which allows unprivileged users to use the /INVITE command and extended ban A: (blockinvite) which bans specific masks from using the /INVITE command.")
+		, extban(this, "blockinvite", 'A')
+		, ni(this, "allowinvite", 'A')
 	{
 	}
 
-	void init()
-	{
-		ServerInstance->Modules->AddService(ni);
-		Implementation eventlist[] = { I_OnUserPreInvite, I_On005Numeric };
-		ServerInstance->Modules->Attach(eventlist, this, sizeof(eventlist)/sizeof(Implementation));
-	}
-
-	virtual void On005Numeric(std::string &output)
-	{
-		ServerInstance->AddExtBanChar('A');
-	}
-
-	virtual ModResult OnUserPreInvite(User* user,User* dest,Channel* channel, time_t timeout)
+	ModResult OnUserPreInvite(User* user, User* dest, Channel* channel, time_t timeout) override
 	{
 		if (IS_LOCAL(user))
 		{
-			ModResult res = channel->GetExtBanStatus(user, 'A');
+			ModResult res = extban.GetStatus(user, channel);
 			if (res == MOD_RES_DENY)
 			{
 				// Matching extban, explicitly deny /invite
-				user->WriteNumeric(ERR_CHANOPRIVSNEEDED, "%s %s :You are banned from using INVITE", user->nick.c_str(), channel->name.c_str());
+				user->WriteNumeric(ERR_RESTRICTED, channel->name, "You are banned from using INVITE");
 				return res;
 			}
-			if (channel->IsModeSet('A') || res == MOD_RES_ALLOW)
+			if (channel->IsModeSet(ni) || res == MOD_RES_ALLOW)
 			{
 				// Explicitly allow /invite
 				return MOD_RES_ALLOW;
@@ -67,15 +59,6 @@ class ModuleAllowInvite : public Module
 		}
 
 		return MOD_RES_PASSTHRU;
-	}
-
-	virtual ~ModuleAllowInvite()
-	{
-	}
-
-	virtual Version GetVersion()
-	{
-		return Version("Provides support for channel mode +A, allowing /invite freely on a channel and extban A to deny specific users it",VF_VENDOR);
 	}
 };
 

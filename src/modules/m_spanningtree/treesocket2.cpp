@@ -1,12 +1,14 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
- *   Copyright (C) 2007-2008, 2012 Robin Burchell <robin+git@viroteck.net>
+ *   Copyright (C) 2019 linuxdaemon <linuxdaemon.irc@gmail.com>
+ *   Copyright (C) 2018-2024 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2012-2016, 2018 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
  *   Copyright (C) 2009-2010 Daniel De Graaf <danieldg@inspircd.org>
- *   Copyright (C) 2007-2008 Craig Edwards <craigedwards@brainbox.cc>
- *   Copyright (C) 2008 Pippijn van Steenhoven <pip88nl@gmail.com>
- *   Copyright (C) 2008 Thomas Stagner <aquanight@inspircd.org>
- *   Copyright (C) 2007 Dennis Friis <peavey@inspircd.org>
+ *   Copyright (C) 2008, 2012 Robin Burchell <robin+git@viroteck.net>
+ *   Copyright (C) 2007-2008 Dennis Friis <peavey@inspircd.org>
+ *   Copyright (C) 2007-2008 Craig Edwards <brain@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -23,70 +25,77 @@
 
 
 #include "inspircd.h"
-#include "socket.h"
-#include "xline.h"
-#include "socketengine.h"
+#include "timeutils.h"
 
 #include "main.h"
 #include "utils.h"
 #include "treeserver.h"
-#include "link.h"
 #include "treesocket.h"
 #include "resolvers.h"
+#include "commands.h"
 
 /* Handle ERROR command */
-void TreeSocket::Error(parameterlist &params)
+void TreeSocket::Error(CommandBase::Params& params)
 {
-	std::string msg = params.size() ? params[0] : "";
+	const std::string msg = params.empty() ? "" : params[0];
 	SetError("received ERROR " + msg);
 }
 
-void TreeSocket::Split(const std::string& line, std::string& prefix, std::string& command, parameterlist& params)
+void TreeSocket::Split(const std::string& line, std::string& tags, std::string& prefix, std::string& command, CommandBase::Params& params)
 {
+	std::string token;
 	irc::tokenstream tokens(line);
 
-	if (!tokens.GetToken(prefix))
+	if (!tokens.GetMiddle(token))
 		return;
-	
-	if (prefix[0] == ':')
-	{
-		prefix = prefix.substr(1);
 
-		if (prefix.empty())
+	if (token[0] == '@')
+	{
+		if (token.length() <= 1)
 		{
-			this->SendError("BUG (?) Empty prefix received: " + line);
+			this->SendError("BUG: Received a message with empty tags: " + line);
 			return;
 		}
-		if (!tokens.GetToken(command))
+
+		tags.assign(token, 1, std::string::npos);
+		if (!tokens.GetMiddle(token))
 		{
-			this->SendError("BUG (?) Empty command received: " + line);
+			this->SendError("BUG: Received a message with no command: " + line);
 			return;
 		}
 	}
-	else
-	{
-		command = prefix;
-		prefix.clear();
-	}
-	if (command.empty())
-		this->SendError("BUG (?) Empty command received: " + line);
 
-	std::string param;
-	while (tokens.GetToken(param))
+	if (token[0] == ':')
 	{
-		params.push_back(param);
+		if (token.length() <= 1)
+		{
+			this->SendError("BUG: Received a message with an empty prefix: " + line);
+			return;
+		}
+
+		prefix.assign(token, 1, std::string::npos);
+		if (!tokens.GetMiddle(token))
+		{
+			this->SendError("BUG: Received a message with no command: " + line);
+			return;
+		}
 	}
+
+	command.assign(token);
+	while (tokens.GetTrailing(token))
+		params.push_back(token);
 }
 
-void TreeSocket::ProcessLine(std::string &line)
+void TreeSocket::ProcessLine(std::string& line)
 {
+	std::string tags;
 	std::string prefix;
 	std::string command;
-	parameterlist params;
+	CommandBase::Params params;
 
-	ServerInstance->Logs->Log("m_spanningtree", RAWIO, "S[%d] I %s", this->GetFd(), line.c_str());
+	ServerInstance->Logs.RawIO(MODNAME, "S[{}] I {}", GetFd(), line);
 
-	Split(line, prefix, command, params);
+	Split(line, tags, prefix, command, params);
 
 	if (command.empty())
 		return;
@@ -149,19 +158,19 @@ void TreeSocket::ProcessLine(std::string &line)
 			}
 			else if (command == "BURST")
 			{
-				if (params.size())
+				if (!params.empty())
 				{
-					time_t them = atoi(params[0].c_str());
+					time_t them = ServerCommand::ExtractTS(params[0]);
 					time_t delta = them - ServerInstance->Time();
-					if ((delta < -600) || (delta > 600))
+					if ((delta < -15) || (delta > 15))
 					{
-						ServerInstance->SNO->WriteGlobalSno('l',"\2ERROR\2: Your clocks are out by %ld seconds (this is more than five minutes). Link aborted, \2PLEASE SYNC YOUR CLOCKS!\2",labs((long)delta));
-						SendError("Your clocks are out by "+ConvToStr(labs((long)delta))+" seconds (this is more than five minutes). Link aborted, PLEASE SYNC YOUR CLOCKS!");
+						ServerInstance->SNO.WriteGlobalSno('l', "\002ERROR\002: Your clocks are off by {} seconds (this is more than fifteen seconds). Link aborted, \002PLEASE SYNC YOUR CLOCKS!\002", labs((long)delta));
+						SendError("Your clocks are out by "+ConvToStr(labs((long)delta))+" seconds (this is more than fifteen seconds). Link aborted, PLEASE SYNC YOUR CLOCKS!");
 						return;
 					}
-					else if ((delta < -30) || (delta > 30))
+					else if ((delta < -5) || (delta > 5))
 					{
-						ServerInstance->SNO->WriteGlobalSno('l',"\2WARNING\2: Your clocks are out by %ld seconds. Please consider synching your clocks.", labs((long)delta));
+						ServerInstance->SNO.WriteGlobalSno('l', "\002WARNING\002: Your clocks are off by {} seconds. Please consider syncing your clocks.", labs((long)delta));
 					}
 				}
 
@@ -171,25 +180,7 @@ void TreeSocket::ProcessLine(std::string &line)
 				if (!CheckDuplicate(capab->name, capab->sid))
 					return;
 
-				this->LinkState = CONNECTED;
-				Utils->timeoutlist.erase(this);
-
-				linkID = capab->name;
-
-				MyRoot = new TreeServer(Utils, capab->name, capab->description, capab->sid, Utils->TreeRoot, this, capab->hidden);
-				Utils->TreeRoot->AddChild(MyRoot);
-
-				MyRoot->bursting = true;
-				this->DoBurst(MyRoot);
-
-				parameterlist sparams;
-				sparams.push_back(MyRoot->GetName());
-				sparams.push_back("*");
-				sparams.push_back("0");
-				sparams.push_back(MyRoot->GetID());
-				sparams.push_back(":" + MyRoot->GetDesc());
-				Utils->DoOneToAllButSender(ServerInstance->Config->GetSID(), "SERVER", sparams, MyRoot->GetName());
-				Utils->DoOneToAllButSender(MyRoot->GetID(), "BURST", params, MyRoot->GetName());
+				FinishAuth(capab->name, capab->sid, capab->description, capab->hidden);
 			}
 			else if (command == "ERROR")
 			{
@@ -198,6 +189,11 @@ void TreeSocket::ProcessLine(std::string &line)
 			else if (command == "CAPAB")
 			{
 				this->Capab(params);
+			}
+			else
+			{
+				ServerInstance->Logs.Debug(MODNAME, "Unknown command from fd {} in the WAIT_AUTH_2 phase: {}",
+					GetFd(), command);
 			}
 
 		break;
@@ -221,66 +217,111 @@ void TreeSocket::ProcessLine(std::string &line)
 			{
 				this->Capab(params);
 			}
+			else
+			{
+				ServerInstance->Logs.Debug(MODNAME, "Unknown command from fd {} in the CONNECTING phase: {}",
+					GetFd(), command);
+			}
 		break;
+
 		case CONNECTED:
 			/*
 			 * State CONNECTED:
 			 *  Credentials have been exchanged, we've gotten their 'BURST' (or sent ours).
 			 *  Anything from here on should be accepted a little more reasonably.
 			 */
-			this->ProcessConnectedLine(prefix, command, params);
+			this->ProcessConnectedLine(tags, prefix, command, params);
 		break;
+
 		case DYING:
 		break;
 	}
 }
 
-void TreeSocket::ProcessConnectedLine(std::string& prefix, std::string& command, parameterlist& params)
+User* TreeSocket::FindSource(const std::string& prefix, const std::string& command)
 {
-	User* who = ServerInstance->FindUUID(prefix);
-	std::string direction;
+	// Empty prefix means the source is the directly connected server that sent this command
+	if (prefix.empty())
+		return MyRoot->ServerUser;
 
-	if (!who)
+	if (prefix.size() == 3)
 	{
-		TreeServer* ServerSource = Utils->FindServer(prefix);
-		if (prefix.empty())
-			ServerSource = MyRoot;
-
-		if (ServerSource)
-		{
-			who = ServerSource->ServerUser;
-		}
-		else
-		{
-			/* It is important that we don't close the link here, unknown prefix can occur
-			 * due to various race conditions such as the KILL message for a user somehow
-			 * crossing the users QUIT further upstream from the server. Thanks jilles!
-			 */
-
-			if ((prefix.length() == UUID_LENGTH-1) && (isdigit(prefix[0])) &&
-				((command == "FMODE") || (command == "MODE") || (command == "KICK") || (command == "TOPIC") || (command == "KILL") || (command == "ADDLINE") || (command == "DELLINE")))
-			{
-				/* Special case, we cannot drop these commands as they've been committed already on a
-				 * part of the network by the time we receive them, so in this scenario pretend the
-				 * command came from a server to avoid desync.
-				 */
-
-				who = ServerInstance->FindUUID(prefix.substr(0, 3));
-				if (!who)
-					who = this->MyRoot->ServerUser;
-			}
-			else
-			{
-				ServerInstance->Logs->Log("m_spanningtree", DEBUG, "Command '%s' from unknown prefix '%s'! Dropping entire command.",
-					command.c_str(), prefix.c_str());
-				return;
-			}
-		}
+		// Prefix looks like a sid
+		TreeServer* server = Utils->FindServerID(prefix);
+		if (server)
+			return server->ServerUser;
+	}
+	else
+	{
+		// If the prefix string is a uuid FindUUID() returns the appropriate User object
+		auto* user = ServerInstance->Users.FindUUID(prefix);
+		if (user)
+			return user;
 	}
 
-	// Make sure prefix is still good
-	direction = who->server;
-	prefix = who->uuid;
+	// Some implementations wrongly send a server name as prefix occasionally, handle that too for now
+	TreeServer* const server = Utils->FindServer(prefix);
+	if (server)
+		return server->ServerUser;
+
+	/* It is important that we don't close the link here, unknown prefix can occur
+	 * due to various race conditions such as the KILL message for a user somehow
+	 * crossing the users QUIT further upstream from the server. Thanks jilles!
+	 */
+
+	if ((prefix.length() == UIDGenerator::UUID_LENGTH) && (isdigit(prefix[0])) &&
+		((command == "FMODE") || (command == "MODE") || (command == "KICK") || (command == "TOPIC") || (command == "KILL") || (command == "ADDLINE") || (command == "DELLINE")))
+	{
+		/* Special case, we cannot drop these commands as they've been committed already on a
+		 * part of the network by the time we receive them, so in this scenario pretend the
+		 * command came from a server to avoid desync.
+		 */
+
+		TreeServer* const usersserver = Utils->FindServerID(prefix.substr(0, 3));
+		if (usersserver)
+			return usersserver->ServerUser;
+		return this->MyRoot->ServerUser;
+	}
+
+	// Unknown prefix
+	return nullptr;
+}
+
+void TreeSocket::ProcessTag(User* source, const std::string& tag, ClientProtocol::TagMap& tags)
+{
+	std::string tagkey;
+	std::string tagval;
+	const std::string::size_type p = tag.find('=');
+	if (p != std::string::npos)
+	{
+		// Tag has a value
+		tagkey.assign(tag, 0, p);
+		tagval.assign(tag, p + 1, std::string::npos);
+	}
+	else
+	{
+		tagkey.assign(tag);
+	}
+
+	for (auto* subscriber : Utils->Creator->tagevprov.GetSubscribers())
+	{
+		ClientProtocol::MessageTagProvider* const tagprov = static_cast<ClientProtocol::MessageTagProvider*>(subscriber);
+		const ModResult res = tagprov->OnProcessTag(source, tagkey, tagval);
+		if (res == MOD_RES_ALLOW)
+			tags.emplace(tagkey, ClientProtocol::MessageTagData(tagprov, tagval));
+		else if (res == MOD_RES_DENY)
+			break;
+	}
+}
+
+void TreeSocket::ProcessConnectedLine(std::string& taglist, std::string& prefix, std::string& command, CommandBase::Params& params)
+{
+	User* who = FindSource(prefix, command);
+	if (!who)
+	{
+		ServerInstance->Logs.Debug(MODNAME, "Command '{}' from unknown prefix '{}'! Dropping entire command.", command, prefix);
+		return;
+	}
 
 	/*
 	 * Check for fake direction here, and drop any instances that are found.
@@ -298,244 +339,120 @@ void TreeSocket::ProcessConnectedLine(std::string& prefix, std::string& command,
 	 * a valid SID or a valid UUID, so that invalid UUID or SID never makes it
 	 * to the higher level functions. -- B
 	 */
-	TreeServer* route_back_again = Utils->BestRouteTo(direction);
-	if ((!route_back_again) || (route_back_again->GetSocket() != this))
+	TreeServer* const server = TreeServer::Get(who);
+	if (server->GetSocket() != this)
 	{
-		if (route_back_again)
-			ServerInstance->Logs->Log("m_spanningtree",DEBUG,"Protocol violation: Fake direction '%s' from connection '%s'",
-				prefix.c_str(),linkID.c_str());
+		ServerInstance->Logs.Debug(MODNAME, "Protocol violation: Fake direction '{}' from connection '{}'", prefix, linkID);
 		return;
 	}
 
-	/*
-	 * First up, check for any malformed commands (e.g. MODE without a timestamp)
-	 * and rewrite commands where necessary (SVSMODE -> MODE for services). -- w
-	 */
-	if (command == "SVSMODE") // This isn't in an "else if" so we still force FMODE for changes on channels.
-		command = "MODE";
-
-	// TODO move all this into Commands
-	if (command == "MAP")
+	// Translate commands coming from servers using an older protocol
+	if (proto_version < PROTO_NEWEST)
 	{
-		Utils->Creator->HandleMap(params, who);
-	}
-	else if (command == "SERVER")
-	{
-		this->RemoteServer(prefix,params);
-	}
-	else if (command == "ERROR")
-	{
-		this->Error(params);
-	}
-	else if (command == "AWAY")
-	{
-		this->Away(prefix,params);
-	}
-	else if (command == "PING")
-	{
-		this->LocalPing(prefix,params);
-	}
-	else if (command == "PONG")
-	{
-		TreeServer *s = Utils->FindServer(prefix);
-		if (s && s->bursting)
-		{
-			ServerInstance->SNO->WriteGlobalSno('l',"Server \002%s\002 has not finished burst, forcing end of burst (send ENDBURST!)", prefix.c_str());
-			s->FinishBurst();
-		}
-		this->LocalPong(prefix,params);
-	}
-	else if (command == "VERSION")
-	{
-		this->ServerVersion(prefix,params);
-	}
-	else if (command == "ADDLINE")
-	{
-		this->AddLine(prefix,params);
-	}
-	else if (command == "DELLINE")
-	{
-		this->DelLine(prefix,params);
-	}
-	else if (command == "SAVE")
-	{
-		this->ForceNick(prefix,params);
-	}
-	else if (command == "OPERQUIT")
-	{
-		this->OperQuit(prefix,params);
-	}
-	else if (command == "IDLE")
-	{
-		this->Whois(prefix,params);
-	}
-	else if (command == "PUSH")
-	{
-		this->Push(prefix,params);
-	}
-	else if (command == "SQUIT")
-	{
-		if (params.size() == 2)
-		{
-			this->Squit(Utils->FindServer(params[0]),params[1]);
-		}
-	}
-	else if (command == "SNONOTICE")
-	{
-		if (params.size() >= 2)
-		{
-			ServerInstance->SNO->WriteToSnoMask(params[0][0], "From " + who->nick + ": "+ params[1]);
-			params[1] = ":" + params[1];
-			Utils->DoOneToAllButSender(prefix, command, params, prefix);
-		}
-	}
-	else if (command == "BURST")
-	{
-		// Set prefix server as bursting
-		TreeServer* ServerSource = Utils->FindServer(prefix);
-		if (!ServerSource)
-		{
-			ServerInstance->SNO->WriteGlobalSno('l', "WTF: Got BURST from a non-server(?): %s", prefix.c_str());
+		if (!PreProcessOldProtocolMessage(who, command, params))
 			return;
-		}
-
-		ServerSource->bursting = true;
-		Utils->DoOneToAllButSender(prefix, command, params, prefix);
 	}
-	else if (command == "ENDBURST")
+
+	ServerCommand* scmd = Utils->Creator->CmdManager.GetHandler(command);
+	CommandBase* cmdbase = scmd;
+	Command* cmd = nullptr;
+	if (!scmd)
 	{
-		TreeServer* ServerSource = Utils->FindServer(prefix);
-		if (!ServerSource)
-		{
-			ServerInstance->SNO->WriteGlobalSno('l', "WTF: Got ENDBURST from a non-server(?): %s", prefix.c_str());
-			return;
-		}
-
-		ServerSource->FinishBurst();
-		Utils->DoOneToAllButSender(prefix, command, params, prefix);
-	}
-	else if (command == "ENCAP")
-	{
-		this->Encap(who, params);
-	}
-	else if (command == "NICK")
-	{
-		if (params.size() != 2)
-		{
-			SendError("Protocol violation: Wrong number of parameters for NICK message");
-			return;
-		}
-
-		if (IS_SERVER(who))
-		{
-			SendError("Protocol violation: Server changing nick");
-			return;
-		}
-
-		if ((isdigit(params[0][0])) && (params[0] != who->uuid))
-		{
-			SendError("Protocol violation: User changing nick to an invalid UID - " + params[0]);
-			return;
-		}
-
-		/* Update timestamp on user when they change nicks */
-		who->age = atoi(params[1].c_str());
-
-		/*
-		 * On nick messages, check that the nick doesnt already exist here.
-		 * If it does, perform collision logic.
-		 */
-		bool callfnc = true;
-		User* x = ServerInstance->FindNickOnly(params[0]);
-		if ((x) && (x != who) && (x->registered == REG_ALL))
-		{
-			int collideret = 0;
-			/* x is local, who is remote */
-			collideret = this->DoCollision(x, who->age, who->ident, who->GetIPString(), who->uuid);
-			if (collideret != 1)
-			{
-				// Remote client lost, or both lost, rewrite this nick change as a change to uuid before
-				// forwarding and don't call ForceNickChange() because DoCollision() has done it already
-				params[0] = who->uuid;
-				callfnc = false;
-			}
-		}
-		if (callfnc)
-			who->ForceNickChange(params[0].c_str());
-		Utils->RouteCommand(route_back_again, command, params, who);
-	}
-	else
-	{
-		Command* cmd = ServerInstance->Parser->GetHandler(command);
-		
+		// Not a special server-to-server command
+		cmd = ServerInstance->Parser.GetHandler(command);
 		if (!cmd)
 		{
-			irc::stringjoiner pmlist(" ", params, 0, params.size() - 1);
-			ServerInstance->Logs->Log("m_spanningtree", SPARSE, "Unrecognised S2S command :%s %s %s",
-				who->uuid.c_str(), command.c_str(), pmlist.GetJoined().c_str());
-			SendError("Unrecognised command '" + command + "' -- possibly loaded mismatched modules");
-			return;
-		}
-
-		if (params.size() < cmd->min_params)
-		{
-			irc::stringjoiner pmlist(" ", params, 0, params.size() - 1);
-			ServerInstance->Logs->Log("m_spanningtree", SPARSE, "Insufficient parameters for S2S command :%s %s %s",
-				who->uuid.c_str(), command.c_str(), pmlist.GetJoined().c_str());
-			SendError("Insufficient parameters for command '" + command + "'");
-			return;
-		}
-
-		if ((!params.empty()) && (params.back().empty()) && (!cmd->allow_empty_last_param))
-		{
-			// the last param is empty and the command handler doesn't allow that, check if there will be enough params if we drop the last
-			if (params.size()-1 < cmd->min_params)
+			if (command == "ERROR")
+			{
+				this->Error(params);
 				return;
-			params.pop_back();
-		}
+			}
+			else if (command == "BURST")
+			{
+				// This is sent even when there is no need for it, drop it here for now
+				return;
+			}
 
-		CmdResult res = cmd->Handle(params, who);
-
-		if (res == CMD_INVALID)
-		{
-			irc::stringjoiner pmlist(" ", params, 0, params.size() - 1);
-			ServerInstance->Logs->Log("m_spanningtree", SPARSE, "Error handling S2S command :%s %s %s",
-				who->uuid.c_str(), command.c_str(), pmlist.GetJoined().c_str());
-			SendError("Error handling '" + command + "' -- possibly loaded mismatched modules");
+			throw ProtocolException("Unknown command: " + command);
 		}
-		else if (res == CMD_SUCCESS)
-			Utils->RouteCommand(route_back_again, command, params, who);
+		cmdbase = cmd;
 	}
+
+	if (params.size() < cmdbase->min_params)
+		throw ProtocolException("Insufficient parameters");
+
+	if ((!params.empty()) && (params.back().empty()) && (!cmdbase->allow_empty_last_param))
+	{
+		// the last param is empty and the command handler doesn't allow that, check if there will be enough params if we drop the last
+		if (params.size()-1 < cmdbase->min_params)
+			return;
+		params.pop_back();
+	}
+
+	CmdResult res;
+	ClientProtocol::TagMap tags;
+	std::string tag;
+	irc::sepstream tagstream(taglist, ';');
+	while (tagstream.GetToken(tag))
+		ProcessTag(who, tag, tags);
+
+	CommandBase::Params newparams(params, tags);
+
+	if (scmd)
+		res = scmd->Handle(who, newparams);
+	else
+	{
+		res = cmd->Handle(who, newparams);
+		if (res == CmdResult::INVALID)
+			throw ProtocolException("Error in command handler");
+	}
+
+	if (res == CmdResult::SUCCESS)
+		Utils->RouteCommand(server->GetRoute(), cmdbase, newparams, who);
 }
 
 void TreeSocket::OnTimeout()
 {
-	ServerInstance->SNO->WriteGlobalSno('l', "CONNECT: Connection to \002%s\002 timed out.", linkID.c_str());
+	ServerInstance->SNO.WriteGlobalSno('l', "CONNECT: Connection to \002{}\002 timed out.", linkID);
 }
 
 void TreeSocket::Close()
 {
-	if (fd != -1)
-		ServerInstance->GlobalCulls.AddItem(this);
+	if (!HasFd())
+		return;
+
+	ServerInstance->GlobalCulls.AddItem(this);
 	this->BufferedSocket::Close();
 	SetError("Remote host closed connection");
 
 	// Connection closed.
 	// If the connection is fully up (state CONNECTED)
-	// then propogate a netsplit to all peers.
-	if (MyRoot)
-		Squit(MyRoot,getError());
+	// then propagate a netsplit to all peers.
+	if (MyRoot && !MyRoot->IsDead())
+		MyRoot->SQuit(GetError(), true);
+	else
+		ServerInstance->SNO.WriteGlobalSno('l', "Connection to '\002{}\002' failed.", linkID);
 
-	if (!ConnectionFailureShown)
+	time_t server_uptime = ServerInstance->Time() - this->age;
+	if (server_uptime)
 	{
-		ConnectionFailureShown = true;
-		ServerInstance->SNO->WriteGlobalSno('l', "Connection to '\2%s\2' failed.",linkID.c_str());
-
-		time_t server_uptime = ServerInstance->Time() - this->age;
-		if (server_uptime)
-		{
-			std::string timestr = Utils->Creator->TimeToStr(server_uptime);
-			ServerInstance->SNO->WriteGlobalSno('l', "Connection to '\2%s\2' was established for %s", linkID.c_str(), timestr.c_str());
-		}
+		std::string timestr = Duration::ToString(server_uptime);
+		ServerInstance->SNO.WriteGlobalSno('l', "Connection to '\002{}\002' was established for {}", linkID, timestr);
 	}
+}
+
+void TreeSocket::FinishAuth(const std::string& remotename, const std::string& remotesid, const std::string& remotedesc, bool hidden)
+{
+	this->LinkState = CONNECTED;
+	Utils->timeoutlist.erase(this);
+
+	linkID = remotename;
+
+	MyRoot = new TreeServer(remotename, remotedesc, remotesid, Utils->TreeRoot, this, hidden);
+
+	// Mark the server as bursting
+	MyRoot->BeginBurst();
+	this->DoBurst(MyRoot);
+
+	CommandServer::Builder(MyRoot).Forward(MyRoot);
 }

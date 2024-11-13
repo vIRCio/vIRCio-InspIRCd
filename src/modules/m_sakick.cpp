@@ -1,7 +1,10 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
- *   Copyright (C) 2009 John Brooks <john.brooks@dereferenced.net>
+ *   Copyright (C) 2013, 2019-2023 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2013, 2016 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
+ *   Copyright (C) 2009 John Brooks <john@jbrooks.io>
  *   Copyright (C) 2009 Daniel De Graaf <danieldg@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
@@ -20,100 +23,82 @@
 
 #include "inspircd.h"
 
-/* $ModDesc: Provides a SAKICK command */
-
-/** Handle /SAKICK
- */
-class CommandSakick : public Command
+class CommandSakick final
+	: public Command
 {
- public:
-	CommandSakick(Module* Creator) : Command(Creator,"SAKICK", 2, 3)
+private:
+	UserModeReference servprotectmode;
+
+public:
+	CommandSakick(Module* Creator)
+		: Command(Creator, "SAKICK", 2, 3)
+		, servprotectmode(Creator, "servprotect")
 	{
-		flags_needed = 'o'; Penalty = 0; syntax = "<channel> <nick> [reason]";
-		TRANSLATE4(TR_TEXT, TR_NICK, TR_TEXT, TR_END);
+		access_needed = CmdAccess::OPERATOR;
+		allow_empty_last_param = true;
+		syntax = { "<channel> <nick> [:<reason>]" };
+		translation = { TR_TEXT, TR_NICK, TR_TEXT };
 	}
 
-	CmdResult Handle (const std::vector<std::string>& parameters, User *user)
+	CmdResult Handle(User* user, const Params& parameters) override
 	{
-		User* dest = ServerInstance->FindNick(parameters[1]);
-		Channel* channel = ServerInstance->FindChan(parameters[0]);
-		const char* reason = "";
-
-		if ((dest) && (dest->registered == REG_ALL) && (channel))
+		auto* channel = ServerInstance->Channels.Find(parameters[0]);
+		auto* dest = ServerInstance->Users.Find(parameters[1], true);
+		if (channel && dest)
 		{
-			if (parameters.size() > 2)
+			const std::string& reason = (parameters.size() > 2) ? parameters[2] : dest->nick;
+
+			if (dest->IsModeSet(servprotectmode))
 			{
-				reason = parameters[2].c_str();
-			}
-			else
-			{
-				reason = dest->nick.c_str();
+				user->WriteNumeric(ERR_NOPRIVILEGES, "Cannot use an SA command on a service");
+				return CmdResult::FAILURE;
 			}
 
-			if (ServerInstance->ULine(dest->server))
+			if (!channel->HasUser(dest))
 			{
-				user->WriteNumeric(ERR_NOPRIVILEGES, "%s :Cannot use an SA command on a u-lined client", user->nick.c_str());
-				return CMD_FAILURE;
+				user->WriteNotice("*** " + dest->nick + " is not on " + channel->name);
+				return CmdResult::FAILURE;
 			}
 
 			/* For local clients, directly kick them. For remote clients,
-			 * just return CMD_SUCCESS knowing the protocol module will route the SAKICK to the user's
+			 * just return CmdResult::SUCCESS knowing the protocol module will route the SAKICK to the user's
 			 * local server and that will kick them instead.
 			 */
 			if (IS_LOCAL(dest))
 			{
+				// Target is on this server, kick them and send the snotice
 				channel->KickUser(ServerInstance->FakeClient, dest, reason);
+				ServerInstance->SNO.WriteGlobalSno('a', user->nick + " SAKICKed " + dest->nick + " on " + channel->name);
 			}
 
-			if (IS_LOCAL(user))
-			{
-				/* Locally issued command; send the snomasks */
-				ServerInstance->SNO->WriteGlobalSno('a', user->nick + " SAKICKed " + dest->nick + " on " + parameters[0]);
-			}
-
-			return CMD_SUCCESS;
+			return CmdResult::SUCCESS;
 		}
 		else
 		{
-			user->WriteServ("NOTICE %s :*** Invalid nickname or channel", user->nick.c_str());
+			user->WriteNotice("*** Invalid nickname or channel");
 		}
 
-		return CMD_FAILURE;
+		return CmdResult::FAILURE;
 	}
 
-	RouteDescriptor GetRouting(User* user, const std::vector<std::string>& parameters)
+	RouteDescriptor GetRouting(User* user, const Params& parameters) override
 	{
-		User* dest = ServerInstance->FindNick(parameters[1]);
-		if (dest)
-			return ROUTE_OPT_UCAST(dest->server);
-		return ROUTE_LOCALONLY;
+		return ROUTE_OPT_UCAST(parameters[1]);
 	}
 };
 
-class ModuleSakick : public Module
+class ModuleSakick final
+	: public Module
 {
+private:
 	CommandSakick cmd;
- public:
+
+public:
 	ModuleSakick()
-		: cmd(this)
+		: Module(VF_VENDOR | VF_OPTCOMMON, "Adds the /SAKICK command which allows server operators to kick users from a channel without having any privileges in the channel.")
+		, cmd(this)
 	{
 	}
-
-	void init()
-	{
-		ServerInstance->Modules->AddService(cmd);
-	}
-
-	virtual ~ModuleSakick()
-	{
-	}
-
-	virtual Version GetVersion()
-	{
-		return Version("Provides a SAKICK command", VF_OPTCOMMON|VF_VENDOR);
-	}
-
 };
 
 MODULE_INIT(ModuleSakick)
-

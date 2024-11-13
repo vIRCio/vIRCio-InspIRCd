@@ -1,10 +1,13 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
+ *   Copyright (C) 2020 Matt Schatz <genius3000@g3k.solutions>
+ *   Copyright (C) 2018-2023 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2013, 2016 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
  *   Copyright (C) 2009-2010 Daniel De Graaf <danieldg@inspircd.org>
  *   Copyright (C) 2007 Dennis Friis <peavey@inspircd.org>
- *   Copyright (C) 2006-2007 Robin Burchell <robin+git@viroteck.net>
- *   Copyright (C) 2006 Craig Edwards <craigedwards@brainbox.cc>
+ *   Copyright (C) 2006 Robin Burchell <robin+git@viroteck.net>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -20,276 +23,303 @@
  */
 
 
-/* $ModDesc: Provides the /CHECK command to retrieve information on a user, channel, hostname or IP address */
-
 #include "inspircd.h"
+#include "listmode.h"
+#include "numericbuilder.h"
+#include "timeutils.h"
+#include "utility/string.h"
 
-/** Handle /CHECK
- */
-class CommandCheck : public Command
+enum
 {
- public:
-	CommandCheck(Module* parent) : Command(parent,"CHECK", 1)
+	RPL_CHECK = 802
+};
+
+class CheckContext final
+{
+private:
+	User* const user;
+	const std::string& target;
+
+	static std::string FormatTime(time_t ts)
 	{
-		flags_needed = 'o'; syntax = "<nickname>|<ip>|<hostmask>|<channel> <server>";
+		std::string timestr(Time::ToString(ts, "%Y-%m-%d %H:%M:%S UTC (", true));
+		timestr.append(ConvToStr(ts));
+		timestr.push_back(')');
+		return timestr;
 	}
 
-	std::string timestring(time_t time)
+public:
+	CheckContext(User* u, const std::string& targetstr)
+		: user(u)
+		, target(targetstr)
 	{
-		char timebuf[60];
-		struct tm *mytime = gmtime(&time);
-		strftime(timebuf, 59, "%Y-%m-%d %H:%M:%S UTC (", mytime);
-		std::string ret(timebuf);
-		ret.append(ConvToStr(time)).push_back(')');
+		Write("START", target);
+	}
+
+	~CheckContext()
+	{
+		Write("END", target);
+	}
+
+	void Write(const std::string& type, const std::string& text)
+	{
+		user->WriteRemoteNumeric(RPL_CHECK, type, text);
+	}
+
+	void Write(const std::string& type, time_t ts)
+	{
+		user->WriteRemoteNumeric(RPL_CHECK, type, FormatTime(ts));
+	}
+
+	User* GetUser() const { return user; }
+
+	void DumpListMode(ListModeBase* mode, Channel* chan)
+	{
+		const ListModeBase::ModeList* list = mode->GetList(chan);
+		if (!list)
+			return;
+
+		for (const auto& entry : *list)
+		{
+			CheckContext::List listmode(*this, "listmode");
+			listmode.Add(ConvToStr(mode->GetModeChar()));
+			listmode.Add(entry.mask);
+			listmode.Add(entry.setter);
+			listmode.Add(FormatTime(entry.time));
+			listmode.Flush();
+		}
+	}
+
+	void DumpExt(Extensible* ext)
+	{
+		CheckContext::List extlist(*this, "metadata");
+		for (const auto& [item, obj] : ext->GetExtList())
+		{
+			const std::string value = item->ToHuman(ext, obj);
+			if (!value.empty())
+				Write("meta:" + item->name, value);
+			else if (!item->name.empty())
+				extlist.Add(item->name);
+		}
+
+		extlist.Flush();
+	}
+
+	class List final
+		: public Numeric::GenericBuilder<' ', false, Numeric::WriteRemoteNumericSink>
+	{
+	public:
+		List(CheckContext& context, const char* checktype)
+			: Numeric::GenericBuilder<' ', false, Numeric::WriteRemoteNumericSink>(Numeric::WriteRemoteNumericSink(context.GetUser()), RPL_CHECK, false, (IS_LOCAL(context.GetUser()) ? context.GetUser()->nick.length() : ServerInstance->Config->Limits.MaxNick) + strlen(checktype) + 1)
+		{
+			GetNumeric().push(checktype).push(std::string());
+		}
+	};
+};
+
+class CommandCheck final
+	: public Command
+{
+	UserModeReference snomaskmode;
+
+	std::string GetSnomasks(User* user)
+	{
+		std::string ret;
+		if (snomaskmode)
+			ret = snomaskmode->GetUserParameter(user);
+
+		if (ret.empty())
+			ret = "+";
 		return ret;
 	}
 
-	void dumpExt(User* user, const std::string& checkstr, Extensible* ext)
+public:
+	CommandCheck(Module* parent)
+		: Command(parent, "CHECK", 1)
+		, snomaskmode(parent, "snomask")
 	{
-		std::stringstream dumpkeys;
-		for(Extensible::ExtensibleStore::const_iterator i = ext->GetExtList().begin(); i != ext->GetExtList().end(); i++)
-		{
-			ExtensionItem* item = i->first;
-			std::string value = item->serialize(FORMAT_USER, ext, i->second);
-			if (!value.empty())
-				user->SendText(checkstr + " meta:" + item->name + " " + value);
-			else if (!item->name.empty())
-				dumpkeys << " " << item->name;
-		}
-		if (!dumpkeys.str().empty())
-			user->SendText(checkstr + " metadata", dumpkeys);
+		access_needed = CmdAccess::OPERATOR;
+		syntax = {
+			"<nick>|<channel> [<servername>]",
+			"<nickmask>|<usermask>|<hostmask>|<ipmask>|<realnamemask> [<servername>]",
+		};
 	}
 
-	CmdResult Handle (const std::vector<std::string> &parameters, User *user)
+	CmdResult Handle(User* user, const Params& parameters) override
 	{
-		if (parameters.size() > 1 && parameters[1] != ServerInstance->Config->ServerName.c_str())
-			return CMD_SUCCESS;
+		if (parameters.size() > 1 && !irc::equals(parameters[1], ServerInstance->Config->ServerName))
+			return CmdResult::SUCCESS;
 
-		User *targuser;
-		Channel *targchan;
-		std::string checkstr;
-		std::string chliststr;
-
-		checkstr = ":" + ServerInstance->Config->ServerName + " 304 " + user->nick + " :CHECK";
-
-		targuser = ServerInstance->FindNick(parameters[0]);
-		targchan = ServerInstance->FindChan(parameters[0]);
+		auto* targetuser = ServerInstance->Users.FindNick(parameters[0]);
+		auto* targetchan = ServerInstance->Channels.Find(parameters[0]);
 
 		/*
 		 * Syntax of a /check reply:
-		 *  :server.name 304 target :CHECK START <target>
-		 *  :server.name 304 target :CHECK <field> <value>
-		 *  :server.name 304 target :CHECK END
+		 *  :server.name 802 target START <target>
+		 *  :server.name 802 target <field> :<value>
+		 *  :server.name 802 target END <target>
 		 */
 
-		user->SendText(checkstr + " START " + parameters[0]);
+		// Constructor sends START, destructor sends END
+		CheckContext context(user, parameters[0]);
 
-		if (targuser)
+		if (targetuser)
 		{
-			LocalUser* loctarg = IS_LOCAL(targuser);
+			LocalUser* localtarget = IS_LOCAL(targetuser);
 			/* /check on a user */
-			user->SendText(checkstr + " nuh " + targuser->GetFullHost());
-			user->SendText(checkstr + " realnuh " + targuser->GetFullRealHost());
-			user->SendText(checkstr + " realname " + targuser->fullname);
-			user->SendText(checkstr + " modes +" + targuser->FormatModes());
-			user->SendText(checkstr + " snomasks +" + targuser->FormatNoticeMasks());
-			user->SendText(checkstr + " server " + targuser->server);
-			user->SendText(checkstr + " uid " + targuser->uuid);
-			user->SendText(checkstr + " signon " + timestring(targuser->signon));
-			user->SendText(checkstr + " nickts " + timestring(targuser->age));
-			if (loctarg)
-				user->SendText(checkstr + " lastmsg " + timestring(targuser->idle_lastmsg));
+			context.Write("nuh", targetuser->GetMask());
+			context.Write("realnuh", targetuser->GetRealMask());
+			context.Write("realname", targetuser->GetRealName());
+			context.Write("modes", targetuser->GetModeLetters());
+			context.Write("snomasks", GetSnomasks(targetuser));
+			context.Write("server", targetuser->server->GetName());
+			context.Write("uid", targetuser->uuid);
+			context.Write("signon", targetuser->signon);
+			context.Write("nickchanged", targetuser->nickchanged);
+			if (localtarget)
+				context.Write("lastmsg", localtarget->idle_lastmsg);
 
-			if (IS_AWAY(targuser))
+			if (targetuser->IsAway())
 			{
 				/* user is away */
-				user->SendText(checkstr + " awaytime " + timestring(targuser->awaytime));
-				user->SendText(checkstr + " awaymsg " + targuser->awaymsg);
+				context.Write("awaytime", targetuser->away->time);
+				context.Write("awaymsg", targetuser->away->message);
 			}
 
-			if (IS_OPER(targuser))
+			if (targetuser->IsOper())
 			{
-				OperInfo* oper = targuser->oper;
-				/* user is an oper of type ____ */
-				user->SendText(checkstr + " opertype " + oper->NameStr());
-				if (loctarg)
+				context.Write("oper", targetuser->oper->GetName());
+				context.Write("opertype", targetuser->oper->GetType());
+				if (localtarget)
 				{
-					std::string umodes;
-					std::string cmodes;
-					for(char c='A'; c <= 'z'; c++)
-					{
-						ModeHandler* mh = ServerInstance->Modes->FindMode(c, MODETYPE_USER);
-						if (mh && mh->NeedsOper() && loctarg->HasModePermission(c, MODETYPE_USER))
-							umodes.push_back(c);
-						mh = ServerInstance->Modes->FindMode(c, MODETYPE_CHANNEL);
-						if (mh && mh->NeedsOper() && loctarg->HasModePermission(c, MODETYPE_CHANNEL))
-							cmodes.push_back(c);
-					}
-					user->SendText(checkstr + " modeperms user=" + umodes + " channel=" + cmodes);
-					std::string opcmds;
-					for(std::set<std::string>::iterator i = oper->AllowedOperCommands.begin(); i != oper->AllowedOperCommands.end(); i++)
-					{
-						opcmds.push_back(' ');
-						opcmds.append(*i);
-					}
-					std::stringstream opcmddump(opcmds);
-					user->SendText(checkstr + " commandperms", opcmddump);
-					std::string privs;
-					for(std::set<std::string>::iterator i = oper->AllowedPrivs.begin(); i != oper->AllowedPrivs.end(); i++)
-					{
-						privs.push_back(' ');
-						privs.append(*i);
-					}
-					std::stringstream privdump(privs);
-					user->SendText(checkstr + " permissions", privdump);
+					context.Write("chanmodeperms", localtarget->oper->GetModes(MODETYPE_CHANNEL));
+					context.Write("usermodeperms", localtarget->oper->GetModes(MODETYPE_USER));
+					context.Write("snomaskperms", localtarget->oper->GetSnomasks());
+					context.Write("commandperms", localtarget->oper->GetCommands());
+					context.Write("permissions", localtarget->oper->GetPrivileges());
 				}
 			}
 
-			if (loctarg)
+			if (localtarget)
 			{
-				user->SendText(checkstr + " clientaddr " + irc::sockets::satouser(loctarg->client_sa));
-				user->SendText(checkstr + " serveraddr " + irc::sockets::satouser(loctarg->server_sa));
+				context.Write("clientaddr", localtarget->client_sa.str());
+				context.Write("serveraddr", localtarget->server_sa.str());
 
-				std::string classname = loctarg->GetClass()->name;
+				std::string classname = localtarget->GetClass()->name;
 				if (!classname.empty())
-					user->SendText(checkstr + " connectclass " + classname);
+					context.Write("connectclass", classname);
+
+				context.Write("exempt", localtarget->exempt ? "yes" : "no");
+				context.Write("serializer", localtarget->serializer->name.substr(11));
 			}
 			else
-				user->SendText(checkstr + " onip " + targuser->GetIPString());
+				context.Write("onip", targetuser->GetAddress());
 
-			for (UCListIter i = targuser->chans.begin(); i != targuser->chans.end(); i++)
-			{
-				Channel* c = *i;
-				chliststr.append(c->GetPrefixChar(targuser)).append(c->name).append(" ");
-			}
+			CheckContext::List chanlist(context, "onchans");
+			for (const auto* memb : targetuser->chans)
+				chanlist.Add(memb->GetAllPrefixChars() + memb->chan->name);
+			chanlist.Flush();
 
-			std::stringstream dump(chliststr);
-
-			user->SendText(checkstr + " onchans", dump);
-
-			dumpExt(user, checkstr, targuser);
+			context.DumpExt(targetuser);
 		}
-		else if (targchan)
+		else if (targetchan)
 		{
 			/* /check on a channel */
-			user->SendText(checkstr + " timestamp " + timestring(targchan->age));
+			context.Write("createdat", targetchan->age);
 
-			if (!targchan->topic.empty())
+			if (!targetchan->topic.empty())
 			{
 				/* there is a topic, assume topic related information exists */
-				user->SendText(checkstr + " topic " + targchan->topic);
-				user->SendText(checkstr + " topic_setby " + targchan->setby);
-				user->SendText(checkstr + " topic_setat " + timestring(targchan->topicset));
+				context.Write("topic", targetchan->topic);
+				context.Write("topic_setby", targetchan->setby);
+				context.Write("topic_setat", targetchan->topicset);
 			}
 
-			user->SendText(checkstr + " modes " + targchan->ChanModes(true));
-			user->SendText(checkstr + " membercount " + ConvToStr(targchan->GetUserCounter()));
+			context.Write("modes", targetchan->ChanModes(true));
+			context.Write("membercount", ConvToStr(targetchan->GetUsers().size()));
 
-			/* now the ugly bit, spool current members of a channel. :| */
-
-			const UserMembList *ulist= targchan->GetUsers();
-
-			/* note that unlike /names, we do NOT check +i vs in the channel */
-			for (UserMembCIter i = ulist->begin(); i != ulist->end(); i++)
+			for (const auto& [u, memb] : targetchan->GetUsers())
 			{
-				char tmpbuf[MAXBUF];
 				/*
 				 * Unlike Asuka, I define a clone as coming from the same host. --w00t
 				 */
-				snprintf(tmpbuf, MAXBUF, "%-3lu %s%s (%s@%s) %s ", ServerInstance->Users->GlobalCloneCount(i->first), targchan->GetAllPrefixChars(i->first), i->first->nick.c_str(), i->first->ident.c_str(), i->first->dhost.c_str(), i->first->fullname.c_str());
-				user->SendText(checkstr + " member " + tmpbuf);
+				const UserManager::CloneCounts& clonecount = ServerInstance->Users.GetCloneCounts(u);
+				context.Write("member", INSP_FORMAT("{} {}{} ({}\x0F)", clonecount.global, memb->GetAllPrefixChars(),
+					u->GetMask(), u->GetRealName()));
 			}
 
-			irc::modestacker modestack(true);
-			for(BanList::iterator b = targchan->bans.begin(); b != targchan->bans.end(); ++b)
-			{
-				modestack.Push('b', b->data);
-			}
-			std::vector<std::string> stackresult;
-			std::vector<TranslateType> dummy;
-			while (modestack.GetStackedLine(stackresult))
-			{
-				creator->ProtoSendMode(user, TYPE_CHANNEL, targchan, stackresult, dummy);
-				stackresult.clear();
-			}
-			FOREACH_MOD(I_OnSyncChannel,OnSyncChannel(targchan,creator,user));
-			dumpExt(user, checkstr, targchan);
+			for (auto* lm : ServerInstance->Modes.GetListModes())
+				context.DumpListMode(lm, targetchan);
+
+			context.DumpExt(targetchan);
 		}
 		else
 		{
 			/*  /check on an IP address, or something that doesn't exist */
-			long x = 0;
+			size_t x = 0;
+
+			std::vector<const char*> matches;
+			matches.reserve(6);
 
 			/* hostname or other */
-			for (user_hash::const_iterator a = ServerInstance->Users->clientlist->begin(); a != ServerInstance->Users->clientlist->end(); a++)
+			for (const auto& [_, u] : ServerInstance->Users.GetUsers())
 			{
-				if (InspIRCd::Match(a->second->host, parameters[0], ascii_case_insensitive_map) || InspIRCd::Match(a->second->dhost, parameters[0], ascii_case_insensitive_map))
+				if (InspIRCd::Match(u->nick, parameters[0], ascii_case_insensitive_map))
+					matches.push_back("nick");
+
+				if (InspIRCd::Match(u->GetRealUser(), parameters[0], ascii_case_insensitive_map))
+					matches.push_back("ruser");
+
+				if (InspIRCd::Match(u->GetDisplayedUser(), parameters[0], ascii_case_insensitive_map))
+					matches.push_back("duser");
+
+				if (InspIRCd::Match(u->GetRealHost(), parameters[0], ascii_case_insensitive_map))
+					matches.push_back("rhost");
+
+				if (InspIRCd::Match(u->GetDisplayedHost(), parameters[0], ascii_case_insensitive_map))
+					matches.push_back("dhost");
+
+				if (InspIRCd::MatchCIDR(u->GetAddress(), parameters[0]))
+					matches.push_back("ipaddr");
+
+				if (InspIRCd::MatchCIDR(u->GetRealName(), parameters[0]))
+					matches.push_back("realname");
+
+				if (!matches.empty())
 				{
-					/* host or vhost matches mask */
-					user->SendText(checkstr + " match " + ConvToStr(++x) + " " + a->second->GetFullRealHost() + " " + a->second->GetIPString() + " " + a->second->fullname);
-				}
-				/* IP address */
-				else if (InspIRCd::MatchCIDR(a->second->GetIPString(), parameters[0]))
-				{
-					/* same IP. */
-					user->SendText(checkstr + " match " + ConvToStr(++x) + " " + a->second->GetFullRealHost() + " " + a->second->GetIPString() + " " + a->second->fullname);
+					const std::string whatmatch = insp::join(matches, ',');
+					context.Write("match", INSP_FORMAT("{} {} {} {} {} {} {} {} :{}", ++x, whatmatch, u->nick, u->GetRealUser(),
+						u->GetDisplayedUser(), u->GetRealHost(), u->GetDisplayedHost(), u->GetAddress(), u->GetRealName()));
+					matches.clear();
 				}
 			}
 
-			user->SendText(checkstr + " matches " + ConvToStr(x));
+			context.Write("matches", ConvToStr(x));
 		}
 
-		user->SendText(checkstr + " END " + parameters[0]);
-
-		return CMD_SUCCESS;
+		// END is sent by the CheckContext destructor
+		return CmdResult::SUCCESS;
 	}
 
-	RouteDescriptor GetRouting(User* user, const std::vector<std::string>& parameters)
+	RouteDescriptor GetRouting(User* user, const Params& parameters) override
 	{
-		if (parameters.size() > 1)
+		if ((parameters.size() > 1) && (parameters[1].find('.') != std::string::npos))
 			return ROUTE_OPT_UCAST(parameters[1]);
 		return ROUTE_LOCALONLY;
 	}
 };
 
-
-class ModuleCheck : public Module
+class ModuleCheck final
+	: public Module
 {
- private:
-	CommandCheck mycommand;
- public:
-	ModuleCheck() : mycommand(this)
-	{
-	}
+private:
+	CommandCheck cmd;
 
-	void init()
+public:
+	ModuleCheck()
+		: Module(VF_VENDOR | VF_OPTCOMMON, "Adds the /CHECK command which allows server operators to look up details about a channel, user, IP address, or hostname.")
+		, cmd(this)
 	{
-		ServerInstance->Modules->AddService(mycommand);
-	}
-
-	~ModuleCheck()
-	{
-	}
-
-	void ProtoSendMode(void* uv, TargetTypeFlags, void*, const std::vector<std::string>& result, const std::vector<TranslateType>&)
-	{
-		User* user = (User*)uv;
-		std::string checkstr(":");
-		checkstr.append(ServerInstance->Config->ServerName);
-		checkstr.append(" 304 ");
-		checkstr.append(user->nick);
-		checkstr.append(" :CHECK modelist");
-		for(unsigned int i=0; i < result.size(); i++)
-		{
-			checkstr.append(" ");
-			checkstr.append(result[i]);
-		}
-		user->SendText(checkstr);
-	}
-
-	Version GetVersion()
-	{
-		return Version("CHECK command, view user, channel, IP address or hostname information", VF_VENDOR|VF_OPTCOMMON);
 	}
 };
 

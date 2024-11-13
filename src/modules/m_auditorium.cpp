@@ -1,10 +1,13 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
+ *   Copyright (C) 2017-2023 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2013-2014, 2016, 2018 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
  *   Copyright (C) 2009-2010 Daniel De Graaf <danieldg@inspircd.org>
- *   Copyright (C) 2007-2008 Craig Edwards <craigedwards@brainbox.cc>
- *   Copyright (C) 2007 Dennis Friis <peavey@inspircd.org>
- *   Copyright (C) 2007 Robin Burchell <robin+git@viroteck.net>
+ *   Copyright (C) 2008 Robin Burchell <robin+git@viroteck.net>
+ *   Copyright (C) 2007-2008 Craig Edwards <brain@inspircd.org>
+ *   Copyright (C) 2007, 2009 Dennis Friis <peavey@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -21,66 +24,77 @@
 
 
 #include "inspircd.h"
+#include "clientprotocolevent.h"
+#include "modules/exemption.h"
+#include "modules/names.h"
+#include "modules/who.h"
 
-/* $ModDesc: Allows for auditorium channels (+u) where nobody can see others joining and parting or the nick list */
-
-class AuditoriumMode : public ModeHandler
+class AuditoriumMode final
+	: public SimpleChannelMode
 {
- public:
-	AuditoriumMode(Module* Creator) : ModeHandler(Creator, "auditorium", 'u', PARAM_NONE, MODETYPE_CHANNEL)
+public:
+	AuditoriumMode(Module* Creator)
+		: SimpleChannelMode(Creator, "auditorium", 'u')
 	{
-		levelrequired = OP_VALUE;
-	}
-
-	ModeAction OnModeChange(User* source, User* dest, Channel* channel, std::string &parameter, bool adding)
-	{
-		if (channel->IsModeSet(this) == adding)
-			return MODEACTION_DENY;
-		channel->SetMode(this, adding);
-		return MODEACTION_ALLOW;
+		ranktoset = ranktounset = OP_VALUE;
 	}
 };
 
-class ModuleAuditorium : public Module
+class ModuleAuditorium;
+
+namespace
 {
- private:
+
+/** Hook handler for join client protocol events.
+ * This allows us to block join protocol events completely, including all associated messages (e.g. MODE, away-notify AWAY).
+ * This is not the same as OnUserJoin() because that runs only when a real join happens but this runs also when a module
+ * such as delayjoin or hostcycle generates a join.
+ */
+class JoinHook final
+	: public ClientProtocol::EventHook
+{
+	ModuleAuditorium* const parentmod;
+	bool active;
+
+public:
+	JoinHook(ModuleAuditorium* mod);
+	void OnEventInit(const ClientProtocol::Event& ev) override;
+	ModResult OnPreEventSend(LocalUser* user, const ClientProtocol::Event& ev, ClientProtocol::MessageList& messagelist) override;
+};
+
+}
+
+class ModuleAuditorium final
+	: public Module
+	, public Names::EventListener
+	, public Who::EventListener
+	, public Who::VisibleEventListener
+{
+	CheckExemption::EventProvider exemptionprov;
 	AuditoriumMode aum;
 	bool OpsVisible;
 	bool OpsCanSee;
 	bool OperCanSee;
- public:
-	ModuleAuditorium() : aum(this)
+	JoinHook joinhook;
+
+public:
+	ModuleAuditorium()
+		: Module(VF_VENDOR, "Adds channel mode u (auditorium) which hides unprivileged users in a channel from each other.")
+		, Names::EventListener(this)
+		, Who::EventListener(this)
+		, Who::VisibleEventListener(this)
+		, exemptionprov(this)
+		, aum(this)
+		, joinhook(this)
 	{
 	}
 
-	void init()
+	void ReadConfig(ConfigStatus& status) override
 	{
-		ServerInstance->Modules->AddService(aum);
-
-		OnRehash(NULL);
-
-		Implementation eventlist[] = {
-			I_OnUserJoin, I_OnUserPart, I_OnUserKick,
-			I_OnBuildNeighborList, I_OnNamesListItem, I_OnSendWhoLine,
-			I_OnRehash };
-		ServerInstance->Modules->Attach(eventlist, this, sizeof(eventlist)/sizeof(Implementation));
-	}
-
-	~ModuleAuditorium()
-	{
-	}
-
-	void OnRehash(User* user)
-	{
-		ConfigTag* tag = ServerInstance->Config->ConfValue("auditorium");
+		const auto& tag = ServerInstance->Config->ConfValue("auditorium");
 		OpsVisible = tag->getBool("opvisible");
 		OpsCanSee = tag->getBool("opcansee");
 		OperCanSee = tag->getBool("opercansee", true);
-	}
-
-	Version GetVersion()
-	{
-		return Version("Allows for auditorium channels (+u) where nobody can see others joining and parting or the nick list", VF_VENDOR);
 	}
 
 	/* Can they be seen by everyone? */
@@ -89,8 +103,8 @@ class ModuleAuditorium : public Module
 		if (!memb->chan->IsModeSet(&aum))
 			return true;
 
-		ModResult res = ServerInstance->OnCheckExemption(memb->user, memb->chan, "auditorium-vis");
-		return res.check(OpsVisible && memb->getRank() >= OP_VALUE);
+		ModResult res = exemptionprov.Check(memb->user, memb->chan, "auditorium-vis");
+		return res.check(OpsVisible && memb->GetRank() >= OP_VALUE);
 	}
 
 	/* Can they see this specific membership? */
@@ -105,26 +119,20 @@ class ModuleAuditorium : public Module
 			return true;
 
 		// Can you see the list by permission?
-		ModResult res = ServerInstance->OnCheckExemption(issuer,memb->chan,"auditorium-see");
-		if (res.check(OpsCanSee && memb->chan->GetPrefixValue(issuer) >= OP_VALUE))
-			return true;
-
-		return false;
+		ModResult res = exemptionprov.Check(issuer, memb->chan, "auditorium-see");
+		return res.check(OpsCanSee && memb->chan->GetPrefixValue(issuer) >= OP_VALUE);
 	}
 
-	void OnNamesListItem(User* issuer, Membership* memb, std::string &prefixes, std::string &nick)
+	ModResult OnNamesListItem(LocalUser* issuer, Membership* memb, std::string& prefixes, std::string& nick) override
 	{
-		// Some module already hid this from being displayed, don't bother
-		if (nick.empty())
-			return;
-
 		if (IsVisible(memb))
-			return;
+			return MOD_RES_PASSTHRU;
 
 		if (CanSee(issuer, memb))
-			return;
+			return MOD_RES_PASSTHRU;
 
-		nick.clear();
+		// Don't display this user in the NAMES list
+		return MOD_RES_DENY;
 	}
 
 	/** Build CUList for showing this join/part/kick */
@@ -133,62 +141,82 @@ class ModuleAuditorium : public Module
 		if (IsVisible(memb))
 			return;
 
-		const UserMembList* users = memb->chan->GetUsers();
-		for(UserMembCIter i = users->begin(); i != users->end(); i++)
+		for (const auto& [user, _] : memb->chan->GetUsers())
 		{
-			if (IS_LOCAL(i->first) && !CanSee(i->first, memb))
-				excepts.insert(i->first);
+			if (IS_LOCAL(user) && !CanSee(user, memb))
+				excepts.insert(user);
 		}
 	}
 
-	void OnUserJoin(Membership* memb, bool sync, bool created, CUList& excepts)
+	void OnUserPart(Membership* memb, std::string& partmessage, CUList& excepts) override
 	{
 		BuildExcept(memb, excepts);
 	}
 
-	void OnUserPart(Membership* memb, std::string &partmessage, CUList& excepts)
+	void OnUserKick(User* source, Membership* memb, const std::string& reason, CUList& excepts) override
 	{
 		BuildExcept(memb, excepts);
 	}
 
-	void OnUserKick(User* source, Membership* memb, const std::string &reason, CUList& excepts)
+	void OnBuildNeighborList(User* source, User::NeighborList& include, User::NeighborExceptions& exception) override
 	{
-		BuildExcept(memb, excepts);
-	}
-
-	void OnBuildNeighborList(User* source, UserChanList &include, std::map<User*,bool> &exception)
-	{
-		UCListIter i = include.begin();
-		while (i != include.end())
+		for (User::NeighborList::iterator i = include.begin(); i != include.end(); )
 		{
-			Channel* c = *i++;
-			Membership* memb = c->GetUser(source);
-			if (!memb || IsVisible(memb))
-				continue;
-			// this channel should not be considered when listing my neighbors
-			include.erase(c);
-			// however, that might hide me from ops that can see me...
-			const UserMembList* users = c->GetUsers();
-			for(UserMembCIter j = users->begin(); j != users->end(); j++)
+			Membership* memb = *i;
+			if (IsVisible(memb))
 			{
-				if (IS_LOCAL(j->first) && CanSee(j->first, memb))
-					exception[j->first] = true;
+				++i;
+				continue;
+			}
+
+			// this channel should not be considered when listing my neighbors
+			i = include.erase(i);
+			// however, that might hide me from ops that can see me...
+			for (const auto& [user, _] : memb->chan->GetUsers())
+			{
+				if (IS_LOCAL(user) && CanSee(user, memb))
+					exception[user] = true;
 			}
 		}
 	}
 
-	void OnSendWhoLine(User* source, const std::vector<std::string>& params, User* user, std::string& line)
+	ModResult OnWhoLine(const Who::Request& request, LocalUser* source, User* user, Membership* memb, Numeric::Numeric& numeric) override
 	{
-		Channel* channel = ServerInstance->FindChan(params[0]);
-		if (!channel)
-			return;
-		Membership* memb = channel->GetUser(user);
-		if ((!memb) || (IsVisible(memb)))
-			return;
+		if (!memb)
+			return MOD_RES_PASSTHRU;
+		if (IsVisible(memb))
+			return MOD_RES_PASSTHRU;
 		if (CanSee(source, memb))
-			return;
-		line.clear();
+			return MOD_RES_PASSTHRU;
+		return MOD_RES_DENY;
+	}
+
+	ModResult OnWhoVisible(const Who::Request& request, LocalUser* source, Membership* memb) override
+	{
+		// Never pick a channel as the first visible one if the channel is in auditorium mode.
+		return IsVisible(memb) || CanSee(source, memb) ? MOD_RES_PASSTHRU : MOD_RES_DENY;
 	}
 };
+
+JoinHook::JoinHook(ModuleAuditorium* mod)
+	: ClientProtocol::EventHook(mod, "JOIN", 10)
+	, parentmod(mod)
+{
+}
+
+void JoinHook::OnEventInit(const ClientProtocol::Event& ev)
+{
+	const ClientProtocol::Events::Join& join = static_cast<const ClientProtocol::Events::Join&>(ev);
+	active = !parentmod->IsVisible(join.GetMember());
+}
+
+ModResult JoinHook::OnPreEventSend(LocalUser* user, const ClientProtocol::Event& ev, ClientProtocol::MessageList& messagelist)
+{
+	if (!active)
+		return MOD_RES_PASSTHRU;
+
+	const ClientProtocol::Events::Join& join = static_cast<const ClientProtocol::Events::Join&>(ev);
+	return ((parentmod->CanSee(user, join.GetMember())) ? MOD_RES_PASSTHRU : MOD_RES_DENY);
+}
 
 MODULE_INIT(ModuleAuditorium)

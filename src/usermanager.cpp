@@ -1,10 +1,14 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
+ *   Copyright (C) 2019 iwalkalone <iwalkalone69@gmail.com>
+ *   Copyright (C) 2013-2016, 2018 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2013, 2018-2024 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2013, 2015 Adam <Adam@anope.org>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
  *   Copyright (C) 2009-2010 Daniel De Graaf <danieldg@inspircd.org>
- *   Copyright (C) 2008 Dennis Friis <peavey@inspircd.org>
+ *   Copyright (C) 2008-2009 Craig Edwards <brain@inspircd.org>
  *   Copyright (C) 2008 Robin Burchell <robin+git@viroteck.net>
- *   Copyright (C) 2008 Craig Edwards <craigedwards@brainbox.cc>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -21,119 +25,201 @@
 
 
 #include "inspircd.h"
+#include "clientprotocolmsg.h"
+#include "iohook.h"
 #include "xline.h"
-#include "bancache.h"
 
-UserManager::UserManager()
-	: unregistered_count(0), local_count(0)
+namespace
 {
+	class WriteCommonQuit final
+		: public User::ForEachNeighborHandler
+	{
+		ClientProtocol::Messages::Quit quitmsg;
+		ClientProtocol::Event quitevent;
+		ClientProtocol::Messages::Quit operquitmsg;
+		ClientProtocol::Event operquitevent;
+
+		void Execute(LocalUser* user) override
+		{
+			user->Send(user->IsOper() ? operquitevent : quitevent);
+		}
+
+	public:
+		WriteCommonQuit(User* user, const std::string& msg, const std::string& opermsg)
+			: quitmsg(user, msg)
+			, quitevent(ServerInstance->GetRFCEvents().quit, quitmsg)
+			, operquitmsg(user, opermsg)
+			, operquitevent(ServerInstance->GetRFCEvents().quit, operquitmsg)
+		{
+			user->ForEachNeighbor(*this, false);
+		}
+	};
+
+	void CheckPingTimeout(LocalUser* user)
+	{
+		// Check if it is time to ping the user yet.
+		if (ServerInstance->Time() < user->nextping)
+			return;
+
+		// This user didn't answer the last ping, remove them.
+		if (!user->lastping)
+		{
+			time_t secs = ServerInstance->Time() - (user->nextping - user->GetClass()->pingtime);
+			const std::string message = "Ping timeout: " + ConvToStr(secs) + (secs != 1 ? " seconds" : " second");
+			ServerInstance->Users.QuitUser(user, message);
+			return;
+		}
+
+		user->lastping = 0;
+		user->nextping = ServerInstance->Time() + user->GetClass()->pingtime;
+
+		// If the user has an I/O hook that can handle pinging use that instead.
+		IOHook* hook = user->eh.GetIOHook();
+		while (hook)
+		{
+			if (hook->Ping())
+				return; // Client has been pinged.
+
+			IOHookMiddle* middlehook = IOHookMiddle::ToMiddleHook(hook);
+			hook = middlehook ? middlehook->GetNextHook() : nullptr;
+		}
+
+
+		// Send a ping to the client using an IRC message.
+		ClientProtocol::Messages::Ping ping;
+		user->Send(ServerInstance->GetRFCEvents().ping, ping);
+	}
+
+	void CheckConnectionTimeout(LocalUser* user)
+	{
+		if (user->GetClass() && (ServerInstance->Time() > static_cast<time_t>(user->signon + user->GetClass()->connection_timeout)))
+		{
+			// Either the user did not send NICK/USER or a module blocked connection in
+			// OnCheckReady until the client timed out.
+			ServerInstance->Users.QuitUser(user, "Connection timeout");
+		}
+	}
+
+	void CheckModulesReady(LocalUser* user)
+	{
+		ModResult res;
+		FIRST_MOD_RESULT(OnCheckReady, res, (user));
+		if (res == MOD_RES_PASSTHRU)
+		{
+			// User has sent NICK/USER and modules are ready.
+			user->FullConnect();
+			return;
+		}
+
+		// If the user has been quit in OnCheckReady then we shouldn't quit
+		// them again for having a registration timeout.
+		if (!user->quitting)
+			CheckConnectionTimeout(user);
+	}
 }
 
-/* add a client connection to the sockets list */
-void UserManager::AddUser(int socket, ListenSocket* via, irc::sockets::sockaddrs* client, irc::sockets::sockaddrs* server)
+UserManager::UserManager()
 {
-	/* NOTE: Calling this one parameter constructor for User automatically
-	 * allocates a new UUID and places it in the hash_map.
-	 */
-	LocalUser* New = NULL;
-	try
-	{
-		New = new LocalUser(socket, client, server);
-	}
-	catch (...)
-	{
-		ServerInstance->Logs->Log("USERS", DEFAULT,"*** WTF *** Duplicated UUID! -- Crack smoking monkeys have been unleashed.");
-		ServerInstance->SNO->WriteToSnoMask('a', "WARNING *** Duplicate UUID allocated!");
-		return;
-	}
+	// We need to define a constructor here to work around a Clang bug.
+}
+
+UserManager::~UserManager()
+{
+	for (const auto& [_, client] : clientlist)
+		delete client;
+}
+
+void UserManager::AddUser(int socket, ListenSocket* via, const irc::sockets::sockaddrs& client, const irc::sockets::sockaddrs& server)
+{
+	// User constructor allocates a new UUID for the user and inserts it into the uuidlist
+	LocalUser* const New = new LocalUser(socket, client, server);
 	UserIOHandler* eh = &New->eh;
 
-	/* Give each of the modules an attempt to hook the user for I/O */
-	FOREACH_MOD(I_OnHookIO, OnHookIO(eh, via));
+	ServerInstance->Logs.Debug("USERS", "New user fd: {}", socket);
 
-	if (eh->GetIOHook())
+	this->unknown_count++;
+	this->clientlist[New->nick] = New;
+	this->AddClone(New);
+	this->local_users.push_front(New);
+	FOREACH_MOD(OnUserInit, (New));
+
+	if (!SocketEngine::AddFd(eh, FD_WANT_FAST_READ | FD_WANT_EDGE_WRITE))
 	{
-		try
-		{
-			eh->GetIOHook()->OnStreamSocketAccept(eh, client, server);
-		}
-		catch (CoreException& modexcept)
-		{
-			ServerInstance->Logs->Log("SOCKET", DEBUG,"%s threw an exception: %s", modexcept.GetSource(), modexcept.GetReason());
-		}
-	}
-
-	ServerInstance->Logs->Log("USERS", DEBUG,"New user fd: %d", socket);
-
-	this->unregistered_count++;
-
-	/* The users default nick is their UUID */
-	New->nick = New->uuid;
-	(*(this->clientlist))[New->nick] = New;
-
-	New->registered = REG_NONE;
-	New->signon = ServerInstance->Time();
-	New->lastping = 1;
-
-	ServerInstance->Users->AddLocalClone(New);
-	ServerInstance->Users->AddGlobalClone(New);
-
-	New->localuseriter = this->local_users.insert(local_users.end(), New);
-	local_count++;
-
-	if ((this->local_users.size() > ServerInstance->Config->SoftLimit) || (this->local_users.size() >= (unsigned int)ServerInstance->SE->GetMaxFds()))
-	{
-		ServerInstance->SNO->WriteToSnoMask('a', "Warning: softlimit value has been reached: %d clients", ServerInstance->Config->SoftLimit);
-		this->QuitUser(New,"No more connections allowed");
+		ServerInstance->Logs.Debug("USERS", "Internal error on new connection");
+		this->QuitUser(New, "Internal error handling connection");
 		return;
 	}
 
-	/*
-	 * First class check. We do this again in FullConnect after DNS is done, and NICK/USER is recieved.
-	 * See my note down there for why this is required. DO NOT REMOVE. :) -- w00t
-	 */
-	New->SetClass();
+	// If this listener has an IO hook provider set then tell it about the connection
+	for (ListenSocket::IOHookProvList::iterator i = via->iohookprovs.begin(); i != via->iohookprovs.end(); ++i)
+	{
+		ListenSocket::IOHookProvRef& iohookprovref = *i;
+		if (!iohookprovref)
+		{
+			if (iohookprovref.GetProvider().empty())
+				continue;
 
-	/*
-	 * Check connect class settings and initialise settings into User.
-	 * This will be done again after DNS resolution. -- w00t
-	 */
-	New->CheckClass();
-	if (New->quitting)
+			const char* hooktype = i == via->iohookprovs.begin() ? "hook" : "sslprofile";
+			ServerInstance->Logs.Warning("USERS", "Non-existent I/O hook '{}' in <bind:{}> tag at {}",
+				iohookprovref.GetProvider(), hooktype, via->bind_tag->source.str());
+			this->QuitUser(New, INSP_FORMAT("Internal error handling connection (misconfigured {})", hooktype));
+			return;
+		}
+
+		iohookprovref->OnAccept(eh, client, server);
+
+		// IOHook could have encountered a fatal error, e.g. if the TLS ClientHello
+		// was already in the queue and there was no common TLS version.
+		if (!eh->GetError().empty())
+		{
+			QuitUser(New, eh->GetError());
+			return;
+		}
+	}
+
+	if (this->local_users.size() > ServerInstance->Config->SoftLimit)
+	{
+		ServerInstance->SNO.WriteToSnoMask('a', "Warning: softlimit value has been reached: {} clients", ServerInstance->Config->SoftLimit);
+		this->QuitUser(New, "No more connections allowed");
 		return;
+	}
+
+	if (!New->FindConnectClass())
+		return; // User does not match any connect classes.
 
 	/*
 	 * even with bancache, we still have to keep User::exempt current.
 	 * besides that, if we get a positive bancache hit, we still won't fuck
 	 * them over if they are exempt. -- w00t
 	 */
-	New->exempt = (ServerInstance->XLines->MatchesLine("E",New) != NULL);
+	New->exempt = (ServerInstance->XLines->MatchesLine("E", New) != nullptr);
 
-	if (BanCacheHit *b = ServerInstance->BanCache->GetHit(New->GetIPString()))
+	BanCacheHit* const b = ServerInstance->BanCache.GetHit(New->GetAddress());
+	if (b)
 	{
 		if (!b->Type.empty() && !New->exempt)
 		{
 			/* user banned */
-			ServerInstance->Logs->Log("BANCACHE", DEBUG, std::string("BanCache: Positive hit for ") + New->GetIPString());
-			if (!ServerInstance->Config->MoronBanner.empty())
-				New->WriteServ("NOTICE %s :*** %s", New->nick.c_str(), ServerInstance->Config->MoronBanner.c_str());
+			ServerInstance->Logs.Debug("BANCACHE", "Positive hit for " + New->GetAddress());
 
-			if (ServerInstance->Config->HideBans)
-				this->QuitUser(New, b->Type + "-Lined", b->Reason.c_str());
-			else
-				this->QuitUser(New, b->Reason);
+			if (!ServerInstance->Config->XLineMessage.empty())
+				New->WriteNumeric(ERR_YOUREBANNEDCREEP, ServerInstance->Config->XLineMessage);
+
+			// IMPORTANT: we don't check XLineQuitPublic here because the only
+			// person who might see the ban at this point is the affected user.
+			this->QuitUser(New, b->Reason);
 			return;
 		}
 		else
 		{
-			ServerInstance->Logs->Log("BANCACHE", DEBUG, std::string("BanCache: Negative hit for ") + New->GetIPString());
+			ServerInstance->Logs.Debug("BANCACHE", "Negative hit for " + New->GetAddress());
 		}
 	}
 	else
 	{
 		if (!New->exempt)
 		{
-			XLine* r = ServerInstance->XLines->MatchesLine("Z",New);
+			XLine* r = ServerInstance->XLines->MatchesLine("Z", New);
 
 			if (r)
 			{
@@ -143,277 +229,238 @@ void UserManager::AddUser(int socket, ListenSocket* via, irc::sockets::sockaddrs
 		}
 	}
 
-	if (!ServerInstance->SE->AddFd(eh, FD_WANT_FAST_READ | FD_WANT_EDGE_WRITE))
-	{
-		ServerInstance->Logs->Log("USERS", DEBUG,"Internal error on new connection");
-		this->QuitUser(New, "Internal error handling connection");
-		return;
-	}
-
-	/* NOTE: even if dns lookups are *off*, we still need to display this.
-	 * BOPM and other stuff requires it.
-	 */
-	New->WriteServ("NOTICE Auth :*** Looking up your hostname...");
 	if (ServerInstance->Config->RawLog)
-		New->WriteServ("NOTICE Auth :*** Raw I/O logging is enabled on this server. All messages, passwords, and commands are being recorded.");
+		Log::NotifyRawIO(New, MessageType::NOTICE);
 
-	FOREACH_MOD(I_OnSetUserIP,OnSetUserIP(New));
-	if (New->quitting)
-		return;
-
-	FOREACH_MOD(I_OnUserInit,OnUserInit(New));
-
-	if (ServerInstance->Config->NoUserDns)
-	{
-		New->WriteServ("NOTICE %s :*** Skipping host resolution (disabled by server administrator)", New->nick.c_str());
-		New->dns_done = true;
-	}
-	else
-	{
-		New->StartDNSLookup();
-	}
+	FOREACH_MOD(OnChangeRemoteAddress, (New));
+	if (!New->quitting)
+		FOREACH_MOD(OnUserPostInit, (New));
 }
 
-void UserManager::QuitUser(User *user, const std::string &quitreason, const char* operreason)
+void UserManager::QuitUser(User* user, const std::string& quitmessage, const std::string* operquitmessage)
 {
 	if (user->quitting)
 	{
-		ServerInstance->Logs->Log("USERS", DEFAULT, "ERROR: Tried to quit quitting user: " + user->nick);
+		ServerInstance->Logs.Debug("USERS", "BUG: Tried to quit quitting user: " + user->nick);
 		return;
 	}
 
 	if (IS_SERVER(user))
 	{
-		ServerInstance->Logs->Log("USERS", DEFAULT, "ERROR: Tried to quit server user: " + user->nick);
+		ServerInstance->Logs.Debug("USERS", "BUG: Tried to quit server user: " + user->nick);
 		return;
 	}
 
+	std::string quitmsg(quitmessage);
+	std::string operquitmsg;
+	if (operquitmessage)
+		operquitmsg.assign(*operquitmessage);
+
+	LocalUser* const localuser = IS_LOCAL(user);
+	if (localuser)
+	{
+		ModResult modres;
+		FIRST_MOD_RESULT(OnUserPreQuit, modres, (localuser, quitmsg, operquitmsg));
+		if (modres == MOD_RES_DENY)
+			return;
+	}
+
+	if (quitmsg.length() > ServerInstance->Config->Limits.MaxQuit)
+		quitmsg.erase(ServerInstance->Config->Limits.MaxQuit + 1);
+
+	if (operquitmsg.empty())
+		operquitmsg.assign(quitmsg);
+	else if (operquitmsg.length() > ServerInstance->Config->Limits.MaxQuit)
+		operquitmsg.erase(ServerInstance->Config->Limits.MaxQuit + 1);
+
 	user->quitting = true;
-
-	ServerInstance->Logs->Log("USERS", DEBUG, "QuitUser: %s=%s '%s'", user->uuid.c_str(), user->nick.c_str(), quitreason.c_str());
-	user->Write("ERROR :Closing link: (%s@%s) [%s]", user->ident.c_str(), user->host.c_str(), *operreason ? operreason : quitreason.c_str());
-
-	std::string reason;
-	std::string oper_reason;
-	reason.assign(quitreason, 0, ServerInstance->Config->Limits.MaxQuit);
-	if (operreason && *operreason)
-		oper_reason.assign(operreason, 0, ServerInstance->Config->Limits.MaxQuit);
-	else
-		oper_reason = quitreason;
+	ServerInstance->Logs.Debug("USERS", "QuitUser: {}={} '{}'", user->uuid, user->nick, quitmessage);
+	if (localuser)
+	{
+		ClientProtocol::Messages::Error errormsg(INSP_FORMAT("Closing link: ({}) [{}]", user->GetRealUserHost(), operquitmsg));
+		localuser->Send(ServerInstance->GetRFCEvents().error, errormsg);
+	}
 
 	ServerInstance->GlobalCulls.AddItem(user);
 
-	if (user->registered == REG_ALL)
+	if (user->IsFullyConnected())
 	{
-		FOREACH_MOD(I_OnUserQuit,OnUserQuit(user, reason, oper_reason));
-		user->WriteCommonQuit(reason, oper_reason);
+		FOREACH_MOD(OnUserQuit, (user, quitmsg, operquitmsg));
+		WriteCommonQuit(user, quitmsg, operquitmsg);
 	}
-
-	if (user->registered != REG_ALL)
-		if (ServerInstance->Users->unregistered_count)
-			ServerInstance->Users->unregistered_count--;
+	else
+		unknown_count--;
 
 	if (IS_LOCAL(user))
 	{
 		LocalUser* lu = IS_LOCAL(user);
-		FOREACH_MOD(I_OnUserDisconnect,OnUserDisconnect(lu));
+		FOREACH_MOD(OnUserDisconnect, (lu));
 		lu->eh.Close();
+
+		if (lu->IsFullyConnected())
+		{
+			ServerInstance->SNO.WriteToSnoMask('q', "Client exiting: {} ({}) [{}]", user->GetRealMask(),
+				user->GetAddress(), operquitmsg);
+		}
+		local_users.erase(lu);
+		if (lu->GetClass())
+			lu->GetClass()->use_count--;
 	}
 
-	/*
-	 * this must come before the ServerInstance->SNO->WriteToSnoMaskso that it doesnt try to fill their buffer with anything
-	 * if they were an oper with +s +qQ.
-	 */
-	if (user->registered == REG_ALL)
-	{
-		if (IS_LOCAL(user))
-		{
-			if (!user->quietquit)
-			{
-				ServerInstance->SNO->WriteToSnoMask('q',"Client exiting: %s (%s) [%s]",
-					user->GetFullRealHost().c_str(), user->GetIPString(), oper_reason.c_str());
-			}
-		}
-		else
-		{
-			if ((!ServerInstance->SilentULine(user->server)) && (!user->quietquit))
-			{
-				ServerInstance->SNO->WriteToSnoMask('Q',"Client exiting on server %s: %s (%s) [%s]",
-					user->server.c_str(), user->GetFullRealHost().c_str(), user->GetIPString(), oper_reason.c_str());
-			}
-		}
-		user->AddToWhoWas();
-	}
+	if (!clientlist.erase(user->nick))
+		ServerInstance->Logs.Debug("USERS", "BUG: Nick not found in clientlist, cannot remove: " + user->nick);
 
-	user_hash::iterator iter = this->clientlist->find(user->nick);
-
-	if (iter != this->clientlist->end())
-		this->clientlist->erase(iter);
-	else
-		ServerInstance->Logs->Log("USERS", DEFAULT, "ERROR: Nick not found in clientlist, cannot remove: " + user->nick);
-
-	ServerInstance->Users->uuidlist->erase(user->uuid);
+	uuidlist.erase(user->uuid);
+	user->PurgeEmptyChannels();
+	user->OperLogout();
 }
 
-
-void UserManager::AddLocalClone(User *user)
+void UserManager::AddClone(User* user)
 {
-	local_clones[user->GetCIDRMask()]++;
-}
-
-void UserManager::AddGlobalClone(User *user)
-{
-	global_clones[user->GetCIDRMask()]++;
-}
-
-void UserManager::RemoveCloneCounts(User *user)
-{
+	CloneCounts& counts = clonemap[user->GetCIDRMask()];
+	counts.global++;
 	if (IS_LOCAL(user))
-	{
-		clonemap::iterator x = local_clones.find(user->GetCIDRMask());
-		if (x != local_clones.end())
-		{
-			x->second--;
-			if (!x->second)
-			{
-				local_clones.erase(x);
-			}
-		}
-	}
+		counts.local++;
+}
 
-	clonemap::iterator y = global_clones.find(user->GetCIDRMask());
-	if (y != global_clones.end())
+void UserManager::RemoveCloneCounts(User* user)
+{
+	CloneMap::iterator it = clonemap.find(user->GetCIDRMask());
+	if (it != clonemap.end())
 	{
-		y->second--;
-		if (!y->second)
+		CloneCounts& counts = it->second;
+		counts.global--;
+		if (counts.global == 0)
 		{
-			global_clones.erase(y);
+			// No more users from this IP, remove entry from the map
+			clonemap.erase(it);
+			return;
 		}
+
+		if (IS_LOCAL(user))
+			counts.local--;
 	}
 }
 
 void UserManager::RehashCloneCounts()
 {
-	local_clones.clear();
-	global_clones.clear();
+	clonemap.clear();
 
-	const user_hash& hash = *ServerInstance->Users->clientlist;
-	for (user_hash::const_iterator i = hash.begin(); i != hash.end(); ++i)
-	{
-		User* u = i->second;
-
-		if (IS_LOCAL(u))
-			AddLocalClone(u);
-		AddGlobalClone(u);
-	}
+	for (const auto& [_, u] : ServerInstance->Users.GetUsers())
+		AddClone(u);
 }
 
-unsigned long UserManager::GlobalCloneCount(User *user)
+void UserManager::RehashServices()
 {
-	clonemap::iterator x = global_clones.find(user->GetCIDRMask());
-	if (x != global_clones.end())
-		return x->second;
+	UserManager::ServiceList newservices;
+	for (const auto& [_, user] : ServerInstance->Users.GetUsers())
+	{
+		if (user->server->IsService())
+			newservices.push_back(user);
+	}
+	std::swap(ServerInstance->Users.all_services, newservices);
+}
+
+const UserManager::CloneCounts& UserManager::GetCloneCounts(User* user) const
+{
+	CloneMap::const_iterator it = clonemap.find(user->GetCIDRMask());
+	if (it != clonemap.end())
+		return it->second;
 	else
-		return 0;
+		return zeroclonecounts;
 }
 
-unsigned long UserManager::LocalCloneCount(User *user)
+/**
+ * This function is called once a second from the mainloop.
+ * It is intended to do background checking on all the users, e.g. do
+ * ping checks, connection timeouts, etc.
+ */
+void UserManager::DoBackgroundUserStuff()
 {
-	clonemap::iterator x = local_clones.find(user->GetCIDRMask());
-	if (x != local_clones.end())
-		return x->second;
-	else
-		return 0;
-}
-
-/* this function counts all users connected, wether they are registered or NOT. */
-unsigned int UserManager::UserCount()
-{
-	/*
-	 * XXX: Todo:
-	 *  As part of this restructuring, move clientlist/etc fields into usermanager.
-	 * 	-- w00t
-	 */
-	return this->clientlist->size();
-}
-
-/* this counts only registered users, so that the percentages in /MAP don't mess up */
-unsigned int UserManager::RegisteredUserCount()
-{
-	return this->clientlist->size() - this->UnregisteredUserCount();
-}
-
-/* return how many users are opered */
-unsigned int UserManager::OperCount()
-{
-	return this->all_opers.size();
-}
-
-/* return how many users are unregistered */
-unsigned int UserManager::UnregisteredUserCount()
-{
-	return this->unregistered_count;
-}
-
-/* return how many local registered users there are */
-unsigned int UserManager::LocalUserCount()
-{
-	/* Doesnt count unregistered clients */
-	return (this->local_count - this->UnregisteredUserCount());
-}
-
-void UserManager::ServerNoticeAll(const char* text, ...)
-{
-	if (!text)
-		return;
-
-	char textbuffer[MAXBUF];
-	char formatbuffer[MAXBUF];
-	va_list argsPtr;
-	va_start (argsPtr, text);
-	vsnprintf(textbuffer, MAXBUF, text, argsPtr);
-	va_end(argsPtr);
-
-	snprintf(formatbuffer,MAXBUF,"NOTICE $%s :%s", ServerInstance->Config->ServerName.c_str(), textbuffer);
-
-	for (LocalUserList::const_iterator i = local_users.begin(); i != local_users.end(); i++)
+	for (LocalList::iterator i = local_users.begin(); i != local_users.end(); )
 	{
-		User* t = *i;
-		t->WriteServ(std::string(formatbuffer));
+		// It's possible that we quit the user below due to ping timeout etc. and QuitUser() removes it from the list
+		LocalUser* curr = *i;
+		++i;
+
+		if (curr->CommandFloodPenalty || curr->eh.GetSendQSize())
+		{
+			unsigned long rate = curr->GetClass()->commandrate;
+			if (curr->CommandFloodPenalty > rate)
+				curr->CommandFloodPenalty -= rate;
+			else
+				curr->CommandFloodPenalty = 0;
+			curr->eh.OnDataReady();
+		}
+
+		switch (curr->connected)
+		{
+			case User::CONN_FULL:
+				CheckPingTimeout(curr);
+				break;
+
+			case User::CONN_NICKUSER:
+				CheckModulesReady(curr);
+				break;
+
+			default:
+				CheckConnectionTimeout(curr);
+				break;
+		}
 	}
 }
 
-void UserManager::ServerPrivmsgAll(const char* text, ...)
+uint64_t UserManager::NextAlreadySentId()
 {
-	if (!text)
-		return;
-
-	char textbuffer[MAXBUF];
-	char formatbuffer[MAXBUF];
-	va_list argsPtr;
-	va_start (argsPtr, text);
-	vsnprintf(textbuffer, MAXBUF, text, argsPtr);
-	va_end(argsPtr);
-
-	snprintf(formatbuffer,MAXBUF,"PRIVMSG $%s :%s", ServerInstance->Config->ServerName.c_str(), textbuffer);
-
-	for (LocalUserList::const_iterator i = local_users.begin(); i != local_users.end(); i++)
+	if (++already_sent_id == 0)
 	{
-		User* t = *i;
-		t->WriteServ(std::string(formatbuffer));
+		// Wrapped around, reset the already_sent ids of all users
+		already_sent_id = 1;
+		for (auto* user : GetLocalUsers())
+			user->already_sent = 0;
 	}
+	return already_sent_id;
 }
 
-
-/* return how many users have a given mode e.g. 'a' */
-int UserManager::ModeCount(const char mode)
+User* UserManager::Find(const std::string& nickuuid, bool fullyconnected)
 {
-	int c = 0;
-	for(user_hash::iterator i = clientlist->begin(); i != clientlist->end(); ++i)
-	{
-		User* u = i->second;
-		if (u->modes[mode-65])
-			c++;
-	}
-	return c;
+	if (nickuuid.empty())
+		return nullptr;
+
+	if (isdigit(nickuuid[0]))
+		return FindUUID(nickuuid, fullyconnected);
+
+	return FindNick(nickuuid, fullyconnected);
+}
+
+User* UserManager::FindNick(const std::string& nick, bool fullyconnected)
+{
+	if (nick.empty())
+		return nullptr;
+
+	UserMap::iterator uiter = this->clientlist.find(nick);
+	if (uiter == this->clientlist.end())
+		return nullptr;
+
+	User* user = uiter->second;
+	if (fullyconnected && !user->IsFullyConnected())
+		return nullptr;
+
+	return user;
+}
+
+User* UserManager::FindUUID(const std::string& uuid, bool fullyconnected)
+{
+	if (uuid.empty())
+		return nullptr;
+
+	UserMap::iterator uiter = this->uuidlist.find(uuid);
+	if (uiter == this->uuidlist.end())
+		return nullptr;
+
+	User* user = uiter->second;
+	if (fullyconnected && !user->IsFullyConnected())
+		return nullptr;
+
+	return user;
 }

@@ -1,12 +1,17 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
+ *   Copyright (C) 2021 Dominic Hamon
+ *   Copyright (C) 2019 linuxdaemon <linuxdaemon.irc@gmail.com>
+ *   Copyright (C) 2018 edef <edef@edef.eu>
+ *   Copyright (C) 2013-2014, 2017, 2019-2023 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2012-2016 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
  *   Copyright (C) 2009 Daniel De Graaf <danieldg@inspircd.org>
- *   Copyright (C) 2007-2008 Robin Burchell <robin+git@viroteck.net>
- *   Copyright (C) 2008 Pippijn van Steenhoven <pip88nl@gmail.com>
- *   Copyright (C) 2006-2008 Craig Edwards <craigedwards@brainbox.cc>
- *   Copyright (C) 2007 John Brooks <john.brooks@dereferenced.net>
+ *   Copyright (C) 2008 Robin Burchell <robin+git@viroteck.net>
+ *   Copyright (C) 2007 John Brooks <john@jbrooks.io>
  *   Copyright (C) 2007 Dennis Friis <peavey@inspircd.org>
+ *   Copyright (C) 2006, 2008 Craig Edwards <brain@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -23,178 +28,251 @@
 
 
 #include "inspircd.h"
-#include "httpd.h"
+#include "iohook.h"
+#include "modules/httpd.h"
+#include "utility/string.h"
 
-/* $ModDesc: Provides HTTP serving facilities to modules */
-/* $ModDep: httpd.h */
+#ifdef __GNUC__
+# pragma GCC diagnostic push
+#endif
+
+// Fix warnings about shadowing in http_parser.
+#ifdef __GNUC__
+# pragma GCC diagnostic ignored "-Wshadow"
+#endif
+
+#include <http_parser/http_parser.c>
+
+#ifdef __GNUC__
+# pragma GCC diagnostic pop
+#endif
 
 class ModuleHttpServer;
 
 static ModuleHttpServer* HttpModule;
-static bool claimed;
-static std::set<HttpServerSocket*> sockets;
-
-/** HTTP socket states
- */
-enum HttpState
-{
-	HTTP_SERVE_WAIT_REQUEST = 0, /* Waiting for a full request */
-	HTTP_SERVE_RECV_POSTDATA = 1, /* Waiting to finish recieving POST data */
-	HTTP_SERVE_SEND_DATA = 2 /* Sending response */
-};
+static insp::intrusive_list<HttpServerSocket> sockets;
+static Events::ModuleEventProvider* aclevprov;
+static Events::ModuleEventProvider* reqevprov;
+static http_parser_settings parser_settings;
 
 /** A socket used for HTTP transport
  */
-class HttpServerSocket : public BufferedSocket
+class HttpServerSocket final
+	: public BufferedSocket
+	, public Timer
+	, public insp::intrusive_list_node<HttpServerSocket>
 {
-	HttpState InternalState;
+private:
+	friend class ModuleHttpServer;
+
+	http_parser parser;
+	http_parser_url url;
 	std::string ip;
-
-	HTTPHeaders headers;
-	std::string reqbuffer;
-	std::string postdata;
-	unsigned int postsize;
-	std::string request_type;
 	std::string uri;
-	std::string http_version;
+	HTTPHeaders headers;
+	std::string body;
+	size_t total_buffers;
+	int status_code = 0;
 
- public:
-	const time_t createtime;
+	/** True if this object is in the cull list
+	 */
+	bool waitingcull = false;
+	bool messagecomplete = false;
 
-	HttpServerSocket(int newfd, const std::string& IP, ListenSocket* via, irc::sockets::sockaddrs* client, irc::sockets::sockaddrs* server)
-		: BufferedSocket(newfd), ip(IP), postsize(0)
-		, createtime(ServerInstance->Time())
+	bool Tick() override
 	{
-		InternalState = HTTP_SERVE_WAIT_REQUEST;
+		if (!messagecomplete)
+		{
+			ServerInstance->Logs.Debug(MODNAME, "HTTP socket {} timed out", GetFd());
+			Close();
+			return false;
+		}
 
-		FOREACH_MOD(I_OnHookIO, OnHookIO(this, via));
-		if (GetIOHook())
-			GetIOHook()->OnStreamSocketAccept(this, client, server);
+		return true;
 	}
 
-	~HttpServerSocket()
+	template<int (HttpServerSocket::*f)()>
+	static int Callback(http_parser* p)
+	{
+		HttpServerSocket* sock = static_cast<HttpServerSocket*>(p->data);
+		return (sock->*f)();
+	}
+
+	template<int (HttpServerSocket::*f)(const char*, size_t)>
+	static int DataCallback(http_parser* p, const char* buf, size_t len)
+	{
+		HttpServerSocket* sock = static_cast<HttpServerSocket*>(p->data);
+		return (sock->*f)(buf, len);
+	}
+
+	static void ConfigureParser()
+	{
+		http_parser_settings_init(&parser_settings);
+		parser_settings.on_message_begin = Callback<&HttpServerSocket::OnMessageBegin>;
+		parser_settings.on_url = DataCallback<&HttpServerSocket::OnUrl>;
+		parser_settings.on_header_field = DataCallback<&HttpServerSocket::OnHeaderField>;
+		parser_settings.on_header_value = DataCallback<&HttpServerSocket::OnHeaderValue>;
+		parser_settings.on_headers_complete = Callback<&HttpServerSocket::OnHeadersComplete>;
+		parser_settings.on_body = DataCallback<&HttpServerSocket::OnBody>;
+		parser_settings.on_message_complete = Callback<&HttpServerSocket::OnMessageComplete>;
+	}
+
+	int OnMessageBegin()
+	{
+		uri.clear();
+		header_state = HEADER_NONE;
+		body.clear();
+		total_buffers = 0;
+		return 0;
+	}
+
+	bool AcceptData(size_t len)
+	{
+		total_buffers += len;
+		return total_buffers < 8192;
+	}
+
+	int OnUrl(const char* buf, size_t len)
+	{
+		if (!AcceptData(len))
+		{
+			status_code = HTTP_STATUS_URI_TOO_LONG;
+			return -1;
+		}
+		uri.append(buf, len);
+		return 0;
+	}
+
+	enum { HEADER_NONE, HEADER_FIELD, HEADER_VALUE } header_state;
+	std::string header_field;
+	std::string header_value;
+
+	void OnHeaderComplete()
+	{
+		headers.SetHeader(header_field, header_value);
+		header_field.clear();
+		header_value.clear();
+	}
+
+	int OnHeaderField(const char* buf, size_t len)
+	{
+		if (header_state == HEADER_VALUE)
+			OnHeaderComplete();
+		header_state = HEADER_FIELD;
+		if (!AcceptData(len))
+		{
+			status_code = HTTP_STATUS_REQUEST_HEADER_FIELDS_TOO_LARGE;
+			return -1;
+		}
+		header_field.append(buf, len);
+		return 0;
+	}
+
+	int OnHeaderValue(const char* buf, size_t len)
+	{
+		header_state = HEADER_VALUE;
+		if (!AcceptData(len))
+		{
+			status_code = HTTP_STATUS_REQUEST_HEADER_FIELDS_TOO_LARGE;
+			return -1;
+		}
+		header_value.append(buf, len);
+		return 0;
+	}
+
+	int OnHeadersComplete()
+	{
+		if (header_state != HEADER_NONE)
+			OnHeaderComplete();
+		return 0;
+	}
+
+	int OnBody(const char* buf, size_t len)
+	{
+		if (!AcceptData(len))
+		{
+			status_code = HTTP_STATUS_PAYLOAD_TOO_LARGE;
+			return -1;
+		}
+		body.append(buf, len);
+		return 0;
+	}
+
+	int OnMessageComplete()
+	{
+		messagecomplete = true;
+		ServeData();
+		return 0;
+	}
+
+public:
+	HttpServerSocket(int newfd, const std::string& IP, ListenSocket* via, const irc::sockets::sockaddrs& client, const irc::sockets::sockaddrs& server, unsigned long timeoutsec)
+		: BufferedSocket(newfd)
+		, Timer(timeoutsec, false)
+		, ip(IP)
+	{
+		if ((!via->iohookprovs.empty()) && (via->iohookprovs.back()))
+		{
+			via->iohookprovs.back()->OnAccept(this, client, server);
+			// IOHook may have errored
+			if (!GetError().empty())
+			{
+				ServerInstance->Logs.Debug(MODNAME, "HTTP socket {} encountered a hook error: {}",
+					GetFd(), GetError());
+				Close();
+				return;
+			}
+		}
+
+		parser.data = this;
+		http_parser_init(&parser, HTTP_REQUEST);
+		ServerInstance->Timers.AddTimer(this);
+	}
+
+	~HttpServerSocket() override
 	{
 		sockets.erase(this);
 	}
 
-	virtual void OnError(BufferedSocketError)
+	void Close() override
 	{
+		if (waitingcull || !HasFd())
+			return;
+
+		waitingcull = true;
+		BufferedSocket::Close();
 		ServerInstance->GlobalCulls.AddItem(this);
 	}
 
-	std::string Response(int response)
+	void OnError(BufferedSocketError err) override
 	{
-		switch (response)
-		{
-			case 100:
-				return "CONTINUE";
-			case 101:
-				return "SWITCHING PROTOCOLS";
-			case 200:
-				return "OK";
-			case 201:
-				return "CREATED";
-			case 202:
-				return "ACCEPTED";
-			case 203:
-				return "NON-AUTHORITATIVE INFORMATION";
-			case 204:
-				return "NO CONTENT";
-			case 205:
-				return "RESET CONTENT";
-			case 206:
-				return "PARTIAL CONTENT";
-			case 300:
-				return "MULTIPLE CHOICES";
-			case 301:
-				return "MOVED PERMANENTLY";
-			case 302:
-				return "FOUND";
-			case 303:
-				return "SEE OTHER";
-			case 304:
-				return "NOT MODIFIED";
-			case 305:
-				return "USE PROXY";
-			case 307:
-				return "TEMPORARY REDIRECT";
-			case 400:
-				return "BAD REQUEST";
-			case 401:
-				return "UNAUTHORIZED";
-			case 402:
-				return "PAYMENT REQUIRED";
-			case 403:
-				return "FORBIDDEN";
-			case 404:
-				return "NOT FOUND";
-			case 405:
-				return "METHOD NOT ALLOWED";
-			case 406:
-				return "NOT ACCEPTABLE";
-			case 407:
-				return "PROXY AUTHENTICATION REQUIRED";
-			case 408:
-				return "REQUEST TIMEOUT";
-			case 409:
-				return "CONFLICT";
-			case 410:
-				return "GONE";
-			case 411:
-				return "LENGTH REQUIRED";
-			case 412:
-				return "PRECONDITION FAILED";
-			case 413:
-				return "REQUEST ENTITY TOO LARGE";
-			case 414:
-				return "REQUEST-URI TOO LONG";
-			case 415:
-				return "UNSUPPORTED MEDIA TYPE";
-			case 416:
-				return "REQUESTED RANGE NOT SATISFIABLE";
-			case 417:
-				return "EXPECTATION FAILED";
-			case 500:
-				return "INTERNAL SERVER ERROR";
-			case 501:
-				return "NOT IMPLEMENTED";
-			case 502:
-				return "BAD GATEWAY";
-			case 503:
-				return "SERVICE UNAVAILABLE";
-			case 504:
-				return "GATEWAY TIMEOUT";
-			case 505:
-				return "HTTP VERSION NOT SUPPORTED";
-			default:
-				return "WTF";
-			break;
-
-		}
+		ServerInstance->Logs.Debug(MODNAME, "HTTP socket {} encountered an error: {} - {}",
+			GetFd(), (int)err, GetError());
+		Close();
 	}
 
-	void SendHTTPError(int response)
+	void SendHTTPError(unsigned int response, const char* errstr = nullptr)
 	{
-		HTTPHeaders empty;
-		std::string data = "<html><head></head><body>Server error "+ConvToStr(response)+": "+Response(response)+"<br>"+
-		                   "<small>Powered by <a href='http://www.inspircd.org'>InspIRCd</a></small></body></html>";
+		if (!errstr)
+			errstr = http_status_str((http_status)response);
 
-		SendHeaders(data.length(), response, empty);
-		WriteData(data);
+		ServerInstance->Logs.Debug(MODNAME, "Sending HTTP error {}: {}", response, errstr);
+		static HTTPHeaders empty;
+		std::string data = INSP_FORMAT(
+			"<html><head></head><body style='font-family: sans-serif; text-align: center'>"
+			"<h1 style='font-size: 48pt'>Error {}</h1><h2 style='font-size: 24pt'>{}</h2><hr>"
+			"<small>Powered by <a href='https://www.inspircd.org'>InspIRCd</a></small></body></html>",
+			response, errstr);
+
+		Page(data, response, &empty);
 	}
 
-	void SendHeaders(unsigned long size, int response, HTTPHeaders &rheaders)
+	void SendHeaders(unsigned long size, unsigned int response, HTTPHeaders& rheaders)
 	{
+		WriteData(INSP_FORMAT("HTTP/{}.{} {} {}\r\n", parser.http_major ? parser.http_major : 1, parser.http_major ? parser.http_minor : 1, response, http_status_str((http_status)response)));
 
-		WriteData(http_version + " "+ConvToStr(response)+" "+Response(response)+"\r\n");
-
-		time_t local = ServerInstance->Time();
-		struct tm *timeinfo = gmtime(&local);
-		char *date = asctime(timeinfo);
-		date[strlen(date) - 1] = '\0';
-		rheaders.CreateHeader("Date", date);
-
-		rheaders.CreateHeader("Server", BRANCH);
+		rheaders.CreateHeader("Date", Time::ToString(ServerInstance->Time(), "%a, %d %b %Y %H:%M:%S GMT", true));
+		rheaders.CreateHeader("Server", INSPIRCD_BRANCH);
 		rheaders.SetHeader("Content-Length", ConvToStr(size));
 
 		if (size)
@@ -202,7 +280,7 @@ class HttpServerSocket : public BufferedSocket
 		else
 			rheaders.RemoveHeader("Content-Type");
 
-		/* Supporting Connection: keep-alive causes a whole world of hurt syncronizing timeouts,
+		/* Supporting Connection: keep-alive causes a whole world of hurt synchronizing timeouts,
 		 * so remove it, its not essential for what we need.
 		 */
 		rheaders.SetHeader("Connection", "Close");
@@ -211,223 +289,182 @@ class HttpServerSocket : public BufferedSocket
 		WriteData("\r\n");
 	}
 
-	void OnDataReady()
+	void OnDataReady() override
 	{
-		if (InternalState == HTTP_SERVE_RECV_POSTDATA)
-		{
-			postdata.append(recvq);
-			if (postdata.length() >= postsize)
-				ServeData();
-		}
-		else
-		{
-			reqbuffer.append(recvq);
-
-			if (reqbuffer.length() >= 8192)
-			{
-				ServerInstance->Logs->Log("m_httpd",DEBUG, "m_httpd dropped connection due to an oversized request buffer");
-				reqbuffer.clear();
-				SetError("Buffer");
-			}
-
-			if (InternalState == HTTP_SERVE_WAIT_REQUEST)
-				CheckRequestBuffer();
-		}
-	}
-
-	void CheckRequestBuffer()
-	{
-		std::string::size_type reqend = reqbuffer.find("\r\n\r\n");
-		if (reqend == std::string::npos)
+		if (parser.upgrade || HTTP_PARSER_ERRNO(&parser))
 			return;
-
-		// We have the headers; parse them all
-		std::string::size_type hbegin = 0, hend;
-		while ((hend = reqbuffer.find("\r\n", hbegin)) != std::string::npos)
-		{
-			if (hbegin == hend)
-				break;
-
-			if (request_type.empty())
-			{
-				std::istringstream cheader(std::string(reqbuffer, hbegin, hend - hbegin));
-				cheader >> request_type;
-				cheader >> uri;
-				cheader >> http_version;
-
-				if (request_type.empty() || uri.empty() || http_version.empty())
-				{
-					SendHTTPError(400);
-					return;
-				}
-
-				hbegin = hend + 2;
-				continue;
-			}
-
-			std::string cheader = reqbuffer.substr(hbegin, hend - hbegin);
-
-			std::string::size_type fieldsep = cheader.find(':');
-			if ((fieldsep == std::string::npos) || (fieldsep == 0) || (fieldsep == cheader.length() - 1))
-			{
-				SendHTTPError(400);
-				return;
-			}
-
-			headers.SetHeader(cheader.substr(0, fieldsep), cheader.substr(fieldsep + 2));
-
-			hbegin = hend + 2;
-		}
-
-		reqbuffer.erase(0, reqend + 4);
-
-		std::transform(request_type.begin(), request_type.end(), request_type.begin(), ::toupper);
-		std::transform(http_version.begin(), http_version.end(), http_version.begin(), ::toupper);
-
-		if ((http_version != "HTTP/1.1") && (http_version != "HTTP/1.0"))
-		{
-			SendHTTPError(505);
-			return;
-		}
-
-		if (headers.IsSet("Content-Length") && (postsize = ConvToInt(headers.GetHeader("Content-Length"))) > 0)
-		{
-			InternalState = HTTP_SERVE_RECV_POSTDATA;
-
-			if (reqbuffer.length() >= postsize)
-			{
-				postdata = reqbuffer.substr(0, postsize);
-				reqbuffer.erase(0, postsize);
-			}
-			else if (!reqbuffer.empty())
-			{
-				postdata = reqbuffer;
-				reqbuffer.clear();
-			}
-
-			if (postdata.length() >= postsize)
-				ServeData();
-
-			return;
-		}
-
-		ServeData();
+		http_parser_execute(&parser, &parser_settings, recvq.data(), recvq.size());
+		if (parser.upgrade)
+			SendHTTPError(status_code ? status_code : 400);
+		else if (HTTP_PARSER_ERRNO(&parser))
+			SendHTTPError(status_code ? status_code : 400, http_errno_description((http_errno)parser.http_errno));
 	}
 
 	void ServeData()
 	{
-		InternalState = HTTP_SERVE_SEND_DATA;
-
-		claimed = false;
-		HTTPRequest acl((Module*)HttpModule, "httpd_acl", request_type, uri, &headers, this, ip, postdata);
-		acl.Send();
-		if (!claimed)
+		std::string method = http_method_str(static_cast<http_method>(parser.method));
+		HTTPRequestURI parsed;
+		ParseURI(uri, parsed);
+		HTTPRequest acl(method, parsed, &headers, this, ip, body);
+		ModResult res = aclevprov->FirstResult(&HTTPACLEventListener::OnHTTPACLCheck, acl);
+		if (res != MOD_RES_DENY)
 		{
-			HTTPRequest url((Module*)HttpModule, "httpd_url", request_type, uri, &headers, this, ip, postdata);
-			url.Send();
-			if (!claimed)
+			HTTPRequest request(method, parsed, &headers, this, ip, body);
+			res = reqevprov->FirstResult(&HTTPRequestEventListener::OnHTTPRequest, request);
+			if (res == MOD_RES_PASSTHRU)
 			{
 				SendHTTPError(404);
 			}
 		}
 	}
 
-	void Page(std::stringstream* n, int response, HTTPHeaders *hheaders)
+	void Page(const std::string& s, unsigned int response, HTTPHeaders* hheaders)
 	{
-		SendHeaders(n->str().length(), response, *hheaders);
-		WriteData(n->str());
-		Close();
+		SendHeaders(s.length(), response, *hheaders);
+		WriteData(s);
+		BufferedSocket::Close(true);
+	}
+
+	void Page(std::stringstream* n, unsigned int response, HTTPHeaders* hheaders)
+	{
+		Page(n->str(), response, hheaders);
+	}
+
+	bool ParseURI(const std::string& uristr, HTTPRequestURI& out)
+	{
+		http_parser_url_init(&url);
+		if (http_parser_parse_url(uristr.c_str(), uristr.size(), 0, &url) != 0)
+			return false;
+
+		if (url.field_set & (1 << UF_PATH))
+		{
+			// Normalise the path.
+			std::vector<std::string> pathsegments;
+			irc::sepstream pathstream(uri.substr(url.field_data[UF_PATH].off, url.field_data[UF_PATH].len), '/');
+			for (std::string pathsegment; pathstream.GetToken(pathsegment); )
+			{
+				if (pathsegment == ".")
+				{
+					// Stay at the current level.
+					continue;
+				}
+
+				if (pathsegment == "..")
+				{
+					// Traverse up to the previous level.
+					if (!pathsegments.empty())
+						pathsegments.pop_back();
+					continue;
+				}
+
+				pathsegments.push_back(pathsegment);
+			}
+
+			out.path.reserve(url.field_data[UF_PATH].len);
+			out.path.append("/").append(insp::join(pathsegments, '/'));
+		}
+
+		if (url.field_set & (1 << UF_FRAGMENT))
+			out.fragment = uri.substr(url.field_data[UF_FRAGMENT].off, url.field_data[UF_FRAGMENT].len);
+
+		std::string param_str;
+		if (url.field_set & (1 << UF_QUERY))
+			param_str = uri.substr(url.field_data[UF_QUERY].off, url.field_data[UF_QUERY].len);
+
+		irc::sepstream param_stream(param_str, '&');
+		std::string token;
+		std::string::size_type eq_pos;
+		while (param_stream.GetToken(token))
+		{
+			eq_pos = token.find('=');
+			if (eq_pos == std::string::npos)
+			{
+				out.query_params.emplace(token, "");
+			}
+			else
+			{
+				out.query_params.emplace(token.substr(0, eq_pos), token.substr(eq_pos + 1));
+			}
+		}
+		return true;
 	}
 };
 
-class ModuleHttpServer : public Module
+class HTTPdAPIImpl final
+	: public HTTPdAPIBase
 {
-	unsigned int timeoutsec;
-
- public:
-
-	void init()
+public:
+	HTTPdAPIImpl(Module* parent)
+		: HTTPdAPIBase(parent)
 	{
-		HttpModule = this;
-		Implementation eventlist[] = { I_OnAcceptConnection, I_OnBackgroundTimer, I_OnRehash, I_OnUnloadModule };
-		ServerInstance->Modules->Attach(eventlist, this, sizeof(eventlist)/sizeof(Implementation));
-		OnRehash(NULL);
 	}
 
-	void OnRehash(User* user)
+	void SendResponse(HTTPDocumentResponse& resp) override
 	{
-		ConfigTag* tag = ServerInstance->Config->ConfValue("httpd");
-		timeoutsec = tag->getInt("timeout");
-	}
-
-	void OnRequest(Request& request)
-	{
-		if (strcmp(request.id, "HTTP-DOC") != 0)
-			return;
-		HTTPDocumentResponse& resp = static_cast<HTTPDocumentResponse&>(request);
-		claimed = true;
 		resp.src.sock->Page(resp.document, resp.responsecode, &resp.headers);
 	}
+};
 
-	ModResult OnAcceptConnection(int nfd, ListenSocket* from, irc::sockets::sockaddrs* client, irc::sockets::sockaddrs* server)
+class ModuleHttpServer final
+	: public Module
+{
+private:
+	HTTPdAPIImpl APIImpl;
+	unsigned long timeoutsec;
+	Events::ModuleEventProvider acleventprov;
+	Events::ModuleEventProvider reqeventprov;
+
+public:
+	ModuleHttpServer()
+		: Module(VF_VENDOR, "Allows the server administrator to serve various useful resources over HTTP.")
+		, APIImpl(this)
+		, acleventprov(this, "event/http-acl")
+		, reqeventprov(this, "event/http-request")
 	{
-		if (from->bind_tag->getString("type") != "httpd")
+		aclevprov = &acleventprov;
+		reqevprov = &reqeventprov;
+		HttpServerSocket::ConfigureParser();
+	}
+
+	void init() override
+	{
+		HttpModule = this;
+	}
+
+	void ReadConfig(ConfigStatus& status) override
+	{
+		const auto& tag = ServerInstance->Config->ConfValue("httpd");
+		timeoutsec = tag->getDuration("timeout", 10, 1);
+	}
+
+	ModResult OnAcceptConnection(int nfd, ListenSocket* from, const irc::sockets::sockaddrs& client, const irc::sockets::sockaddrs& server) override
+	{
+		if (!insp::equalsci(from->bind_tag->getString("type"), "httpd"))
 			return MOD_RES_PASSTHRU;
-		int port;
-		std::string incomingip;
-		irc::sockets::satoap(*client, incomingip, port);
-		sockets.insert(new HttpServerSocket(nfd, incomingip, from, client, server));
+
+		sockets.push_front(new HttpServerSocket(nfd, client.addr(), from, client, server, timeoutsec));
 		return MOD_RES_ALLOW;
 	}
 
-	void OnBackgroundTimer(time_t curtime)
+	void OnUnloadModule(Module* mod) override
 	{
-		if (!timeoutsec)
-			return;
-
-		time_t oldest_allowed = curtime - timeoutsec;
-		for (std::set<HttpServerSocket*>::const_iterator i = sockets.begin(); i != sockets.end(); )
+		for (insp::intrusive_list<HttpServerSocket>::const_iterator i = sockets.begin(); i != sockets.end(); )
 		{
 			HttpServerSocket* sock = *i;
 			++i;
-			if (sock->createtime < oldest_allowed)
+			if (sock->GetModHook(mod))
 			{
-				sock->cull();
+				sock->Cull();
 				delete sock;
 			}
 		}
 	}
 
-	void OnUnloadModule(Module* mod)
+	Cullable::Result Cull() override
 	{
-		for (std::set<HttpServerSocket*>::const_iterator i = sockets.begin(); i != sockets.end(); )
-		{
-			HttpServerSocket* sock = *i;
-			++i;
-			if (sock->GetIOHook() == mod)
-			{
-				sock->cull();
-				delete sock;
-			}
-		}
-	}
-
-	CullResult cull()
-	{
-		std::set<HttpServerSocket*> local;
-		local.swap(sockets);
-		for (std::set<HttpServerSocket*>::const_iterator i = local.begin(); i != local.end(); ++i)
-		{
-			HttpServerSocket* sock = *i;
-			sock->cull();
-			delete sock;
-		}
-		return Module::cull();
-	}
-
-	virtual Version GetVersion()
-	{
-		return Version("Provides HTTP serving facilities to modules", VF_VENDOR);
+		for (auto* sock : sockets)
+			sock->Close();
+		return Module::Cull();
 	}
 };
 

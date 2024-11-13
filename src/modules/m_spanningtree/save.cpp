@@ -1,6 +1,9 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
+ *   Copyright (C) 2018, 2020-2023 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2013-2015 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
  *   Copyright (C) 2009 Daniel De Graaf <danieldg@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
@@ -18,38 +21,23 @@
 
 
 #include "inspircd.h"
-#include "socket.h"
-#include "xline.h"
-#include "socketengine.h"
 
-#include "main.h"
 #include "utils.h"
-#include "treeserver.h"
 #include "treesocket.h"
-
-/* $ModDep: m_spanningtree/main.h m_spanningtree/utils.h m_spanningtree/treeserver.h m_spanningtree/treesocket.h */
+#include "commands.h"
 
 /**
  * SAVE command - force nick change to UID on timestamp match
  */
-bool TreeSocket::ForceNick(const std::string &prefix, parameterlist &params)
+CmdResult CommandSave::Handle(User* user, Params& params)
 {
-	if (params.size() < 2)
-		return true;
+	auto* u = ServerInstance->Users.FindUUID(params[0]);
+	if (!u)
+		return CmdResult::FAILURE;
 
-	User* u = ServerInstance->FindNick(params[0]);
-	time_t ts = atol(params[1].c_str());
+	time_t ts = ServerCommand::ExtractTS(params[1]);
+	if (u->nickchanged == ts)
+		u->ChangeNick(u->uuid, SavedTimestamp);
 
-	if ((u) && (!IS_SERVER(u)) && (u->age == ts))
-	{
-		Utils->DoOneToAllButSender(prefix,"SAVE",params,prefix);
-
-		if (!u->ForceNickChange(u->uuid.c_str()))
-		{
-			ServerInstance->Users->QuitUser(u, "Nickname collision");
-		}
-	}
-
-	return true;
+	return CmdResult::SUCCESS;
 }
-

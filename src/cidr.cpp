@@ -1,9 +1,12 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
- *   Copyright (C) 2009 Daniel De Graaf <danieldg@inspircd.org>
- *   Copyright (C) 2008 Craig Edwards <craigedwards@brainbox.cc>
+ *   Copyright (C) 2019, 2022-2023 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2014-2015 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
+ *   Copyright (C) 2009-2010 Daniel De Graaf <danieldg@inspircd.org>
  *   Copyright (C) 2008 Robin Burchell <robin+git@viroteck.net>
+ *   Copyright (C) 2008 Craig Edwards <brain@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -19,8 +22,6 @@
  */
 
 
-/* $Core */
-
 #include "inspircd.h"
 
 /* Match CIDR strings, e.g. 127.0.0.1 to 127.0.0.0/8 or 3ffe:1:5:6::8 to 3ffe:1::0/32
@@ -28,14 +29,14 @@
  * This will also attempt to match any leading usernames or nicknames on the mask, using
  * match(), when match_with_username is true.
  */
-bool irc::sockets::MatchCIDR(const std::string &address, const std::string &cidr_mask, bool match_with_username)
+bool irc::sockets::MatchCIDR(const std::string& address, const std::string& cidr_mask, bool match_with_username)
 {
 	std::string address_copy;
 	std::string cidr_copy;
 
-	/* The caller is trying to match ident@<mask>/bits.
-	 * Chop off the ident@ portion, use match() on it
-	 * seperately.
+	/* The caller is trying to match username@<mask>/bits.
+	 * Chop off the username@ portion, use match() on it
+	 * separately.
 	 */
 	if (match_with_username)
 	{
@@ -55,8 +56,8 @@ bool irc::sockets::MatchCIDR(const std::string &address, const std::string &cidr
 		}
 		else
 		{
-			address_copy = address.substr(username_addr_pos + 1);
-			cidr_copy = cidr_mask.substr(username_mask_pos + 1);
+			address_copy.assign(address, username_addr_pos + 1, std::string::npos);
+			cidr_copy.assign(cidr_mask, username_mask_pos + 1, std::string::npos);
 		}
 	}
 	else
@@ -66,21 +67,23 @@ bool irc::sockets::MatchCIDR(const std::string &address, const std::string &cidr
 	}
 
 	const std::string::size_type per_pos = cidr_copy.rfind('/');
-	if ((per_pos == std::string::npos) || (per_pos == cidr_copy.length()-1)
+	if ((per_pos != std::string::npos) && ((per_pos == cidr_copy.length()-1)
 		|| (cidr_copy.find_first_not_of("0123456789", per_pos+1) != std::string::npos)
-		|| (cidr_copy.find_first_not_of("0123456789abcdefABCDEF.:") < per_pos))
+		|| (cidr_copy.find_first_not_of("0123456789abcdefABCDEF.:") < per_pos)))
 	{
 		// The CIDR mask is invalid
 		return false;
 	}
 
-	irc::sockets::sockaddrs addr;
-	irc::sockets::aptosa(address_copy, 0, addr);
+	irc::sockets::sockaddrs addr(false);
+	if (!addr.from_ip(address_copy))
+	{
+		// The address could not be parsed.
+		return false;
+	}
 
 	irc::sockets::cidr_mask mask(cidr_copy);
 	irc::sockets::cidr_mask mask2(addr, mask.length);
 
 	return mask == mask2;
 }
-
-

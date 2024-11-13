@@ -1,9 +1,12 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
+ *   Copyright (C) 2019-2021, 2023 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
+ *   Copyright (C) 2012 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2008 Robin Burchell <robin+git@viroteck.net>
+ *   Copyright (C) 2007 John Brooks <john@jbrooks.io>
  *   Copyright (C) 2007 Dennis Friis <peavey@inspircd.org>
- *   Copyright (C) 2007 Robin Burchell <robin+git@viroteck.net>
- *   Copyright (C) 2007 John Brooks <john.brooks@dereferenced.net>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -21,30 +24,25 @@
 
 #include "inspircd.h"
 
-/* $ModDesc: Provides snomasks 'j' and 'J', to which notices about newly created channels are sent */
-
-class ModuleChanCreate : public Module
+class ModuleChanCreate final
+	: public Module
 {
- private:
- public:
-	void init()
+public:
+	ModuleChanCreate()
+		: Module(VF_VENDOR, "Sends a notice to snomasks j (local) and J (remote) when a channel is created.")
 	{
-		ServerInstance->SNO->EnableSnomask('j', "CHANCREATE");
-		Implementation eventlist[] = { I_OnUserJoin };
-		ServerInstance->Modules->Attach(eventlist, this, sizeof(eventlist)/sizeof(Implementation));
 	}
 
-	Version GetVersion()
+	void init() override
 	{
-		return Version("Provides snomasks 'j' and 'J', to which notices about newly created channels are sent",VF_VENDOR);
+		ServerInstance->SNO.EnableSnomask('j', "CHANCREATE");
 	}
 
-
-	void OnUserJoin(Membership* memb, bool sync, bool created, CUList& except)
+	void OnUserJoin(Membership* memb, bool sync, bool created, CUList& except) override
 	{
 		if ((created) && (IS_LOCAL(memb->user)))
 		{
-			ServerInstance->SNO->WriteGlobalSno('j', "Channel %s created by %s", memb->chan->name.c_str(), memb->user->GetFullRealHost().c_str());
+			ServerInstance->SNO.WriteGlobalSno('j', "Channel {} created by {}", memb->chan->name, memb->user->GetRealMask());
 		}
 	}
 };

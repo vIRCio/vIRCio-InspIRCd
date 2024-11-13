@@ -1,8 +1,13 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
+ *   Copyright (C) 2018-2024 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2018 linuxdaemon <linuxdaemon.irc@gmail.com>
+ *   Copyright (C) 2012-2014, 2018 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2012, 2019 Robby <robby@chatbelgie.be>
+ *   Copyright (C) 2009 Daniel De Graaf <danieldg@inspircd.org>
+ *   Copyright (C) 2008 Thomas Stagner <aquanight@gmail.com>
  *   Copyright (C) 2008 Robin Burchell <robin+git@viroteck.net>
- *   Copyright (C) 2008 Thomas Stagner <aquanight@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -19,140 +24,65 @@
 
 
 #include "inspircd.h"
+#include "clientprotocolmsg.h"
 
-/* $ModDesc: Logs snomask output to channel(s). */
-
-class ModuleChanLog : public Module
+class ModuleChanLog final
+	: public Module
 {
- private:
 	/*
 	 * Multimap so people can redirect a snomask to multiple channels.
 	 */
-	typedef std::multimap<char, std::string> ChanLogTargets;
+	typedef insp::flat_multimap<char, std::string> ChanLogTargets;
 	ChanLogTargets logstreams;
 
- public:
-	void init()
-	{
-		Implementation eventlist[] = { I_OnRehash, I_OnSendSnotice };
-		ServerInstance->Modules->Attach(eventlist, this, sizeof(eventlist)/sizeof(Implementation));
-
-		OnRehash(NULL);
-	}
-
-	virtual ~ModuleChanLog()
+public:
+	ModuleChanLog()
+		: Module(VF_VENDOR, "Allows messages sent to snomasks to be logged to a channel.")
 	{
 	}
 
-	virtual void OnRehash(User *user)
+	void ReadConfig(ConfigStatus& status) override
 	{
-		std::string snomasks;
-		std::string channel;
-
-		logstreams.clear();
-
-		ConfigTagList tags = ServerInstance->Config->ConfTags("chanlog");
-		for (ConfigIter i = tags.first; i != tags.second; ++i)
+		ChanLogTargets newlogs;
+		for (const auto& [_, tag] : ServerInstance->Config->ConfTags("chanlog"))
 		{
-			channel = i->second->getString("channel");
-			snomasks = i->second->getString("snomasks");
+			const std::string channel = tag->getString("channel");
+			if (!ServerInstance->Channels.IsChannel(channel))
+				throw ModuleException(this, "<chanlog:channel> must be set to a channel name, at " + tag->source.str());
 
-			if (channel.empty() || snomasks.empty())
-			{
-				ServerInstance->Logs->Log("m_chanlog", DEFAULT, "Malformed chanlog tag, ignoring");
-				continue;
-			}
+			const std::string snomasks = tag->getString("snomasks");
+			if (snomasks.empty())
+				throw ModuleException(this, "<chanlog:snomasks> must not be empty, at " + tag->source.str());
 
-			for (std::string::const_iterator it = snomasks.begin(); it != snomasks.end(); it++)
+			for (const auto snomask : snomasks)
 			{
-				logstreams.insert(std::make_pair(*it, channel));
-				ServerInstance->Logs->Log("m_chanlog", DEFAULT, "Logging %c to %s", *it, channel.c_str());
+				newlogs.emplace(snomask, channel);
+				ServerInstance->Logs.Normal(MODNAME, "Logging {} to {}", snomask, channel);
 			}
 		}
-
+		logstreams.swap(newlogs);
 	}
 
-	virtual ModResult OnSendSnotice(char &sno, std::string &desc, const std::string &msg)
+	ModResult OnSendSnotice(char& sno, std::string& desc, const std::string& msg) override
 	{
-		std::pair<ChanLogTargets::const_iterator, ChanLogTargets::const_iterator> itpair = logstreams.equal_range(sno);
-		if (itpair.first == itpair.second)
+		auto channels = insp::equal_range(logstreams, sno);
+		if (channels.empty())
 			return MOD_RES_PASSTHRU;
 
-		char buf[MAXBUF];
-		snprintf(buf, MAXBUF, "\2%s\2: %s", desc.c_str(), msg.c_str());
-
-		for (ChanLogTargets::const_iterator it = itpair.first; it != itpair.second; ++it)
+		const std::string snotice = "\002" + desc + "\002: " + msg;
+		for (const auto& [_, channel] : channels)
 		{
-			Channel *c = ServerInstance->FindChan(it->second);
+			auto* c = ServerInstance->Channels.Find(channel);
 			if (c)
 			{
-				c->WriteChannelWithServ(ServerInstance->Config->ServerName, "PRIVMSG %s :%s", c->name.c_str(), buf);
-				ServerInstance->PI->SendChannelPrivmsg(c, 0, buf);
+				ClientProtocol::Messages::Privmsg privmsg(ClientProtocol::Messages::Privmsg::nocopy, ServerInstance->FakeClient, c, snotice);
+				c->Write(ServerInstance->GetRFCEvents().privmsg, privmsg);
+				ServerInstance->PI->SendMessage(c, 0, snotice);
 			}
 		}
 
 		return MOD_RES_PASSTHRU;
 	}
-
-	virtual Version GetVersion()
-	{
-		return Version("Logs snomask output to channel(s).", VF_VENDOR);
-	}
 };
-
 
 MODULE_INIT(ModuleChanLog)
-
-
-
-
-
-
-
-
-
-/*
- * This is for the "old" chanlog module which intercepted messages going to the logfile..
- * I don't consider it all that useful, and it's quite dangerous if setup incorrectly, so
- * this is defined out but left intact in case someone wants to develop it further someday.
- *
- * -- w00t (aug 23rd, 2008)
- */
-#define OLD_CHANLOG 0
-
-#if OLD_CHANLOG
-class ChannelLogStream : public LogStream
-{
- private:
-	std::string channel;
-
- public:
-	ChannelLogStream(int loglevel, const std::string &chan) : LogStream(loglevel), channel(chan)
-	{
-	}
-
-	virtual void OnLog(int loglevel, const std::string &type, const std::string &msg)
-	{
-		Channel *c = ServerInstance->FindChan(channel);
-		static bool Logging = false;
-
-		if (loglevel < this->loglvl)
-			return;
-
-		if (Logging)
-			return;
-
-		if (c)
-		{
-			Logging = true; // this avoids (rare chance) loops with logging server IO on networks
-			char buf[MAXBUF];
-			snprintf(buf, MAXBUF, "\2%s\2: %s", type.c_str(), msg.c_str());
-
-			c->WriteChannelWithServ(ServerInstance->Config->ServerName, "PRIVMSG %s :%s", c->name.c_str(), buf);
-			ServerInstance->PI->SendChannelPrivmsg(c, 0, buf);
-			Logging = false;
-		}
-	}
-};
-#endif
-

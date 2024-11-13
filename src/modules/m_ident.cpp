@@ -1,12 +1,15 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
+ *   Copyright (C) 2021 Dominic Hamon
+ *   Copyright (C) 2013, 2018-2023 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2012-2013 Robby <robby@chatbelgie.be>
+ *   Copyright (C) 2012, 2014-2015 Attila Molnar <attilamolnar@hush.com>
  *   Copyright (C) 2009-2010 Daniel De Graaf <danieldg@inspircd.org>
- *   Copyright (C) 2007, 2009 John Brooks <john.brooks@dereferenced.net>
- *   Copyright (C) 2006-2008 Robin Burchell <robin+git@viroteck.net>
- *   Copyright (C) 2005-2008 Craig Edwards <craigedwards@brainbox.cc>
- *   Copyright (C) 2008 Thomas Stagner <aquanight@inspircd.org>
+ *   Copyright (C) 2008 Robin Burchell <robin+git@viroteck.net>
+ *   Copyright (C) 2007 John Brooks <john@jbrooks.io>
  *   Copyright (C) 2007 Dennis Friis <peavey@inspircd.org>
+ *   Copyright (C) 2007 Craig Edwards <brain@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -23,8 +26,25 @@
 
 
 #include "inspircd.h"
+#include "extension.h"
 
-/* $ModDesc: Provides support for RFC1413 ident lookups */
+enum
+{
+	// Either the ident lookup has not started yet or the user is fully connected.
+	IDENT_UNKNOWN = 0,
+
+	// Ident lookups are not enabled and a user has been marked as being skipped.
+	IDENT_SKIPPED,
+
+	// Ident lookups are not enabled and a user has been an insecure ident prefix.
+	IDENT_PREFIXED,
+
+	// An ident lookup was done and an ident was found.
+	IDENT_FOUND,
+
+	// An ident lookup was done but no ident was found
+	IDENT_MISSING
+};
 
 /* --------------------------------------------------------------
  * Note that this is the third incarnation of m_ident. The first
@@ -38,12 +58,12 @@
  * nasty race conditions that would cause segfaults etc) we have
  * rewritten this module to use a simplified socket object based
  * directly off EventHandler. As EventHandler only has low level
- * readability, writeability and error events tied directly to the
+ * readability, writability and error events tied directly to the
  * socket engine, this makes our lives easier as nothing happens to
  * our ident lookup class that is outside of this module, or out-
  * side of the control of the class. There are no timers, internal
  * events, or such, which will cause the socket to be deleted,
- * queued for deletion, etc. In fact, theres not even any queueing!
+ * queued for deletion, etc. In fact, there's not even any queueing!
  *
  * Using this framework we have a much more stable module.
  *
@@ -56,11 +76,11 @@
  *      itself.
  *
  *   O  Closure of the ident socket with the Close() method will
- *      not cause removal of the socket from memory or detatchment
+ *      not cause removal of the socket from memory or detachment
  *      from its 'parent' User class. It will only flag it as an
  *      inactive socket in the socket engine.
  *
- *   O  Timeouts are handled in OnCheckReaady at the same time as
+ *   O  Timeouts are handled in OnCheckReady at the same time as
  *      checking if the ident socket has a result. This is done
  *      by checking if the age the of the class (its instantiation
  *      time) plus the timeout value is greater than the current time.
@@ -82,32 +102,30 @@
  * --------------------------------------------------------------
  */
 
-class IdentRequestSocket : public EventHandler
+class IdentRequestSocket final
+	: public EventHandler
 {
- public:
-	LocalUser *user;			/* User we are attached to */
+public:
+	LocalUser* user;			/* User we are attached to */
 	std::string result;		/* Holds the ident string if done */
 	time_t age;
 	bool done;			/* True if lookup is finished */
 
-	IdentRequestSocket(LocalUser* u) : user(u)
+	IdentRequestSocket(const Module* mod, LocalUser* luser)
+		: user(luser)
 	{
 		age = ServerInstance->Time();
 
-		SetFd(socket(user->server_sa.sa.sa_family, SOCK_STREAM, 0));
-
-		if (GetFd() == -1)
-			throw ModuleException("Could not create socket");
+		SetFd(socket(user->server_sa.family(), SOCK_STREAM, 0));
+		if (!HasFd())
+			throw ModuleException(mod, "Could not create socket");
 
 		done = false;
 
-		irc::sockets::sockaddrs bindaddr;
-		irc::sockets::sockaddrs connaddr;
+		irc::sockets::sockaddrs bindaddr(user->server_sa);
+		irc::sockets::sockaddrs connaddr(user->client_sa);
 
-		memcpy(&bindaddr, &user->server_sa, sizeof(bindaddr));
-		memcpy(&connaddr, &user->client_sa, sizeof(connaddr));
-
-		if (connaddr.sa.sa_family == AF_INET6)
+		if (connaddr.family() == AF_INET6)
 		{
 			bindaddr.in6.sin6_port = 0;
 			connaddr.in6.sin6_port = htons(113);
@@ -119,39 +137,38 @@ class IdentRequestSocket : public EventHandler
 		}
 
 		/* Attempt to bind (ident requests must come from the ip the query is referring to */
-		if (ServerInstance->SE->Bind(GetFd(), bindaddr) < 0)
+		if (SocketEngine::Bind(this, bindaddr) < 0)
 		{
 			this->Close();
-			throw ModuleException("failed to bind()");
+			throw ModuleException(mod, "failed to bind()");
 		}
 
-		ServerInstance->SE->NonBlocking(GetFd());
+		SocketEngine::NonBlocking(GetFd());
 
 		/* Attempt connection (nonblocking) */
-		if (ServerInstance->SE->Connect(this, &connaddr.sa, connaddr.sa_size()) == -1 && errno != EINPROGRESS)
+		if (SocketEngine::Connect(this, connaddr) == -1 && errno != EINPROGRESS)
 		{
 			this->Close();
-			throw ModuleException("connect() failed");
+			throw ModuleException(mod, "connect() failed");
 		}
 
 		/* Add fd to socket engine */
-		if (!ServerInstance->SE->AddFd(this, FD_WANT_NO_READ | FD_WANT_POLL_WRITE))
+		if (!SocketEngine::AddFd(this, FD_WANT_NO_READ | FD_WANT_POLL_WRITE))
 		{
 			this->Close();
-			throw ModuleException("out of fds");
+			throw ModuleException(mod, "out of fds");
 		}
 	}
 
-	virtual void OnConnected()
+	void OnEventHandlerWrite() override
 	{
-		ServerInstance->Logs->Log("m_ident",DEBUG,"OnConnected()");
-		ServerInstance->SE->ChangeEventMask(this, FD_WANT_POLL_READ | FD_WANT_NO_WRITE);
+		SocketEngine::ChangeEventMask(this, FD_WANT_POLL_READ | FD_WANT_NO_WRITE);
 
 		char req[32];
 
 		/* Build request in the form 'localport,remoteport\r\n' */
 		int req_size;
-		if (user->client_sa.sa.sa_family == AF_INET6)
+		if (user->client_sa.family() == AF_INET6)
 			req_size = snprintf(req, sizeof(req), "%d,%d\r\n",
 				ntohs(user->client_sa.in6.sin6_port), ntohs(user->server_sa.in6.sin6_port));
 		else
@@ -161,60 +178,34 @@ class IdentRequestSocket : public EventHandler
 		/* Send failed if we didnt write the whole ident request --
 		 * might as well give up if this happens!
 		 */
-		if (ServerInstance->SE->Send(this, req, req_size, 0) < req_size)
+		if (SocketEngine::Send(this, req, req_size, 0) < req_size)
 			done = true;
-	}
-
-	virtual void HandleEvent(EventType et, int errornum = 0)
-	{
-		switch (et)
-		{
-			case EVENT_READ:
-				/* fd readable event, received ident response */
-				ReadResponse();
-			break;
-			case EVENT_WRITE:
-				/* fd writeable event, successfully connected! */
-				OnConnected();
-			break;
-			case EVENT_ERROR:
-				/* fd error event, ohshi- */
-				ServerInstance->Logs->Log("m_ident",DEBUG,"EVENT_ERROR");
-				/* We *must* Close() here immediately or we get a
-				 * huge storm of EVENT_ERROR events!
-				 */
-				Close();
-				done = true;
-			break;
-		}
 	}
 
 	void Close()
 	{
-		/* Remove ident socket from engine, and close it, but dont detatch it
+		/* Remove ident socket from engine, and close it, but dont detach it
 		 * from its parent user class, or attempt to delete its memory.
 		 */
-		if (GetFd() > -1)
+		if (HasFd())
 		{
-			ServerInstance->Logs->Log("m_ident",DEBUG,"Close ident socket %d", GetFd());
-			ServerInstance->SE->DelFd(this);
-			ServerInstance->SE->Close(GetFd());
-			this->SetFd(-1);
+			ServerInstance->Logs.Debug(MODNAME, "Close ident socket {}", GetFd());
+			SocketEngine::Close(this);
 		}
 	}
 
-	bool HasResult()
+	bool HasResult() const
 	{
 		return done;
 	}
 
-	void ReadResponse()
+	void OnEventHandlerRead() override
 	{
 		/* We don't really need to buffer for incomplete replies here, since IDENT replies are
 		 * extremely short - there is *no* sane reason it'd be in more than one packet
 		 */
-		char ibuf[MAXBUF];
-		int recvresult = ServerInstance->SE->Recv(this, ibuf, MAXBUF-1, 0);
+		char ibuf[256];
+		ssize_t recvresult = SocketEngine::Recv(this, ibuf, sizeof(ibuf)-1, 0);
 
 		/* Close (but don't delete from memory) our socket
 		 * and flag as done since the ident lookup has finished
@@ -228,7 +219,7 @@ class IdentRequestSocket : public EventHandler
 		if (recvresult < 3)
 			return;
 
-		ServerInstance->Logs->Log("m_ident",DEBUG,"ReadResponse()");
+		ServerInstance->Logs.Debug(MODNAME, "ReadResponse()");
 
 		/* Truncate at the first null character, but first make sure
 		 * there is at least one null char (at the end of the buffer).
@@ -246,81 +237,117 @@ class IdentRequestSocket : public EventHandler
 		std::string::size_type lastcolon = buf.rfind(':');
 
 		/* Truncate the ident at any characters we don't like, skip leading spaces */
-		for (std::string::const_iterator i = buf.begin()+lastcolon+1; i != buf.end(); ++i)
+		for (const auto chr : insp::iterator_range(buf.begin() + lastcolon + 1, buf.end()))
 		{
-			if (result.size() == ServerInstance->Config->Limits.IdentMax)
+			if (result.size() == ServerInstance->Config->Limits.MaxUser)
 				/* Ident is getting too long */
 				break;
 
-			if (*i == ' ')
+			if (chr == ' ')
 				continue;
 
 			/* Add the next char to the result and see if it's still a valid ident,
-			 * according to IsIdent(). If it isn't, then erase what we just added and
+			 * according to IsUser(). If it isn't, then erase what we just added and
 			 * we're done.
 			 */
-			result += *i;
-			if (!ServerInstance->IsIdent(result.c_str()))
+			result += chr;
+			if (!ServerInstance->IsUser(result))
 			{
-				result.erase(result.end()-1);
+				result.pop_back();
 				break;
 			}
 		}
 	}
+
+	void OnEventHandlerError(int errornum) override
+	{
+		Close();
+		done = true;
+	}
+
+	Cullable::Result Cull() override
+	{
+		Close();
+		return EventHandler::Cull();
+	}
 };
 
-class ModuleIdent : public Module
+class ModuleIdent final
+	: public Module
 {
-	int RequestTimeout;
-	SimpleExtItem<IdentRequestSocket> ext;
- public:
-	ModuleIdent() : ext("ident_socket", this)
-	{
-	}
+private:
+	unsigned long timeout;
+	bool prefixunqueried;
+	SimpleExtItem<IdentRequestSocket, Cullable::Deleter> socket;
+	IntExtItem state;
 
-	void init()
+	static void PrefixUser(LocalUser* user)
 	{
-		ServerInstance->Modules->AddService(ext);
-		OnRehash(NULL);
-		Implementation eventlist[] = {
-			I_OnRehash, I_OnUserInit, I_OnCheckReady,
-			I_OnUserDisconnect, I_OnSetConnectClass
-		};
-		ServerInstance->Modules->Attach(eventlist, this, sizeof(eventlist)/sizeof(Implementation));
-	}
-
-	~ModuleIdent()
-	{
-	}
-
-	virtual Version GetVersion()
-	{
-		return Version("Provides support for RFC1413 ident lookups", VF_VENDOR);
-	}
-
-	virtual void OnRehash(User *user)
-	{
-		RequestTimeout = ServerInstance->Config->ConfValue("ident")->getInt("timeout", 5);
-		if (!RequestTimeout)
-			RequestTimeout = 5;
-	}
-
-	void OnUserInit(LocalUser *user)
-	{
-		ConfigTag* tag = user->MyClass->config;
-		if (!tag->getBool("useident", true))
+		// Check that they haven't been prefixed already.
+		if (user->GetRealUser().front() == '~')
 			return;
 
-		user->WriteServ("NOTICE Auth :*** Looking up your ident...");
+		// All invalid usernames are prefixed with a tilde.
+		std::string newuser(user->GetRealUser());
+		newuser.insert(newuser.begin(), '~');
+
+		// If the username is too long then truncate it.
+		if (newuser.length() > ServerInstance->Config->Limits.MaxUser)
+			newuser.erase(ServerInstance->Config->Limits.MaxUser);
+
+		// Apply the new username.
+		user->ChangeRealUser(newuser, user->GetDisplayedUser() == user->GetRealUser());
+	}
+
+public:
+	ModuleIdent()
+		: Module(VF_VENDOR, "Allows the usernames of users to be looked up using the RFC 1413 Identification Protocol.")
+		, socket(this, "ident-socket", ExtensionType::USER)
+		, state(this, "ident-state", ExtensionType::USER)
+	{
+	}
+
+	void ReadConfig(ConfigStatus& status) override
+	{
+		const auto& tag = ServerInstance->Config->ConfValue("ident");
+		timeout = tag->getDuration("timeout", 5, 1, 60);
+		prefixunqueried = tag->getBool("prefixunqueried");
+	}
+
+	void OnChangeRemoteAddress(LocalUser* user) override
+	{
+		IdentRequestSocket* isock = socket.Get(user);
+		if (isock)
+		{
+			// If an ident lookup request was in progress then cancel it.
+			isock->Close();
+			socket.Unset(user);
+		}
+
+		// The ident protocol requires that clients are connecting over a protocol with ports.
+		if (!user->client_sa.is_ip())
+			return;
+
+		// We don't want to look this up once the user has connected.
+		if (user->IsFullyConnected() || user->quitting)
+			return;
+
+		if (!user->GetClass()->config->getBool("useident", true))
+		{
+			state.Set(user, IDENT_SKIPPED);
+			return;
+		}
+
+		user->WriteNotice("*** Looking up your username...");
 
 		try
 		{
-			IdentRequestSocket *isock = new IdentRequestSocket(IS_LOCAL(user));
-			ext.set(user, isock);
+			isock = new IdentRequestSocket(this, user);
+			socket.Set(user, isock);
 		}
-		catch (ModuleException &e)
+		catch (const ModuleException& e)
 		{
-			ServerInstance->Logs->Log("m_ident",DEBUG,"Ident exception: %s", e.GetReason());
+			ServerInstance->Logs.Debug(MODNAME, "Ident exception: " + e.GetReason());
 		}
 	}
 
@@ -328,84 +355,71 @@ class ModuleIdent : public Module
 	 * creating a Timer object and especially better than creating a
 	 * Timer per ident lookup!
 	 */
-	virtual ModResult OnCheckReady(LocalUser *user)
+	ModResult OnCheckReady(LocalUser* user) override
 	{
 		/* Does user have an ident socket attached at all? */
-		IdentRequestSocket *isock = ext.get(user);
+		IdentRequestSocket* isock = socket.Get(user);
 		if (!isock)
 		{
-			ServerInstance->Logs->Log("m_ident",DEBUG, "No ident socket :(");
+			if (prefixunqueried && state.Get(user) == IDENT_SKIPPED)
+			{
+				PrefixUser(user);
+				state.Set(user, IDENT_PREFIXED);
+			}
 			return MOD_RES_PASSTHRU;
 		}
 
-		ServerInstance->Logs->Log("m_ident",DEBUG, "Has ident_socket");
-
-		time_t compare = isock->age;
-		compare += RequestTimeout;
+		time_t compare = isock->age + timeout;
 
 		/* Check for timeout of the socket */
 		if (ServerInstance->Time() >= compare)
 		{
 			/* Ident timeout */
-			user->WriteServ("NOTICE Auth :*** Ident request timed out.");
-			ServerInstance->Logs->Log("m_ident",DEBUG, "Timeout");
+			state.Set(user, IDENT_MISSING);
+			PrefixUser(user);
+			user->WriteNotice("*** Ident lookup timed out, using " + user->GetRealUser() + " instead.");
 		}
 		else if (!isock->HasResult())
 		{
-			// time still good, no result yet... hold the registration
-			ServerInstance->Logs->Log("m_ident",DEBUG, "No result yet");
+			// time still good, no result yet... hold the connection
 			return MOD_RES_DENY;
 		}
 
-		ServerInstance->Logs->Log("m_ident",DEBUG, "Yay, result!");
-
 		/* wooo, got a result (it will be good, or bad) */
-		if (isock->result.empty())
+		else if (isock->result.empty())
 		{
-			user->ident.insert(user->ident.begin(), 1, '~');
-			user->WriteServ("NOTICE Auth :*** Could not find your ident, using %s instead.", user->ident.c_str());
+			state.Set(user, IDENT_MISSING);
+			PrefixUser(user);
+			user->WriteNotice("*** Could not find your username, using " + user->GetRealUser() + " instead.");
 		}
 		else
 		{
-			user->ident = isock->result;
-			user->WriteServ("NOTICE Auth :*** Found your ident, '%s'", user->ident.c_str());
+			state.Set(user, IDENT_FOUND);
+			user->ChangeRealUser(isock->result, user->GetDisplayedUser() == user->GetRealUser());
+			user->WriteNotice("*** Found your username (" + user->GetRealUser() + ")");
 		}
 
-		user->InvalidateCache();
 		isock->Close();
-		ext.unset(user);
+		socket.Unset(user);
 		return MOD_RES_PASSTHRU;
 	}
 
-	ModResult OnSetConnectClass(LocalUser* user, ConnectClass* myclass)
+	ModResult OnPreChangeConnectClass(LocalUser* user, const std::shared_ptr<ConnectClass>& klass, std::optional<Numeric::Numeric>& errnum) override
 	{
-		if (myclass->config->getBool("requireident") && user->ident[0] == '~')
+		if (klass->config->getBool("requireident") && state.Get(user) != IDENT_FOUND)
+		{
+			ServerInstance->Logs.Debug("CONNECTCLASS", "The {} connect class is not suitable as it requires an identd response.",
+				klass->GetName());
 			return MOD_RES_DENY;
+		}
 		return MOD_RES_PASSTHRU;
 	}
 
-	virtual void OnCleanup(int target_type, void *item)
+	void OnUserConnect(LocalUser* user) override
 	{
-		/* Module unloading, tidy up users */
-		if (target_type == TYPE_USER)
-		{
-			LocalUser* user = IS_LOCAL((User*) item);
-			if (user)
-				OnUserDisconnect(user);
-		}
-	}
-
-	virtual void OnUserDisconnect(LocalUser *user)
-	{
-		/* User disconnect (generic socket detatch event) */
-		IdentRequestSocket *isock = ext.get(user);
-		if (isock)
-		{
-			isock->Close();
-			ext.unset(user);
-		}
+		// Clear this as it is no longer necessary.
+		state.Unset(user);
 	}
 };
 
 MODULE_INIT(ModuleIdent)
-

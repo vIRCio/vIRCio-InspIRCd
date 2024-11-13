@@ -1,6 +1,11 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
+ *   Copyright (C) 2018, 2020, 2023-2024 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2013 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
+ *   Copyright (C) 2009-2010 Daniel De Graaf <danieldg@inspircd.org>
+ *   Copyright (C) 2008 Thomas Stagner <aquanight@gmail.com>
  *   Copyright (C) 2008 Robin Burchell <robin+git@viroteck.net>
  *   Copyright (C) 2007 Dennis Friis <peavey@inspircd.org>
  *
@@ -19,76 +24,48 @@
 
 
 #include "inspircd.h"
-#include "socket.h"
-#include "xline.h"
 
 #include "main.h"
 #include "utils.h"
 #include "treeserver.h"
-#include "treesocket.h"
 #include "commands.h"
 
-CommandRSQuit::CommandRSQuit (Module* Creator, SpanningTreeUtilities* Util)
-	: Command(Creator, "RSQUIT", 1), Utils(Util)
+CommandRSQuit::CommandRSQuit(Module* Creator)
+	: Command(Creator, "RSQUIT", 1)
 {
-	flags_needed = 'o';
-	syntax = "<target-server-mask> [reason]";
+	access_needed = CmdAccess::OPERATOR;
+	syntax = { "<target-server-mask> [:<reason>]" };
 }
 
-CmdResult CommandRSQuit::Handle (const std::vector<std::string>& parameters, User *user)
+CmdResult CommandRSQuit::Handle(User* user, const Params& parameters)
 {
-	TreeServer *server_target; // Server to squit
-	TreeServer *server_linked; // Server target is linked to
+	TreeServer* server_target; // Server to squit
 
 	server_target = Utils->FindServerMask(parameters[0]);
 	if (!server_target)
 	{
-		user->WriteServ("NOTICE %s :*** RSQUIT: Server \002%s\002 isn't connected to the network!", user->nick.c_str(), parameters[0].c_str());
-		return CMD_FAILURE;
+		user->WriteRemoteNotice("*** RSQUIT: Server \002{}\002 isn't connected to the network!", parameters[0]);
+		return CmdResult::FAILURE;
 	}
 
-	if (server_target == Utils->TreeRoot)
+	if (server_target->IsRoot())
 	{
-		NoticeUser(user, "*** RSQUIT: Foolish mortal, you cannot make a server SQUIT itself! ("+parameters[0]+" matches local server name)");
-		return CMD_FAILURE;
+		user->WriteRemoteNotice("*** RSQUIT: Foolish mortal, you cannot make a server SQUIT itself! ({} matches local server name)", parameters[0]);
+		return CmdResult::FAILURE;
 	}
 
-	server_linked = server_target->GetParent();
-
-	if (server_linked == Utils->TreeRoot)
+	if (server_target->IsLocal())
 	{
 		// We have been asked to remove server_target.
-		TreeSocket* sock = server_target->GetSocket();
-		if (sock)
-		{
-			const char *reason = parameters.size() == 2 ? parameters[1].c_str() : "No reason";
-			ServerInstance->SNO->WriteToSnoMask('l',"RSQUIT: Server \002%s\002 removed from network by %s (%s)", parameters[0].c_str(), user->nick.c_str(), reason);
-			sock->Squit(server_target, "Server quit by " + user->GetFullRealHost() + " (" + reason + ")");
-			sock->Close();
-		}
+		const char* reason = parameters.size() == 2 ? parameters[1].c_str() : "No reason";
+		ServerInstance->SNO.WriteToSnoMask('l', "RSQUIT: Server \002{}\002 removed from network by {} ({})", parameters[0], user->nick, reason);
+		server_target->SQuit("Server quit by " + user->GetRealMask() + " (" + reason + ")");
 	}
 
-	return CMD_SUCCESS;
+	return CmdResult::SUCCESS;
 }
 
-RouteDescriptor CommandRSQuit::GetRouting(User* user, const std::vector<std::string>& parameters)
+RouteDescriptor CommandRSQuit::GetRouting(User* user, const Params& parameters)
 {
 	return ROUTE_UNICAST(parameters[0]);
 }
-
-// XXX use protocol interface instead of rolling our own :)
-void CommandRSQuit::NoticeUser(User* user, const std::string &msg)
-{
-	if (IS_LOCAL(user))
-	{
-		user->WriteServ("NOTICE %s :%s",user->nick.c_str(),msg.c_str());
-	}
-	else
-	{
-		parameterlist params;
-		params.push_back(user->nick);
-		params.push_back("NOTICE "+ConvToStr(user->nick)+" :"+msg);
-		Utils->DoOneToOne(ServerInstance->Config->GetSID(), "PUSH", params, user->server);
-	}
-}
-

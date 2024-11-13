@@ -1,7 +1,12 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
- *   Copyright (C) 2008 Craig Edwards <craigedwards@brainbox.cc>
+ *   Copyright (C) 2018, 2020, 2022-2023 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2012-2014, 2016 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
+ *   Copyright (C) 2009 Uli Schlachter <psychon@znc.in>
+ *   Copyright (C) 2009 Daniel De Graaf <danieldg@inspircd.org>
+ *   Copyright (C) 2008 Craig Edwards <brain@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -18,32 +23,29 @@
 
 
 #include "inspircd.h"
-#include "xline.h"
 
-#include "treesocket.h"
-#include "treeserver.h"
-#include "utils.h"
+#include "commands.h"
+#include "main.h"
 
 /** ENCAP */
-void TreeSocket::Encap(User* who, parameterlist &params)
+CmdResult CommandEncap::Handle(User* user, Params& params)
 {
-	if (params.size() > 1)
+	if (ServerInstance->Config->ServerId == params[0] || InspIRCd::Match(ServerInstance->Config->ServerName, params[0]))
 	{
-		if (ServerInstance->Config->GetSID() == params[0] || InspIRCd::Match(ServerInstance->Config->ServerName, params[0]))
-		{
-			parameterlist plist(params.begin() + 2, params.end());
-			ServerInstance->Parser->CallHandler(params[1], plist, who);
-			// discard return value, ENCAP shall succeed even if the command does not exist
-		}
-		
-		params[params.size() - 1] = ":" + params[params.size() - 1];
+		CommandBase::Params plist(params.begin() + 2, params.end());
+		Command* cmd = nullptr;
+		ServerInstance->Parser.CallHandler(params[1], plist, user, &cmd);
+		// Discard return value, ENCAP shall succeed even if the command does not exist
 
-		if (params[0].find_first_of("*?") != std::string::npos)
-		{
-			Utils->DoOneToAllButSender(who->uuid, "ENCAP", params, who->server);
-		}
-		else
-			Utils->DoOneToOne(who->uuid, "ENCAP", params, params[0]);
+		if ((cmd) && (cmd->force_manual_route))
+			return CmdResult::FAILURE;
 	}
+	return CmdResult::SUCCESS;
 }
 
+RouteDescriptor CommandEncap::GetRouting(User* user, const Params& params)
+{
+	if (params[0].find_first_of("*?") != std::string::npos)
+		return ROUTE_BROADCAST;
+	return ROUTE_UNICAST(params[0]);
+}

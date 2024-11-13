@@ -1,12 +1,12 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
- *   Copyright (C) 2009 Daniel De Graaf <danieldg@inspircd.org>
- *   Copyright (C) 2008 Pippijn van Steenhoven <pip88nl@gmail.com>
+ *   Copyright (C) 2018-2023 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2012, 2018 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
+ *   Copyright (C) 2009-2010 Daniel De Graaf <danieldg@inspircd.org>
  *   Copyright (C) 2007 Dennis Friis <peavey@inspircd.org>
- *   Copyright (C) 2007 Robin Burchell <robin+git@viroteck.net>
- *   Copyright (C) 2006-2007 Oliver Lupton <oliverlupton@gmail.com>
- *   Copyright (C) 2006 Craig Edwards <craigedwards@brainbox.cc>
+ *   Copyright (C) 2006 Craig Edwards <brain@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -23,66 +23,62 @@
 
 
 #include "inspircd.h"
+#include "clientprotocolmsg.h"
+#include "extension.h"
 
-/* $ModDesc: Forces connecting clients to send a PONG message back to the server before they can complete their connection */
-
-class ModuleWaitPong : public Module
+class ModuleWaitPong final
+	: public Module
 {
 	bool sendsnotice;
 	bool killonbadreply;
-	LocalStringExt ext;
+	StringExtItem ext;
 
- public:
+public:
 	ModuleWaitPong()
-	 : ext("waitpong_pingstr", this)
+		: Module(VF_VENDOR, "Requires all clients to respond to a PING request before they can fully connect.")
+		, ext(this, "waitpong-cookie", ExtensionType::USER)
 	{
 	}
 
-	void init()
+	void ReadConfig(ConfigStatus& status) override
 	{
-		ServerInstance->Modules->AddService(ext);
-		OnRehash(NULL);
-		Implementation eventlist[] = { I_OnUserRegister, I_OnCheckReady, I_OnPreCommand, I_OnRehash };
-		ServerInstance->Modules->Attach(eventlist, this, sizeof(eventlist)/sizeof(Implementation));
-	}
-
-	void OnRehash(User* user)
-	{
-		ConfigTag* tag = ServerInstance->Config->ConfValue("waitpong");
-		sendsnotice = tag->getBool("sendsnotice", true);
+		const auto& tag = ServerInstance->Config->ConfValue("waitpong");
+		sendsnotice = tag->getBool("sendsnotice", false);
 		killonbadreply = tag->getBool("killonbadreply", true);
 	}
 
-	ModResult OnUserRegister(LocalUser* user)
+	ModResult OnUserRegister(LocalUser* user) override
 	{
 		std::string pingrpl = ServerInstance->GenRandomStr(10);
-
-		user->Write("PING :%s", pingrpl.c_str());
+		{
+			ClientProtocol::Messages::Ping pingmsg(pingrpl);
+			user->Send(ServerInstance->GetRFCEvents().ping, pingmsg);
+		}
 
 		if(sendsnotice)
-			user->WriteServ("NOTICE %s :*** If you are having problems connecting due to ping timeouts, please type /quote PONG %s or /raw PONG %s now.", user->nick.c_str(), pingrpl.c_str(), pingrpl.c_str());
+			user->WriteNotice("*** If you are having problems connecting due to connection timeouts type /quote PONG " + pingrpl + " or /raw PONG " + pingrpl + " now.");
 
-		ext.set(user, pingrpl);
+		ext.Set(user, pingrpl);
 		return MOD_RES_PASSTHRU;
 	}
 
-	ModResult OnPreCommand(std::string &command, std::vector<std::string> &parameters, LocalUser* user, bool validated, const std::string &original_line)
+	ModResult OnPreCommand(std::string& command, CommandBase::Params& parameters, LocalUser* user, bool validated) override
 	{
 		if (command == "PONG")
 		{
-			std::string* pingrpl = ext.get(user);
+			std::string* pingrpl = ext.Get(user);
 
 			if (pingrpl)
 			{
 				if (!parameters.empty() && *pingrpl == parameters[0])
 				{
-					ext.unset(user);
+					ext.Unset(user);
 					return MOD_RES_DENY;
 				}
 				else
 				{
 					if(killonbadreply)
-						ServerInstance->Users->QuitUser(user, "Incorrect ping reply for registration");
+						ServerInstance->Users.QuitUser(user, "Incorrect ping reply for connection");
 					return MOD_RES_DENY;
 				}
 			}
@@ -90,20 +86,10 @@ class ModuleWaitPong : public Module
 		return MOD_RES_PASSTHRU;
 	}
 
-	ModResult OnCheckReady(LocalUser* user)
+	ModResult OnCheckReady(LocalUser* user) override
 	{
-		return ext.get(user) ? MOD_RES_DENY : MOD_RES_PASSTHRU;
+		return ext.Get(user) ? MOD_RES_DENY : MOD_RES_PASSTHRU;
 	}
-
-	~ModuleWaitPong()
-	{
-	}
-
-	Version GetVersion()
-	{
-		return Version("Require pong prior to registration", VF_VENDOR);
-	}
-
 };
 
 MODULE_INIT(ModuleWaitPong)

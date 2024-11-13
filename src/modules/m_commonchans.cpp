@@ -1,7 +1,11 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
- *   Copyright (C) 2007 Craig Edwards <craigedwards@brainbox.cc>
+ *   Copyright (C) 2019-2024 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
+ *   Copyright (C) 2012 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2009-2010 Daniel De Graaf <danieldg@inspircd.org>
+ *   Copyright (C) 2007 Craig Edwards <brain@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -18,60 +22,72 @@
 
 
 #include "inspircd.h"
+#include "modules/callerid.h"
+#include "modules/ctctags.h"
+#include "numerichelper.h"
 
-/* $ModDesc: Adds user mode +c, which if set, users must be on a common channel with you to private message you */
-
-/** Handles user mode +c
- */
-class PrivacyMode : public SimpleUserModeHandler
+class ModuleCommonChans final
+	: public Module
+	, public CTCTags::EventListener
 {
- public:
-	PrivacyMode(Module* Creator) : SimpleUserModeHandler(Creator, "deaf_commonchan", 'c') { }
+private:
+	CallerID::API calleridapi;
+	SimpleUserMode mode;
+
+	bool IsExempt(User* source, User* target)
+	{
+		if (!target->IsModeSet(mode) || source->SharesChannelWith(target))
+			return true; // Target doesn't have mode set or shares a common channel.
+
+		if (source->HasPrivPermission("users/ignore-commonchans") || source->server->IsService())
+			return true; // Source is an oper or a service.
+
+		if (calleridapi && calleridapi->IsOnAcceptList(source, target))
+			return true; // Source is on the callerid accept list
+
+		return false;
+	}
+
+	ModResult HandleMessage(User* user, const MessageTarget& target)
+	{
+		if (target.type != MessageTarget::TYPE_USER)
+			return MOD_RES_PASSTHRU;
+
+		auto* targetuser = target.Get<User>();
+		if (IsExempt(user, targetuser))
+			return MOD_RES_PASSTHRU;
+
+		user->WriteNumeric(Numerics::CannotSendTo(targetuser, "messages", &mode));
+		return MOD_RES_DENY;
+	}
+
+public:
+	ModuleCommonChans()
+		: Module(VF_VENDOR, "Adds user mode c (deaf_commonchan) which requires users to have a common channel before they can privately message each other.")
+		, CTCTags::EventListener(this)
+		, calleridapi(this)
+		, mode(this, "deaf_commonchan", 'c')
+	{
+	}
+
+	ModResult OnUserPreInvite(User* source, User* dest, Channel* channel, time_t timeout) override
+	{
+		if (IsExempt(source, dest))
+			return MOD_RES_PASSTHRU;
+
+		source->WriteNumeric(Numerics::CannotSendTo(dest, "invites", &mode));
+		return MOD_RES_DENY;
+	}
+
+	ModResult OnUserPreMessage(User* user, MessageTarget& target, MessageDetails& details) override
+	{
+		return HandleMessage(user, target);
+	}
+
+	ModResult OnUserPreTagMessage(User* user, MessageTarget& target, CTCTags::TagMessageDetails& details) override
+	{
+		return HandleMessage(user, target);
+	}
 };
 
-class ModulePrivacyMode : public Module
-{
-	PrivacyMode pm;
- public:
-	ModulePrivacyMode() : pm(this)
-	{
-	}
-
-	void init()
-	{
-		ServerInstance->Modules->AddService(pm);
-		Implementation eventlist[] = { I_OnUserPreMessage, I_OnUserPreNotice };
-		ServerInstance->Modules->Attach(eventlist, this, sizeof(eventlist)/sizeof(Implementation));
-	}
-
-	virtual ~ModulePrivacyMode()
-	{
-	}
-
-	virtual Version GetVersion()
-	{
-		return Version("Adds user mode +c, which if set, users must be on a common channel with you to private message you", VF_VENDOR);
-	}
-
-	virtual ModResult OnUserPreMessage(User* user,void* dest,int target_type, std::string &text, char status, CUList &exempt_list)
-	{
-		if (target_type == TYPE_USER)
-		{
-			User* t = (User*)dest;
-			if (!IS_OPER(user) && (t->IsModeSet('c')) && (!ServerInstance->ULine(user->server)) && !user->SharesChannelWith(t))
-			{
-				user->WriteNumeric(ERR_CANTSENDTOUSER, "%s %s :You are not permitted to send private messages to this user (+c set)", user->nick.c_str(), t->nick.c_str());
-				return MOD_RES_DENY;
-			}
-		}
-		return MOD_RES_PASSTHRU;
-	}
-
-	virtual ModResult OnUserPreNotice(User* user,void* dest,int target_type, std::string &text, char status, CUList &exempt_list)
-	{
-		return OnUserPreMessage(user, dest, target_type, text, status, exempt_list);
-	}
-};
-
-
-MODULE_INIT(ModulePrivacyMode)
+MODULE_INIT(ModuleCommonChans)

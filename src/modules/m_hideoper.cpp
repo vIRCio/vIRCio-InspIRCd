@@ -1,9 +1,16 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
+ *   Copyright (C) 2019 linuxdaemon <linuxdaemon.irc@gmail.com>
+ *   Copyright (C) 2015, 2017-2023 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2014 Adam <Adam@anope.org>
+ *   Copyright (C) 2012-2013, 2015-2016 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
+ *   Copyright (C) 2009-2010 Daniel De Graaf <danieldg@inspircd.org>
+ *   Copyright (C) 2008 Robin Burchell <robin+git@viroteck.net>
+ *   Copyright (C) 2008 Geoff Bricker <geoff.bricker@gmail.com>
  *   Copyright (C) 2007 Dennis Friis <peavey@inspircd.org>
- *   Copyright (C) 2007 Robin Burchell <robin+git@viroteck.net>
- *   Copyright (C) 2006 Craig Edwards <craigedwards@brainbox.cc>
+ *   Copyright (C) 2006 Craig Edwards <brain@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -20,142 +27,162 @@
 
 
 #include "inspircd.h"
-
-/* $ModDesc: Provides support for hiding oper status with user mode +H */
+#include "modules/stats.h"
+#include "modules/who.h"
+#include "modules/whois.h"
+#include "timeutils.h"
 
 /** Handles user mode +H
  */
-class HideOper : public SimpleUserModeHandler
+class HideOper final
+	: public SimpleUserMode
 {
- public:
-	size_t opercount;
+public:
+	size_t opercount = 0;
 
-	HideOper(Module* Creator) : SimpleUserModeHandler(Creator, "hideoper", 'H')
-		, opercount(0)
+	HideOper(Module* Creator)
+		: SimpleUserMode(Creator, "hideoper", 'H', true)
 	{
-		oper = true;
 	}
 
-	ModeAction OnModeChange(User* source, User* dest, Channel* channel, std::string& parameter, bool adding)
+	bool OnModeChange(User* source, User* dest, Channel* channel, Modes::Change& change) override
 	{
-		if (SimpleUserModeHandler::OnModeChange(source, dest, channel, parameter, adding) == MODEACTION_DENY)
-			return MODEACTION_DENY;
+		if (!SimpleUserMode::OnModeChange(source, dest, channel, change))
+			return false;
 
-		if (adding)
+		if (change.adding)
 			opercount++;
 		else
 			opercount--;
 
-		return MODEACTION_ALLOW;
+		return true;
 	}
 };
 
-class ModuleHideOper : public Module
+class ModuleHideOper final
+	: public Module
+	, public Stats::EventListener
+	, public Who::EventListener
+	, public Whois::LineEventListener
 {
+private:
 	HideOper hm;
-	bool active;
- public:
+	bool active = false;
+
+public:
 	ModuleHideOper()
-		: hm(this)
-		, active(false)
+		: Module(VF_VENDOR, "Adds user mode H (hideoper) which hides the server operator status of a user from unprivileged users.")
+		, Stats::EventListener(this)
+		, Who::EventListener(this)
+		, Whois::LineEventListener(this)
+		, hm(this)
 	{
 	}
 
-	void init()
+	void OnUserQuit(User* user, const std::string&, const std::string&) override
 	{
-		ServerInstance->Modules->AddService(hm);
-		Implementation eventlist[] = { I_OnWhoisLine, I_OnSendWhoLine, I_OnStats, I_OnNumeric, I_OnUserQuit };
-		ServerInstance->Modules->Attach(eventlist, this, sizeof(eventlist)/sizeof(Implementation));
-	}
-
-
-	virtual ~ModuleHideOper()
-	{
-	}
-
-	virtual Version GetVersion()
-	{
-		return Version("Provides support for hiding oper status with user mode +H", VF_VENDOR);
-	}
-
-	void OnUserQuit(User* user, const std::string&, const std::string&)
-	{
-		if (user->IsModeSet('H'))
+		if (user->IsModeSet(hm))
 			hm.opercount--;
 	}
 
-	ModResult OnNumeric(User* user, unsigned int numeric, const std::string& text)
+	ModResult OnNumeric(User* user, const Numeric::Numeric& numeric) override
 	{
-		if (numeric != 252 || active || user->HasPrivPermission("users/auspex"))
+		if (numeric.GetNumeric() != RPL_LUSEROP || active || user->HasPrivPermission("users/auspex"))
 			return MOD_RES_PASSTHRU;
 
 		// If there are no visible operators then we shouldn't send the numeric.
-		size_t opercount = ServerInstance->Users->all_opers.size() - hm.opercount;
+		size_t opercount = ServerInstance->Users.all_opers.size() - hm.opercount;
 		if (opercount)
 		{
 			active = true;
-			user->WriteNumeric(252, "%s %lu :operator(s) online", user->nick.c_str(),  static_cast<unsigned long>(opercount));
+			user->WriteNumeric(RPL_LUSEROP, opercount, "operator(s) online");
 			active = false;
 		}
 		return MOD_RES_DENY;
 	}
 
-	ModResult OnWhoisLine(User* user, User* dest, int &numeric, std::string &text)
+	ModResult OnWhoisLine(Whois::Context& whois, Numeric::Numeric& numeric) override
 	{
 		/* Dont display numeric 313 (RPL_WHOISOPER) if they have +H set and the
 		 * person doing the WHOIS is not an oper
 		 */
-		if (numeric != 313)
+		if (numeric.GetNumeric() != RPL_WHOISOPERATOR)
 			return MOD_RES_PASSTHRU;
 
-		if (!dest->IsModeSet('H'))
+		if (!whois.GetTarget()->IsModeSet(hm))
 			return MOD_RES_PASSTHRU;
 
-		if (!user->HasPrivPermission("users/auspex"))
+		if (!whois.GetSource()->HasPrivPermission("users/auspex"))
 			return MOD_RES_DENY;
 
 		return MOD_RES_PASSTHRU;
 	}
 
-	void OnSendWhoLine(User* source, const std::vector<std::string>& params, User* user, std::string& line)
+	ModResult OnWhoLine(const Who::Request& request, LocalUser* source, User* user, Membership* memb, Numeric::Numeric& numeric) override
 	{
-		if (user->IsModeSet('H') && !source->HasPrivPermission("users/auspex"))
+		if (user->IsModeSet(hm) && !source->HasPrivPermission("users/auspex"))
 		{
+			// Hide the line completely if doing a "/who * o" query
+			if (request.flags['o'])
+				return MOD_RES_DENY;
+
+			size_t flag_index;
+			if (!request.GetFieldIndex('f', flag_index))
+				return MOD_RES_PASSTHRU;
+
 			// hide the "*" that marks the user as an oper from the /WHO line
-			std::string::size_type spcolon = line.find(" :");
-			if (spcolon == std::string::npos)
-				return; // Another module hid the user completely
-			std::string::size_type sp = line.rfind(' ', spcolon-1);
-			std::string::size_type pos = line.find('*', sp);
+			// #chan ident localhost insp22.test nick H@ :0 Attila
+			if (numeric.GetParams().size() <= flag_index)
+				return MOD_RES_PASSTHRU;
+
+			std::string& param = numeric.GetParams()[flag_index];
+			const std::string::size_type pos = param.find('*');
 			if (pos != std::string::npos)
-				line.erase(pos, 1);
-			// hide the line completely if doing a "/who * o" query
-			if (params.size() > 1 && params[1].find('o') != std::string::npos)
-				line.clear();
+				param.erase(pos, 1);
 		}
+		return MOD_RES_PASSTHRU;
 	}
 
-	ModResult OnStats(char symbol, User* user, string_list &results)
+	ModResult OnStats(Stats::Context& stats) override
 	{
-		if (symbol != 'P')
+		if (stats.GetSymbol() != 'P')
 			return MOD_RES_PASSTHRU;
 
-		unsigned int count = 0;
-		for (std::list<User*>::const_iterator i = ServerInstance->Users->all_opers.begin(); i != ServerInstance->Users->all_opers.end(); ++i)
+		bool source_has_priv = stats.GetSource()->HasPrivPermission("users/auspex");
+		for (auto* oper : ServerInstance->Users.all_opers)
 		{
-			User* oper = *i;
-			if (!ServerInstance->ULine(oper->server) && (IS_OPER(user) || !oper->IsModeSet('H')))
-			{
-				results.push_back(ServerInstance->Config->ServerName+" 249 " + user->nick + " :" + oper->nick + " (" + oper->ident + "@" + oper->dhost + ") Idle: " +
-						(IS_LOCAL(oper) ? ConvToStr(ServerInstance->Time() - oper->idle_lastmsg) + " secs" : "unavailable"));
-				count++;
-			}
-		}
-		results.push_back(ServerInstance->Config->ServerName+" 249 "+user->nick+" :"+ConvToStr(count)+" OPER(s)");
+			if (oper->server->IsService() || (oper->IsModeSet(hm) && !source_has_priv))
+				continue;
 
+			std::string extra;
+			if (oper->IsAway())
+			{
+				const std::string awayperiod = Duration::ToString(ServerInstance->Time() - oper->away->time);
+				const std::string awaytime = Time::ToString(oper->away->time);
+
+				extra = INSP_FORMAT(": away for {} [since {}] ({})", awayperiod, awaytime, oper->away->message);
+			}
+
+			auto* loper = IS_LOCAL(oper);
+			if (loper)
+			{
+				const std::string idleperiod = Duration::ToString(ServerInstance->Time() - loper->idle_lastmsg);
+				const std::string idletime = Time::ToString(loper->idle_lastmsg);
+
+				extra += INSP_FORMAT("{} idle for {} [since {}]", extra.empty() ? ':' : ',', idleperiod, idletime);
+			}
+
+			stats.AddGenericRow(INSP_FORMAT("\x02{}\x02 ({}){}", oper->nick, oper->GetUserHost(), extra));
+		}
+
+		// Sort opers alphabetically.
+		std::sort(stats.GetRows().begin(), stats.GetRows().end(), [](const auto& lhs, const auto& rhs) {
+			return lhs.GetParams()[1] < rhs.GetParams()[1];
+		});
+
+		stats.AddGenericRow(INSP_FORMAT("{} server operator{} total", stats.GetRows().size(), stats.GetRows().size() ? "s" : ""));
 		return MOD_RES_DENY;
 	}
 };
-
 
 MODULE_INIT(ModuleHideOper)

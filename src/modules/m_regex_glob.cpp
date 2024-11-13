@@ -1,8 +1,11 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
- *   Copyright (C) 2009 Daniel De Graaf <danieldg@inspircd.org>
- *   Copyright (C) 2008 Thomas Stagner <aquanight@inspircd.org>
+ *   Copyright (C) 2013, 2020-2022 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2013 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
+ *   Copyright (C) 2009-2010 Daniel De Graaf <danieldg@inspircd.org>
+ *   Copyright (C) 2008 Thomas Stagner <aquanight@gmail.com>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -18,50 +21,47 @@
  */
 
 
-#include "m_regex.h"
 #include "inspircd.h"
+#include "modules/regex.h"
 
-/* $ModDesc: Regex module using plain wildcard matching. */
-
-class GlobRegex : public Regex
+class GlobPattern final
+	: public Regex::Pattern
 {
 public:
-	GlobRegex(const std::string& rx) : Regex(rx)
+	GlobPattern(const Module* mod, const std::string& pattern, uint8_t options)
+		: Regex::Pattern(pattern, options)
 	{
 	}
 
-	virtual ~GlobRegex()
+	bool IsMatch(const std::string& text) override
 	{
+		return InspIRCd::Match(text, GetPattern());
 	}
 
-	virtual bool Matches(const std::string& text)
+	std::optional<Regex::MatchCollection> Matches(const std::string& text) override
 	{
-		return InspIRCd::Match(text, this->regex_string);
+		if (!InspIRCd::Match(text, GetPattern()))
+			return std::nullopt;
+
+		// The glob engine does not support any kind of capture.
+		static const Regex::Captures unusedc;
+		static const Regex::NamedCaptures unusednc;
+
+		return Regex::MatchCollection(unusedc, unusednc);
 	}
 };
 
-class GlobFactory : public RegexFactory
+class ModuleRegexGlob final
+	: public Module
 {
- public:
-	Regex* Create(const std::string& expr)
-	{
-		return new GlobRegex(expr);
-	}
+private:
+	Regex::SimpleEngine<GlobPattern> regex;
 
-	GlobFactory(Module* m) : RegexFactory(m, "regex/glob") {}
-};
-
-class ModuleRegexGlob : public Module
-{
-	GlobFactory gf;
 public:
-	ModuleRegexGlob() : gf(this) {
-		ServerInstance->Modules->AddService(gf);
-	}
-
-	Version GetVersion()
+	ModuleRegexGlob()
+		: Module(VF_VENDOR, "Provides the glob regular expression engine which uses the built-in glob matching system.")
+		, regex(this, "glob")
 	{
-		return Version("Regex module using plain wildcard matching.", VF_VENDOR);
 	}
 };
 

@@ -1,10 +1,15 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
- *   Copyright (C) 2009 Daniel De Graaf <danieldg@inspircd.org>
- *   Copyright (C) 2005, 2009 Robin Burchell <robin+git@viroteck.net>
- *   Copyright (C) 2004-2007, 2009 Craig Edwards <craigedwards@brainbox.cc>
- *   Copyright (C) 2007 Dennis Friis <peavey@inspircd.org>
+ *   Copyright (C) 2018-2019 linuxdaemon <linuxdaemon.irc@gmail.com>
+ *   Copyright (C) 2013, 2015-2024 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2012-2015 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
+ *   Copyright (C) 2009-2010 Daniel De Graaf <danieldg@inspircd.org>
+ *   Copyright (C) 2009 Matt Smith <dz@inspircd.org>
+ *   Copyright (C) 2008-2009 Robin Burchell <robin+git@viroteck.net>
+ *   Copyright (C) 2007-2008 Dennis Friis <peavey@inspircd.org>
+ *   Copyright (C) 2006-2009 Craig Edwards <brain@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -22,15 +27,13 @@
 
 #include "inspircd.h"
 
-/* $ModDesc: Provides aliases of commands. */
-
 /** An alias definition
  */
-class Alias
+class Alias final
 {
- public:
+public:
 	/** The text of the alias command */
-	irc::string AliasedCommand;
+	std::string AliasedCommand;
 
 	/** Text to replace with */
 	std::string ReplaceFormat;
@@ -38,14 +41,11 @@ class Alias
 	/** Nickname required to perform alias */
 	std::string RequiredNick;
 
-	/** Alias requires ulined server */
-	bool ULineOnly;
+	/** Alias requires the required nick to be on a services server */
+	bool ServiceOnly;
 
 	/** Requires oper? */
 	bool OperOnly;
-
-	/* is case sensitive params */
-	bool CaseSensitive;
 
 	/* whether or not it may be executed via fantasy (default OFF) */
 	bool ChannelCommand;
@@ -55,69 +55,71 @@ class Alias
 
 	/** Format that must be matched for use */
 	std::string format;
+
+	/** Strip color codes before match? */
+	bool StripColor;
 };
 
-class ModuleAlias : public Module
+class ModuleAlias final
+	: public Module
 {
- private:
-
-	char fprefix;
+	std::string fprefix;
 
 	/* We cant use a map, there may be multiple aliases with the same name.
 	 * We can, however, use a fancy invention: the multimap. Maps a key to one or more values.
 	 *		-- w00t
-   */
-	std::multimap<irc::string, Alias> Aliases;
+	 */
+	typedef insp::flat_multimap<std::string, Alias, irc::insensitive_swo> AliasMap;
+
+	AliasMap Aliases;
 
 	/* whether or not +B users are allowed to use fantasy commands */
 	bool AllowBots;
+	UserModeReference botmode;
 
-	virtual void ReadAliases()
+	// Whether we are actively executing an alias.
+	bool active = false;
+
+public:
+	void ReadConfig(ConfigStatus& status) override
 	{
-		ConfigTag* fantasy = ServerInstance->Config->ConfValue("fantasy");
-		AllowBots = fantasy->getBool("allowbots", false);
-		std::string fpre = fantasy->getString("prefix", "!");
-		fprefix = fpre.empty() ? '!' : fpre[0];
-
-		Aliases.clear();
-		ConfigTagList tags = ServerInstance->Config->ConfTags("alias");
-		for(ConfigIter i = tags.first; i != tags.second; ++i)
+		AliasMap newAliases;
+		for (const auto& [_, tag] : ServerInstance->Config->ConfTags("alias"))
 		{
-			ConfigTag* tag = i->second;
 			Alias a;
-			std::string aliastext = tag->getString("text");
-			a.AliasedCommand = aliastext.c_str();
+			a.AliasedCommand = tag->getString("text");
+			if (a.AliasedCommand.empty())
+				throw ModuleException(this, "<alias:text> is empty! at " + tag->source.str());
+
 			tag->readString("replace", a.ReplaceFormat, true);
+			if (a.ReplaceFormat.empty())
+				throw ModuleException(this, "<alias:replace> is empty! at " + tag->source.str());
+
 			a.RequiredNick = tag->getString("requires");
-			a.ULineOnly = tag->getBool("uline");
+			a.ServiceOnly = tag->getBool("service", tag->getBool("uline"));
 			a.ChannelCommand = tag->getBool("channelcommand", false);
 			a.UserCommand = tag->getBool("usercommand", true);
 			a.OperOnly = tag->getBool("operonly");
 			a.format = tag->getString("format");
-			a.CaseSensitive = tag->getBool("matchcase");
-			Aliases.insert(std::make_pair(a.AliasedCommand, a));
+			a.StripColor = tag->getBool("stripcolor");
+
+			std::transform(a.AliasedCommand.begin(), a.AliasedCommand.end(), a.AliasedCommand.begin(), ::toupper);
+			newAliases.emplace(a.AliasedCommand, a);
 		}
+
+		const auto& fantasy = ServerInstance->Config->ConfValue("fantasy");
+		AllowBots = fantasy->getBool("allowbots", false);
+		fprefix = fantasy->getString("prefix", "!", 1, ServerInstance->Config->Limits.MaxLine);
+		Aliases.swap(newAliases);
 	}
 
- public:
-
-	void init()
-	{
-		ReadAliases();
-		Implementation eventlist[] = { I_OnPreCommand, I_OnRehash, I_OnUserMessage };
-		ServerInstance->Modules->Attach(eventlist, this, sizeof(eventlist)/sizeof(Implementation));
-	}
-
-	virtual ~ModuleAlias()
+	ModuleAlias()
+		: Module(VF_VENDOR, "Allows the server administrator to define custom channel commands (e.g. !kick) and server commands (e.g. /OPERSERV).")
+		, botmode(this, "bot")
 	{
 	}
 
-	virtual Version GetVersion()
-	{
-		return Version("Provides aliases of commands.", VF_VENDOR);
-	}
-
-	std::string GetVar(std::string varname, const std::string &original_line)
+	static std::string GetVar(std::string varname, const std::string& original_line)
 	{
 		irc::spacesepstream ss(original_line);
 		varname.erase(varname.begin());
@@ -142,181 +144,185 @@ class ModuleAlias : public Module
 		return word;
 	}
 
-	virtual ModResult OnPreCommand(std::string &command, std::vector<std::string> &parameters, LocalUser *user, bool validated, const std::string &original_line)
+	static std::string CreateRFCMessage(const std::string& command, CommandBase::Params& parameters)
 	{
-		std::multimap<irc::string, Alias>::iterator i, upperbound;
+		std::string message(command);
+		for (CommandBase::Params::const_iterator iter = parameters.begin(); iter != parameters.end();)
+		{
+			const std::string& parameter = *iter++;
+			message.push_back(' ');
+			if (iter == parameters.end() && (parameter.empty() || parameter.find(' ') != std::string::npos))
+				message.push_back(':');
+			message.append(parameter);
+		}
+		return message;
+	}
 
-		/* If theyre not registered yet, we dont want
-		 * to know.
-		 */
-		if (user->registered != REG_ALL)
+	ModResult OnPreCommand(std::string& command, CommandBase::Params& parameters, LocalUser* user, bool validated) override
+	{
+		// If they're not fully connected yet, we dont want to know.
+		if (!user->IsFullyConnected())
 			return MOD_RES_PASSTHRU;
 
 		/* We dont have any commands looking like this? Stop processing. */
-		i = Aliases.find(command.c_str());
-		if (i == Aliases.end())
+		auto aliases = insp::equal_range(Aliases, command);
+		if (aliases.empty())
 			return MOD_RES_PASSTHRU;
-		/* Avoid iterating on to different aliases if no patterns match. */
-		upperbound = Aliases.upper_bound(command.c_str());
 
-		irc::string c = command.c_str();
 		/* The parameters for the command in their original form, with the command stripped off */
-		std::string compare = original_line.substr(command.length());
+		std::string original_line = CreateRFCMessage(command, parameters);
+		std::string compare(original_line, command.length());
 		while (*(compare.c_str()) == ' ')
 			compare.erase(compare.begin());
 
-		while (i != upperbound)
+		for (const auto& [_, alias] : aliases)
 		{
-			if (i->second.UserCommand)
+			if (alias.UserCommand)
 			{
-				if (DoAlias(user, NULL, &(i->second), compare, original_line))
+				if (DoAlias(user, nullptr, alias, compare, original_line))
 				{
 					return MOD_RES_DENY;
 				}
 			}
-
-			i++;
 		}
 
 		// If we made it here, no aliases actually matched.
 		return MOD_RES_PASSTHRU;
 	}
 
-	virtual void OnUserMessage(User *user, void *dest, int target_type, const std::string &text, char status, const CUList &exempt_list)
+	ModResult OnUserPreMessage(User* user, MessageTarget& target, MessageDetails& details) override
 	{
-		if (target_type != TYPE_CHANNEL)
+		// Don't echo anything which is caused by an alias.
+		if (active)
+			details.echo = false;
+
+		return MOD_RES_PASSTHRU;
+	}
+
+	void OnUserPostMessage(User* user, const MessageTarget& target, const MessageDetails& details) override
+	{
+		// Don't allow aliases to trigger other aliases.
+		if (active)
+			return;
+
+		if ((target.type != MessageTarget::TYPE_CHANNEL) || (details.type != MessageType::PRIVMSG))
 		{
 			return;
 		}
 
 		// fcommands are only for local users. Spanningtree will send them back out as their original cmd.
-		if (!user || !IS_LOCAL(user))
+		LocalUser* luser = IS_LOCAL(user);
+		if (!luser)
 		{
 			return;
 		}
 
 		/* Stop here if the user is +B and allowbot is set to no. */
-		if (!AllowBots && user->IsModeSet('B'))
+		if (!AllowBots && user->IsModeSet(botmode))
 		{
 			return;
 		}
 
-		Channel *c = (Channel *)dest;
+		auto* c = target.Get<Channel>();
 		std::string scommand;
 
 		// text is like "!moo cows bite me", we want "!moo" first
-		irc::spacesepstream ss(text);
+		irc::spacesepstream ss(details.text);
 		ss.GetToken(scommand);
-		irc::string fcommand = scommand.c_str();
 
-		if (fcommand.empty())
+		if (scommand.size() <= fprefix.size())
 		{
 			return; // wtfbbq
 		}
 
 		// we don't want to touch non-fantasy stuff
-		if (*fcommand.c_str() != fprefix)
+		if (scommand.compare(0, fprefix.size(), fprefix) != 0)
 		{
 			return;
 		}
 
 		// nor do we give a shit about the prefix
-		fcommand.erase(fcommand.begin());
+		scommand.erase(0, fprefix.size());
 
-		std::multimap<irc::string, Alias>::iterator i = Aliases.find(fcommand);
-
-		if (i == Aliases.end())
+		auto aliases = insp::equal_range(Aliases, scommand);
+		if (aliases.empty())
 			return;
 
-		/* Avoid iterating on to other aliases if no patterns match */
-		std::multimap<irc::string, Alias>::iterator upperbound = Aliases.upper_bound(fcommand);
-
-
 		/* The parameters for the command in their original form, with the command stripped off */
-		std::string compare = text.substr(fcommand.length() + 1);
+		std::string compare(details.text, scommand.length() + fprefix.size());
 		while (*(compare.c_str()) == ' ')
 			compare.erase(compare.begin());
 
-		while (i != upperbound)
+		for (const auto& [_, alias] : aliases)
 		{
-			if (i->second.ChannelCommand)
+			if (alias.ChannelCommand)
 			{
-				// We use substr(1) here to remove the fantasy prefix
-				if (DoAlias(user, c, &(i->second), compare, text.substr(1)))
+				// We use substr here to remove the fantasy prefix
+				if (DoAlias(luser, c, alias, compare, details.text.substr(fprefix.size())))
 					return;
 			}
-
-			i++;
 		}
 	}
 
-
-	int DoAlias(User *user, Channel *c, Alias *a, const std::string& compare, const std::string& safe)
+	int DoAlias(LocalUser* user, Channel* c, const Alias& a, const std::string& compare, const std::string& safe)
 	{
-		User *u = NULL;
+		std::string stripped(compare);
+		if (a.StripColor)
+			InspIRCd::StripColor(stripped);
 
 		/* Does it match the pattern? */
-		if (!a->format.empty())
+		if (!a.format.empty())
 		{
-			if (a->CaseSensitive)
-			{
-				if (!InspIRCd::Match(compare, a->format, rfc_case_sensitive_map))
-					return 0;
-			}
-			else
-			{
-				if (!InspIRCd::Match(compare, a->format))
-					return 0;
-			}
+			if (!InspIRCd::Match(stripped, a.format))
+				return 0;
 		}
 
-		if ((a->OperOnly) && (!IS_OPER(user)))
+		if ((a.OperOnly) && (!user->IsOper()))
 			return 0;
 
-		if (!a->RequiredNick.empty())
+		if (!a.RequiredNick.empty())
 		{
-			u = ServerInstance->FindNick(a->RequiredNick);
+			int numeric = a.ServiceOnly ? ERR_NOSUCHSERVICE : ERR_NOSUCHNICK;
+			auto* u = ServerInstance->Users.FindNick(a.RequiredNick);
 			if (!u)
 			{
-				user->WriteNumeric(401, ""+user->nick+" "+a->RequiredNick+" :is currently unavailable. Please try again later.");
+				user->WriteNumeric(numeric, a.RequiredNick, "is currently unavailable. Please try again later.");
 				return 1;
 			}
-		}
-		if ((u != NULL) && (!a->RequiredNick.empty()) && (a->ULineOnly))
-		{
-			if (!ServerInstance->ULine(u->server))
+
+			if ((a.ServiceOnly) && (!u->server->IsService()))
 			{
-				ServerInstance->SNO->WriteToSnoMask('a', "NOTICE -- Service "+a->RequiredNick+" required by alias "+std::string(a->AliasedCommand.c_str())+" is not on a u-lined server, possibly underhanded antics detected!");
-				user->WriteNumeric(401, ""+user->nick+" "+a->RequiredNick+" :is an imposter! Please inform an IRC operator as soon as possible.");
+				ServerInstance->SNO.WriteToSnoMask('a', "NOTICE -- Service "+a.RequiredNick+" required by alias "+a.AliasedCommand+" is not on a services server, possibly underhanded antics detected!");
+				user->WriteNumeric(numeric, a.RequiredNick, "is not a network service! Please inform a server operator as soon as possible.");
 				return 1;
 			}
 		}
 
 		/* Now, search and replace in a copy of the original_line, replacing $1 through $9 and $1- etc */
 
-		std::string::size_type crlf = a->ReplaceFormat.find('\n');
+		std::string::size_type crlf = a.ReplaceFormat.find('\n');
 
 		if (crlf == std::string::npos)
 		{
-			DoCommand(a->ReplaceFormat, user, c, safe);
+			DoCommand(a.ReplaceFormat, user, c, safe, a);
 			return 1;
 		}
 		else
 		{
-			irc::sepstream commands(a->ReplaceFormat, '\n');
+			irc::sepstream commands(a.ReplaceFormat, '\n');
 			std::string scommand;
 			while (commands.GetToken(scommand))
 			{
-				DoCommand(scommand, user, c, safe);
+				DoCommand(scommand, user, c, safe, a);
 			}
 			return 1;
 		}
 	}
 
-	void DoCommand(const std::string& newline, User* user, Channel *chan, const std::string &original_line)
+	void DoCommand(const std::string& newline, LocalUser* user, Channel* chan, const std::string& original_line, const Alias& a)
 	{
 		std::string result;
-		result.reserve(MAXBUF);
+		result.reserve(newline.length());
 		for (unsigned int i = 0; i < newline.length(); i++)
 		{
 			char c = newline[i];
@@ -324,35 +330,51 @@ class ModuleAlias : public Module
 			{
 				if (isdigit(newline[i+1]))
 				{
-					int len = ((i + 2 < newline.length()) && (newline[i+2] == '-')) ? 3 : 2;
+					size_t len = ((i + 2 < newline.length()) && (newline[i+2] == '-')) ? 3 : 2;
 					std::string var = newline.substr(i, len);
 					result.append(GetVar(var, original_line));
 					i += len - 1;
 				}
-				else if (newline.substr(i, 5) == "$nick")
+				else if (!newline.compare(i, 5, "$nick", 5))
 				{
 					result.append(user->nick);
 					i += 4;
 				}
-				else if (newline.substr(i, 5) == "$host")
+				else if (!newline.compare(i, 5, "$host", 5))
 				{
-					result.append(user->host);
+					result.append(user->GetRealHost());
 					i += 4;
 				}
-				else if (newline.substr(i, 5) == "$chan")
+				else if (!newline.compare(i, 5, "$chan", 5))
 				{
 					if (chan)
 						result.append(chan->name);
 					i += 4;
 				}
-				else if (newline.substr(i, 6) == "$ident")
+				else if (!newline.compare(i, 5, "$user", 5))
 				{
-					result.append(user->ident);
+					result.append(user->GetRealUser());
+					i += 4;
+				}
+				else if (!newline.compare(i, 6, "$vhost", 6))
+				{
+					result.append(user->GetDisplayedHost());
 					i += 5;
 				}
-				else if (newline.substr(i, 6) == "$vhost")
+				else if (!newline.compare(i, 12, "$requirement", 12))
 				{
-					result.append(user->dhost);
+					result.append(a.RequiredNick);
+					i += 11;
+				}
+				else if (!newline.compare(i, 6, "$address", 8))
+				{
+					result.append(user->GetAddress());
+					i += 7;
+				}
+				else if (!newline.compare(i, 6, "$ident", 6))
+				{
+					// TODO: remove this in the next major release.
+					result.append(user->GetRealUser());
 					i += 5;
 				}
 				else
@@ -363,27 +385,26 @@ class ModuleAlias : public Module
 		}
 
 		irc::tokenstream ss(result);
-		std::vector<std::string> pars;
-		std::string command, token;
+		CommandBase::Params pars;
+		std::string command;
+		std::string token;
 
-		ss.GetToken(command);
-		while (ss.GetToken(token) && (pars.size() <= MAXPARAMETERS))
+		ss.GetMiddle(command);
+		while (ss.GetTrailing(token))
 		{
 			pars.push_back(token);
 		}
-		ServerInstance->Parser->CallHandler(command, pars, user);
+
+		active = true;
+		ServerInstance->Parser.ProcessCommand(user, command, pars);
+		active = false;
 	}
 
-	virtual void OnRehash(User* user)
-	{
-		ReadAliases();
- 	}
-
-	virtual void Prioritize()
+	void Prioritize() override
 	{
 		// Prioritise after spanningtree so that channel aliases show the alias before the effects.
-		Module* linkmod = ServerInstance->Modules->Find("m_spanningtree.so");
-		ServerInstance->Modules->SetPriority(this, I_OnUserMessage, PRIORITY_AFTER, &linkmod);
+		Module* linkmod = ServerInstance->Modules.Find("spanningtree");
+		ServerInstance->Modules.SetPriority(this, I_OnUserPostMessage, PRIORITY_AFTER, linkmod);
 	}
 };
 

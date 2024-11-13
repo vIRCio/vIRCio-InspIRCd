@@ -1,6 +1,10 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
+ *   Copyright (C) 2018-2020, 2023 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2013 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
+ *   Copyright (C) 2009 Daniel De Graaf <danieldg@inspircd.org>
  *   Copyright (C) 2008 Robin Burchell <robin+git@viroteck.net>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
@@ -18,44 +22,23 @@
 
 
 #include "inspircd.h"
-#include "socket.h"
-#include "xline.h"
-#include "socketengine.h"
 
-#include "main.h"
 #include "utils.h"
 #include "treeserver.h"
-#include "treesocket.h"
+#include "commands.h"
 
-/* $ModDep: m_spanningtree/main.h m_spanningtree/utils.h m_spanningtree/treeserver.h m_spanningtree/treesocket.h */
-
-bool TreeSocket::LocalPing(const std::string &prefix, parameterlist &params)
+CmdResult CommandPing::Handle(User* user, Params& params)
 {
-	if (params.size() < 1)
-		return true;
-	if (params.size() == 1)
+	if (params[0] == ServerInstance->Config->ServerId)
 	{
-		std::string stufftobounce = params[0];
-		this->WriteLine(":"+ServerInstance->Config->GetSID()+" PONG "+stufftobounce);
-		return true;
+		// PING for us, reply with a PONG
+		CmdBuilder reply("PONG");
+		reply.push(user->uuid);
+		if (params.size() >= 2)
+			// If there is a second parameter, append it
+			reply.push(params[1]);
+
+		reply.Unicast(user);
 	}
-	else
-	{
-		std::string forwardto = params[1];
-		if (forwardto == ServerInstance->Config->ServerName || forwardto == ServerInstance->Config->GetSID())
-		{
-			// this is a ping for us, send back PONG to the requesting server
-			params[1] = params[0];
-			params[0] = forwardto;
-			Utils->DoOneToOne(ServerInstance->Config->GetSID(),"PONG",params,params[1]);
-		}
-		else
-		{
-			// not for us, pass it on :)
-			Utils->DoOneToOne(prefix,"PING",params,forwardto);
-		}
-		return true;
-	}
+	return CmdResult::SUCCESS;
 }
-
-

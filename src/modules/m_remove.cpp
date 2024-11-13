@@ -1,12 +1,17 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
+ *   Copyright (C) 2017 B00mX0r <b00mx0r@aureus.pw>
+ *   Copyright (C) 2013, 2018-2024 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2012-2014 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
+ *   Copyright (C) 2012 Justin Crawford <Justasic@Gmail.com>
+ *   Copyright (C) 2009 Uli Schlachter <psychon@znc.in>
  *   Copyright (C) 2009 Daniel De Graaf <danieldg@inspircd.org>
- *   Copyright (C) 2008 Pippijn van Steenhoven <pip88nl@gmail.com>
+ *   Copyright (C) 2008 Thomas Stagner <aquanight@gmail.com>
  *   Copyright (C) 2007 Dennis Friis <peavey@inspircd.org>
- *   Copyright (C) 2005, 2007 Robin Burchell <robin+git@viroteck.net>
- *   Copyright (C) 2005-2006 Craig Edwards <craigedwards@brainbox.cc>
- *   Copyright (C) 2006 Oliver Lupton <oliverlupton@gmail.com>
+ *   Copyright (C) 2006 Oliver Lupton <om@inspircd.org>
+ *   Copyright (C) 2005-2006, 2010 Craig Edwards <brain@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -23,91 +28,94 @@
 
 
 #include "inspircd.h"
+#include "modules/isupport.h"
+#include "numerichelper.h"
 
-/* $ModDesc: Provides a /remove command, this is mostly an alternative to /kick, except makes users appear to have parted the channel */
-
-/*
- * This module supports the use of the +q and +a usermodes, but should work without them too.
- * Usage of the command is restricted to +hoaq, and you cannot remove a user with a "higher" level than yourself.
- * eg: +h can remove +hv and users with no modes. +a can remove +aohv and users with no modes.
-*/
-
-/** Base class for /FPART and /REMOVE
- */
-class RemoveBase : public Command
+class CommandRemove final
+	: public Command
 {
- private:
-	bool& supportnokicks;
+private:
+	ChanModeReference nokicksmode;
+	UserModeReference servprotectmode;
 
- public:
-	RemoveBase(Module* Creator, bool& snk, const char* cmdn)
-		: Command(Creator, cmdn, 2, 3), supportnokicks(snk)
+public:
+	ModeHandler::Rank protectedrank;
+	bool supportnokicks;
+
+	CommandRemove(Module* Creator)
+		: Command(Creator, "REMOVE", 2, 3)
+		, nokicksmode(Creator, "nokick")
+		, servprotectmode(Creator, "servprotect")
 	{
+		syntax = { "<channel> <nick> [:<reason>]" };
+		translation = { TR_TEXT, TR_NICK, TR_TEXT };
 	}
 
-	CmdResult HandleRMB(const std::vector<std::string>& parameters, User *user, bool neworder)
+	CmdResult Handle(User* user, const CommandBase::Params& parameters) override
 	{
-		User* target;
-		Channel* channel;
-		std::string reason;
-		std::string protectkey;
-		std::string founderkey;
-		bool hasnokicks;
-
-		/* Set these to the parameters needed, the new version of this module switches it's parameters around
-		 * supplying a new command with the new order while keeping the old /remove with the older order.
-		 * /remove <nick> <channel> [reason ...]
-		 * /fpart <channel> <nick> [reason ...]
-		 */
+		// Keep compatibility with v3 servers by allowing them to send removes with the old order.
+		bool neworder = !IS_LOCAL(user) && ServerInstance->Channels.IsPrefix(parameters[0][0]);
 		const std::string& channame = parameters[neworder ? 0 : 1];
 		const std::string& username = parameters[neworder ? 1 : 0];
 
 		/* Look up the user we're meant to be removing from the channel */
+		User* target;
 		if (IS_LOCAL(user))
-			target = ServerInstance->FindNickOnly(username);
+			target = ServerInstance->Users.FindNick(username, true);
 		else
-			target = ServerInstance->FindNick(username);
+			target = ServerInstance->Users.Find(username, true);
 
 		/* And the channel we're meant to be removing them from */
-		channel = ServerInstance->FindChan(channame);
+		auto* channel = ServerInstance->Channels.Find(channame);
 
 		/* Fix by brain - someone needs to learn to validate their input! */
-		if ((!target) || (target->registered != REG_ALL) || (!channel))
+		if (!channel)
 		{
-			user->WriteNumeric(ERR_NOSUCHNICK, "%s %s :No such nick/channel", user->nick.c_str(), !channel ? channame.c_str() : username.c_str());
-			return CMD_FAILURE;
+			user->WriteNumeric(Numerics::NoSuchChannel(channame));
+			return CmdResult::FAILURE;
+		}
+		if (!target)
+		{
+			user->WriteNumeric(Numerics::NoSuchNick(username));
+			return CmdResult::FAILURE;
 		}
 
 		if (!channel->HasUser(target))
 		{
-			user->WriteServ( "NOTICE %s :*** The user %s is not on channel %s", user->nick.c_str(), target->nick.c_str(), channel->name.c_str());
-			return CMD_FAILURE;
+			user->WriteNotice("*** User {} is not on channel {}", target->nick, channel->name);
+			return CmdResult::FAILURE;
 		}
 
-		int ulevel = channel->GetPrefixValue(user);
-		int tlevel = channel->GetPrefixValue(target);
-
-		hasnokicks = (ServerInstance->Modules->Find("m_nokicks.so") && channel->IsModeSet('Q'));
-
-		if (ServerInstance->ULine(target->server))
+		if (target->IsModeSet(servprotectmode))
 		{
-			user->WriteNumeric(482, "%s %s :Only a u-line may remove a u-line from a channel.", user->nick.c_str(), channame.c_str());
-			return CMD_FAILURE;
+			user->WriteNumeric(ERR_RESTRICTED, channame, "Only a service may remove a service from a channel.");
+			return CmdResult::FAILURE;
 		}
 
 		/* We support the +Q channel mode via. the m_nokicks module, if the module is loaded and the mode is set then disallow the /remove */
-		if ((!IS_LOCAL(user)) || (!supportnokicks || !hasnokicks))
+		if ((!IS_LOCAL(user)) || (!supportnokicks) || (!channel->IsModeSet(nokicksmode)))
 		{
 			/* We'll let everyone remove their level and below, eg:
 			 * ops can remove ops, halfops, voices, and those with no mode (no moders actually are set to 1)
-			 * a ulined target will get a higher level than it's possible for a /remover to get..so they're safe.
-			 * Nobody may remove a founder.
+			 * a services target will get a higher level than it's possible for a /remover to get..so they're safe.
+			 * Nobody may remove people with >= protectedrank rank.
 			 */
-			if ((!IS_LOCAL(user)) || ((ulevel > VOICE_VALUE) && (ulevel >= tlevel) && (tlevel != 50000)))
+			ModeHandler::Rank ulevel = channel->GetPrefixValue(user);
+			ModeHandler::Rank tlevel = channel->GetPrefixValue(target);
+			if ((!IS_LOCAL(user)) || ((ulevel > VOICE_VALUE) && (ulevel >= tlevel) && ((protectedrank == 0) || (tlevel < protectedrank))))
 			{
-				// REMOVE/FPART will be sent to the target's server and it will reply with a PART (or do nothing if it doesn't understand the command)
+				// REMOVE will be sent to the target's server and it will reply with a PART (or do nothing if it doesn't understand the command)
 				if (!IS_LOCAL(target))
-					return CMD_SUCCESS;
+				{
+					CommandBase::Params p;
+					p.push_back(channel->name);
+					p.push_back(target->uuid);
+					if (parameters.size() > 2)
+						p.push_back(":" + parameters[2]);
+					ServerInstance->PI->SendEncapsulatedData(target->server->GetName(), "REMOVE", p, user);
+
+					return CmdResult::SUCCESS;
+				}
 
 				std::string reasonparam;
 
@@ -118,123 +126,57 @@ class RemoveBase : public Command
 					reasonparam = "No reason given";
 
 				/* Build up the part reason string. */
-				reason = "Removed by " + user->nick + ": " + reasonparam;
+				std::string reason = "Removed by " + user->nick + ": " + reasonparam;
 
-				channel->WriteChannelWithServ(ServerInstance->Config->ServerName, "NOTICE %s :%s removed %s from the channel", channel->name.c_str(), user->nick.c_str(), target->nick.c_str());
-				target->WriteServ("NOTICE %s :*** %s removed you from %s with the message: %s", target->nick.c_str(), user->nick.c_str(), channel->name.c_str(), reasonparam.c_str());
+				channel->WriteRemoteNotice(INSP_FORMAT("{} removed {} from the channel", user->nick, target->nick));
+				target->WriteNotice("*** " + user->nick + " removed you from " + channel->name + " with the message: " + reasonparam);
 
 				channel->PartUser(target, reason);
 			}
 			else
 			{
-				user->WriteServ( "NOTICE %s :*** You do not have access to /remove %s from %s", user->nick.c_str(), target->nick.c_str(), channel->name.c_str());
-				return CMD_FAILURE;
+				user->WriteNotice("*** You do not have access to /REMOVE {} from {}", target->nick, channel->name);
+				return CmdResult::FAILURE;
 			}
 		}
 		else
 		{
 			/* m_nokicks.so was loaded and +Q was set, block! */
-			user->WriteServ( "484 %s %s :Can't remove user %s from channel (+Q set)", user->nick.c_str(), channel->name.c_str(), target->nick.c_str());
-			return CMD_FAILURE;
+			user->WriteNumeric(ERR_RESTRICTED, channel->name, INSP_FORMAT("Can't remove user {} from channel (+{} is set)",
+				target->nick, servprotectmode->GetModeChar()));
+			return CmdResult::FAILURE;
 		}
 
-		return CMD_SUCCESS;
-	}
-	virtual RouteDescriptor GetRouting(User* user, const std::vector<std::string>& parameters) = 0;
-};
-
-/** Handle /REMOVE
- */
-class CommandRemove : public RemoveBase
-{
- public:
-	CommandRemove(Module* Creator, bool& snk)
-		: RemoveBase(Creator, snk, "REMOVE")
-	{
-		syntax = "<nick> <channel> [<reason>]";
-		TRANSLATE4(TR_NICK, TR_TEXT, TR_TEXT, TR_END);
-	}
-
-	CmdResult Handle (const std::vector<std::string>& parameters, User *user)
-	{
-		return HandleRMB(parameters, user, false);
-	}
-
-	RouteDescriptor GetRouting(User* user, const std::vector<std::string>& parameters)
-	{
-		User* dest = ServerInstance->FindNick(parameters[0]);
-		if (dest)
-			return ROUTE_OPT_UCAST(dest->server);
-		return ROUTE_LOCALONLY;
+		return CmdResult::SUCCESS;
 	}
 };
 
-/** Handle /FPART
- */
-class CommandFpart : public RemoveBase
+class ModuleRemove final
+	: public Module
+	, public ISupport::EventListener
 {
- public:
-	CommandFpart(Module* Creator, bool& snk)
-		: RemoveBase(Creator, snk, "FPART")
-	{
-		syntax = "<channel> <nick> [<reason>]";
-		TRANSLATE4(TR_TEXT, TR_NICK, TR_TEXT, TR_END);
-	}
+private:
+	CommandRemove cmd;
 
-	CmdResult Handle (const std::vector<std::string>& parameters, User *user)
-	{
-		return HandleRMB(parameters, user, true);
-	}
-
-	RouteDescriptor GetRouting(User* user, const std::vector<std::string>& parameters)
-	{
-		User* dest = ServerInstance->FindNick(parameters[1]);
-		if (dest)
-			return ROUTE_OPT_UCAST(dest->server);
-		return ROUTE_LOCALONLY;
-	}
-};
-
-class ModuleRemove : public Module
-{
-	CommandRemove cmd1;
-	CommandFpart cmd2;
-	bool supportnokicks;
-
-
- public:
-	ModuleRemove() : cmd1(this, supportnokicks), cmd2(this, supportnokicks)
+public:
+	ModuleRemove()
+		: Module(VF_VENDOR | VF_OPTCOMMON, "Adds the /REMOVE command which allows channel operators to force part users from a channel.")
+		, ISupport::EventListener(this)
+		, cmd(this)
 	{
 	}
 
-	void init()
+	void OnBuildISupport(ISupport::TokenMap& tokens) override
 	{
-		ServerInstance->Modules->AddService(cmd1);
-		ServerInstance->Modules->AddService(cmd2);
-		OnRehash(NULL);
-		Implementation eventlist[] = { I_On005Numeric, I_OnRehash };
-		ServerInstance->Modules->Attach(eventlist, this, sizeof(eventlist)/sizeof(Implementation));
+		tokens["REMOVE"];
 	}
 
-	virtual void On005Numeric(std::string &output)
+	void ReadConfig(ConfigStatus& status) override
 	{
-		output.append(" REMOVE");
+		const auto& tag = ServerInstance->Config->ConfValue("remove");
+		cmd.supportnokicks = tag->getBool("supportnokicks");
+		cmd.protectedrank = tag->getNum<ModeHandler::Rank>("protectedrank", 50000, 1);
 	}
-
-	virtual void OnRehash(User* user)
-	{
-		supportnokicks = ServerInstance->Config->ConfValue("remove")->getBool("supportnokicks");
-	}
-
-	virtual ~ModuleRemove()
-	{
-	}
-
-	virtual Version GetVersion()
-	{
-		return Version("Provides a /remove command, this is mostly an alternative to /kick, except makes users appear to have parted the channel", VF_OPTCOMMON | VF_VENDOR);
-	}
-
 };
 
 MODULE_INIT(ModuleRemove)

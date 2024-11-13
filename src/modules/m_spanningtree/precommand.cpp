@@ -1,8 +1,11 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
- *   Copyright (C) 2008 Thomas Stagner <aquanight@inspircd.org>
- *   Copyright (C) 2007 Craig Edwards <craigedwards@brainbox.cc>
+ *   Copyright (C) 2018, 2022-2023 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
+ *   Copyright (C) 2009-2010 Daniel De Graaf <danieldg@inspircd.org>
+ *   Copyright (C) 2008 Thomas Stagner <aquanight@gmail.com>
+ *   Copyright (C) 2007 Craig Edwards <brain@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -18,20 +21,11 @@
  */
 
 
-/* $ModDesc: Provides a spanning tree server link protocol */
-
 #include "inspircd.h"
-#include "socket.h"
-#include "xline.h"
 
 #include "main.h"
-#include "utils.h"
-#include "treeserver.h"
-#include "treesocket.h"
 
-/* $ModDep: m_spanningtree/main.h m_spanningtree/utils.h m_spanningtree/treeserver.h m_spanningtree/treesocket.h */
-
-ModResult ModuleSpanningTree::OnPreCommand(std::string &command, std::vector<std::string>& parameters, LocalUser *user, bool validated, const std::string &original_line)
+ModResult ModuleSpanningTree::OnPreCommand(std::string& command, CommandBase::Params& parameters, LocalUser* user, bool validated)
 {
 	/* If the command doesnt appear to be valid, we dont want to mess with it. */
 	if (!validated)
@@ -39,19 +33,15 @@ ModResult ModuleSpanningTree::OnPreCommand(std::string &command, std::vector<std
 
 	if (command == "CONNECT")
 	{
-		return this->HandleConnect(parameters,user);
+		return this->HandleConnect(parameters, user);
 	}
 	else if (command == "SQUIT")
 	{
-		return this->HandleSquit(parameters,user);
-	}
-	else if (command == "MAP")
-	{
-		return this->HandleMap(parameters,user) ? MOD_RES_DENY : MOD_RES_PASSTHRU;
+		return HandleSquit(parameters, user);
 	}
 	else if (command == "LINKS")
 	{
-		this->HandleLinks(parameters,user);
+		this->HandleLinks(parameters, user);
 		return MOD_RES_DENY;
 	}
 	else if (command == "WHOIS")
@@ -59,14 +49,12 @@ ModResult ModuleSpanningTree::OnPreCommand(std::string &command, std::vector<std
 		if (parameters.size() > 1)
 		{
 			// remote whois
-			return this->HandleRemoteWhois(parameters,user);
+			return HandleRemoteWhois(parameters, user);
 		}
 	}
-	else if ((command == "VERSION") && (parameters.size() > 0))
+	else if ((command == "VERSION") && (!parameters.empty()))
 	{
-		this->HandleVersion(parameters,user);
-		return MOD_RES_DENY;
+		return HandleVersion(parameters, user);
 	}
 	return MOD_RES_PASSTHRU;
 }
-

@@ -1,10 +1,12 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
+ *   Copyright (C) 2019-2023 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
+ *   Copyright (C) 2012 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2009 Daniel De Graaf <danieldg@inspircd.org>
  *   Copyright (C) 2007 Dennis Friis <peavey@inspircd.org>
- *   Copyright (C) 2007 John Brooks <john.brooks@dereferenced.net>
- *   Copyright (C) 2007 Robin Burchell <robin+git@viroteck.net>
- *   Copyright (C) 2006 Oliver Lupton <oliverlupton@gmail.com>
+ *   Copyright (C) 2006, 2008 Craig Edwards <brain@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -22,66 +24,50 @@
 
 #include "inspircd.h"
 
-/* $ModDesc: Provides support for the SETIDENT command */
-
-/** Handle /SETIDENT
- */
-class CommandSetident : public Command
+class CommandSetident final
+	: public Command
 {
- public:
- CommandSetident(Module* Creator) : Command(Creator,"SETIDENT", 1)
+public:
+	CommandSetident(Module* Creator)
+		: Command(Creator, "SETIDENT", 1)
 	{
-		allow_empty_last_param = false;
-		flags_needed = 'o'; syntax = "<new-ident>";
-		TRANSLATE2(TR_TEXT, TR_END);
+		access_needed = CmdAccess::OPERATOR;
+		syntax = { "<username>" };
 	}
 
-	CmdResult Handle(const std::vector<std::string>& parameters, User *user)
+	CmdResult Handle(User* user, const Params& parameters) override
 	{
-		if (parameters[0].size() > ServerInstance->Config->Limits.IdentMax)
+		if (parameters[0].size() > ServerInstance->Config->Limits.MaxUser)
 		{
-			user->WriteServ("NOTICE %s :*** SETIDENT: Ident is too long", user->nick.c_str());
-			return CMD_FAILURE;
+			user->WriteNotice("*** SETIDENT: Username is too long");
+			return CmdResult::FAILURE;
 		}
 
-		if (!ServerInstance->IsIdent(parameters[0].c_str()))
+		if (!ServerInstance->IsUser(parameters[0]))
 		{
-			user->WriteServ("NOTICE %s :*** SETIDENT: Invalid characters in ident", user->nick.c_str());
-			return CMD_FAILURE;
+			user->WriteNotice("*** SETIDENT: Invalid characters in username");
+			return CmdResult::FAILURE;
 		}
 
-		user->ChangeIdent(parameters[0].c_str());
-		ServerInstance->SNO->WriteGlobalSno('a', "%s used SETIDENT to change their ident to '%s'", user->nick.c_str(), user->ident.c_str());
+		user->ChangeDisplayedUser(parameters[0]);
+		ServerInstance->SNO.WriteGlobalSno('a', "{} used SETIDENT to change their username to '{}'", user->nick, user->GetRealUser());
 
-		return CMD_SUCCESS;
+		return CmdResult::SUCCESS;
 	}
 };
 
-
-class ModuleSetIdent : public Module
+class ModuleSetIdent final
+	: public Module
 {
+private:
 	CommandSetident cmd;
 
- public:
-	ModuleSetIdent() : cmd(this)
+public:
+	ModuleSetIdent()
+		: Module(VF_VENDOR, "Adds the /SETIDENT command which allows server operators to change their username.")
+		, cmd(this)
 	{
 	}
-
-	void init()
-	{
-		ServerInstance->Modules->AddService(cmd);
-	}
-
-	virtual ~ModuleSetIdent()
-	{
-	}
-
-	virtual Version GetVersion()
-	{
-		return Version("Provides support for the SETIDENT command", VF_VENDOR);
-	}
-
 };
-
 
 MODULE_INIT(ModuleSetIdent)

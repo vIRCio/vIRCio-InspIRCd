@@ -1,9 +1,13 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
- *   Copyright (C) 2004, 2008 Craig Edwards <craigedwards@brainbox.cc>
+ *   Copyright (C) 2019 Matt Schatz <genius3000@g3k.solutions>
+ *   Copyright (C) 2017, 2020-2024 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
+ *   Copyright (C) 2012 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2009 Daniel De Graaf <danieldg@inspircd.org>
  *   Copyright (C) 2007 Dennis Friis <peavey@inspircd.org>
- *   Copyright (C) 2007 Robin Burchell <robin+git@viroteck.net>
+ *   Copyright (C) 2006 Craig Edwards <brain@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -20,65 +24,50 @@
 
 
 #include "inspircd.h"
+#include "modules/exemption.h"
+#include "modules/extban.h"
+#include "numerichelper.h"
 
-/* $ModDesc: Provides channel mode +T to block notices to the channel */
-
-class NoNotice : public SimpleChannelModeHandler
+class ModuleNoNotice final
+	: public Module
 {
- public:
-	NoNotice(Module* Creator) : SimpleChannelModeHandler(Creator, "nonotice", 'T') { }
-};
+private:
+	ExtBan::Acting extban;
+	CheckExemption::EventProvider exemptionprov;
+	SimpleChannelMode nt;
 
-class ModuleNoNotice : public Module
-{
-	NoNotice nt;
- public:
-
+public:
 	ModuleNoNotice()
-		: nt(this)
+		: Module(VF_VENDOR, "Adds channel mode T (nonotice) which allows channels to block messages sent with the /NOTICE command.")
+		, extban(this, "nonotice", 'T')
+		, exemptionprov(this)
+		, nt(this, "nonotice", 'T')
 	{
 	}
 
-	void init()
+	ModResult OnUserPreMessage(User* user, MessageTarget& target, MessageDetails& details) override
 	{
-		ServerInstance->Modules->AddService(nt);
-		Implementation eventlist[] = { I_OnUserPreNotice, I_On005Numeric };
-		ServerInstance->Modules->Attach(eventlist, this, sizeof(eventlist)/sizeof(Implementation));
-	}
-
-	virtual void On005Numeric(std::string &output)
-	{
-		ServerInstance->AddExtBanChar('T');
-	}
-
-	virtual ModResult OnUserPreNotice(User* user,void* dest,int target_type, std::string &text, char status, CUList &exempt_list)
-	{
-		ModResult res;
-		if ((target_type == TYPE_CHANNEL) && (IS_LOCAL(user)))
+		if ((details.type == MessageType::NOTICE) && (target.type == MessageTarget::TYPE_CHANNEL) && (IS_LOCAL(user)))
 		{
-			Channel* c = (Channel*)dest;
-			if (!c->GetExtBanStatus(user, 'T').check(!c->IsModeSet('T')))
+			auto* c = target.Get<Channel>();
+
+			ModResult res = exemptionprov.Check(user, c, "nonotice");
+			if (res == MOD_RES_ALLOW)
+				return MOD_RES_PASSTHRU;
+
+			if (c->IsModeSet(nt))
 			{
-				res = ServerInstance->OnCheckExemption(user,c,"nonotice");
-				if (res == MOD_RES_ALLOW)
-					return MOD_RES_PASSTHRU;
-				else
-				{
-					user->WriteNumeric(ERR_CANNOTSENDTOCHAN, "%s %s :Can't send NOTICE to channel (+T set)",user->nick.c_str(), c->name.c_str());
-					return MOD_RES_DENY;
-				}
+				user->WriteNumeric(Numerics::CannotSendTo(c, "notices", &nt));
+				return MOD_RES_DENY;
+			}
+
+			if (extban.GetStatus(user, c) == MOD_RES_DENY)
+			{
+				user->WriteNumeric(Numerics::CannotSendTo(c, "notices", extban));
+				return MOD_RES_DENY;
 			}
 		}
 		return MOD_RES_PASSTHRU;
-	}
-
-	virtual ~ModuleNoNotice()
-	{
-	}
-
-	virtual Version GetVersion()
-	{
-		return Version("Provides channel mode +T to block notices to the channel", VF_VENDOR);
 	}
 };
 

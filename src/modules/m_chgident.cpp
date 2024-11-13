@@ -1,10 +1,13 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
+ *   Copyright (C) 2019-2023 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2012, 2016 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
  *   Copyright (C) 2009 Daniel De Graaf <danieldg@inspircd.org>
+ *   Copyright (C) 2007-2008 Craig Edwards <brain@inspircd.org>
+ *   Copyright (C) 2007 John Brooks <john@jbrooks.io>
  *   Copyright (C) 2007 Dennis Friis <peavey@inspircd.org>
- *   Copyright (C) 2007 Robin Burchell <robin+git@viroteck.net>
- *   Copyright (C) 2006 Oliver Lupton <oliverlupton@gmail.com>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -21,89 +24,73 @@
 
 
 #include "inspircd.h"
+#include "numerichelper.h"
 
-/* $ModDesc: Provides support for the CHGIDENT command */
-
-/** Handle /CHGIDENT
- */
-class CommandChgident : public Command
+class CommandChgident final
+	: public Command
 {
- public:
-	CommandChgident(Module* Creator) : Command(Creator,"CHGIDENT", 2)
+public:
+	CommandChgident(Module* Creator)
+		: Command(Creator, "CHGIDENT", 2)
 	{
-		allow_empty_last_param = false;
-		flags_needed = 'o';
-		syntax = "<nick> <newident>";
-		TRANSLATE3(TR_NICK, TR_TEXT, TR_END);
+		access_needed = CmdAccess::OPERATOR;
+		syntax = { "<nick> <username>" };
+		translation = { TR_NICK, TR_TEXT };
 	}
 
-	CmdResult Handle(const std::vector<std::string> &parameters, User *user)
+	CmdResult Handle(User* user, const Params& parameters) override
 	{
-		User* dest = ServerInstance->FindNick(parameters[0]);
-
-		if ((!dest) || (dest->registered != REG_ALL))
+		auto* dest = ServerInstance->Users.Find(parameters[0], true);
+		if (!dest)
 		{
-			user->WriteNumeric(ERR_NOSUCHNICK, "%s %s :No such nick/channel", user->nick.c_str(), parameters[0].c_str());
-			return CMD_FAILURE;
+			user->WriteNumeric(Numerics::NoSuchNick(parameters[0]));
+			return CmdResult::FAILURE;
 		}
 
-		if (parameters[1].length() > ServerInstance->Config->Limits.IdentMax)
+		if (parameters[1].length() > ServerInstance->Config->Limits.MaxUser)
 		{
-			user->WriteServ("NOTICE %s :*** CHGIDENT: Ident is too long", user->nick.c_str());
-			return CMD_FAILURE;
+			user->WriteNotice("*** CHGIDENT: Username is too long");
+			return CmdResult::FAILURE;
 		}
 
-		if (!ServerInstance->IsIdent(parameters[1].c_str()))
+		if (!ServerInstance->IsUser(parameters[1]))
 		{
-			user->WriteServ("NOTICE %s :*** CHGIDENT: Invalid characters in ident", user->nick.c_str());
-			return CMD_FAILURE;
+			user->WriteNotice("*** CHGIDENT: Invalid characters in username");
+			return CmdResult::FAILURE;
 		}
 
 		if (IS_LOCAL(dest))
 		{
-			dest->ChangeIdent(parameters[1].c_str());
+			dest->ChangeDisplayedUser(parameters[1]);
 
-			if (!ServerInstance->ULine(user->server))
-				ServerInstance->SNO->WriteGlobalSno('a', "%s used CHGIDENT to change %s's ident to '%s'", user->nick.c_str(), dest->nick.c_str(), dest->ident.c_str());
+			if (!user->server->IsService())
+			{
+				ServerInstance->SNO.WriteGlobalSno('a', "{} used CHGIDENT to change {}'s username to '{}'",
+					user->nick, dest->nick, dest->GetDisplayedUser());
+			}
 		}
 
-		return CMD_SUCCESS;
+		return CmdResult::SUCCESS;
 	}
 
-	RouteDescriptor GetRouting(User* user, const std::vector<std::string>& parameters)
+	RouteDescriptor GetRouting(User* user, const Params& parameters) override
 	{
-		User* dest = ServerInstance->FindNick(parameters[0]);
-		if (dest)
-			return ROUTE_OPT_UCAST(dest->server);
-		return ROUTE_LOCALONLY;
+		return ROUTE_OPT_UCAST(parameters[0]);
 	}
 };
 
-
-class ModuleChgIdent : public Module
+class ModuleChgIdent final
+	: public Module
 {
+private:
 	CommandChgident cmd;
 
 public:
-	ModuleChgIdent() : cmd(this)
+	ModuleChgIdent()
+		: Module(VF_VENDOR | VF_OPTCOMMON, "Adds the /CHGIDENT command which allows server operators to change the username of a user.")
+		, cmd(this)
 	{
 	}
-
-	void init()
-	{
-		ServerInstance->Modules->AddService(cmd);
-	}
-
-	virtual ~ModuleChgIdent()
-	{
-	}
-
-	virtual Version GetVersion()
-	{
-		return Version("Provides support for the CHGIDENT command", VF_OPTCOMMON | VF_VENDOR);
-	}
-
 };
 
 MODULE_INIT(ModuleChgIdent)
-

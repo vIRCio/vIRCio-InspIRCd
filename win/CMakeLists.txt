@@ -1,100 +1,134 @@
-cmake_minimum_required(VERSION 2.8)
+#
+# InspIRCd -- Internet Relay Chat Daemon
+#
+#   Copyright (C) 2019 Robby <robby@chatbelgie.be>
+#   Copyright (C) 2018-2019, 2021-2024 Sadie Powell <sadie@witchery.services>
+#   Copyright (C) 2013-2014 Attila Molnar <attilamolnar@hush.com>
+#   Copyright (C) 2013-2014 Adam <Adam@anope.org>
+#
+# This file is part of InspIRCd.  InspIRCd is free software: you can
+# redistribute it and/or modify it under the terms of the GNU General Public
+# License as published by the Free Software Foundation, version 2.
+#
+# This program is distributed in the hope that it will be useful, but WITHOUT
+# ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+# FOR A PARTICULAR PURPOSE.  See the GNU General Public License for more
+# details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
 
-project(InspIRCd CXX)
 
-set(CONF_PATH "conf" CACHE PATH "Configuration file path")
-set(MODULE_PATH "modules" CACHE PATH "Module path")
-set(DATA_PATH "data" CACHE PATH "Data path")
-set(LOG_PATH "logs" CACHE PATH "Log file path")
+cmake_minimum_required(VERSION 3.20 FATAL_ERROR)
 
-set(EXTRA_INCLUDES "" CACHE PATH "Extra include paths")
-set(EXTRA_LIBS "" CACHE PATH "Extra library paths")
+project("InspIRCd" CXX)
 
-set(INSPIRCD_BASE "${CMAKE_CURRENT_SOURCE_DIR}/../")
+if(NOT WIN32)
+	message(FATAL_ERROR "CMake can only be used on Windows!")
+endif()
+
+set(CONFIG_DIR "conf" CACHE PATH "Configuration path")
+set(MODULE_DIR "modules" CACHE PATH "Module path")
+set(DATA_DIR "data" CACHE PATH "Data path")
+set(LOG_DIR "logs" CACHE PATH "Log path")
+
+# Find the root of the source directory
+cmake_path(GET CMAKE_CURRENT_SOURCE_DIR PARENT_PATH INSPIRCD_BASE)
+
+# Build with multiple processes
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /MP")
 
 # Use our own NSIS template
 set(CMAKE_MODULE_PATH "${INSPIRCD_BASE}/win")
 
-# Grab version info from version.sh
-file(STRINGS "${INSPIRCD_BASE}/src/version.sh" VERSIONSH)
-string(REGEX REPLACE ".*InspIRCd-([0-9]*).*" "\\1" MAJOR_VERSION "${VERSIONSH}")
-string(REGEX REPLACE ".*InspIRCd-[0-9]*\\.([0-9]*).*" "\\1" MINOR_VERSION "${VERSIONSH}")
-string(REGEX REPLACE ".*InspIRCd-[0-9]*\\.[0-9]*\\.([0-9]*).*" "\\1" PATCH_VERSION "${VERSIONSH}")
-set(FULL_VERSION "${MAJOR_VERSION}.${MINOR_VERSION}.${PATCH_VERSION}")
+# Require C++17
+set(CMAKE-CXX_EXTENSIONS OFF)
+set(CMAKE_CXX_STANDARD "17")
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-if(MSVC)
-	# Without /SAFESEH:NO old libraries compiled with VS 2010 or older won't link correctly to VS2012 (eg, extra module libs)
-	set(CMAKE_EXE_LINKER_FLAGS_DEBUG "${CMAKE_EXE_LINKER_FLAGS_DEBUG} /SAFESEH:NO")
-	set(CMAKE_EXE_LINKER_FLAGS_MINSIZEREL "${CMAKE_EXE_LINKER_FLAGS_MINSIZEREL} /SAFESEH:NO")
-	set(CMAKE_EXE_LINKER_FLAGS_RELEASE "${CMAKE_EXE_LINKER_FLAGS_RELEASE} /SAFESEH:NO")
-	set(CMAKE_EXE_LINKER_FLAGS_RELWITHDEBINFO "${CMAKE_EXE_LINKER_FLAGS_RELWITHDEBINFO} /SAFESEH:NO")
-	set(CMAKE_SHARED_LINKER_FLAGS_DEBUG "${CMAKE_SHARED_LINKER_FLAGS_DEBUG} /SAFESEH:NO")
-	set(CMAKE_SHARED_LINKER_FLAGS_MINSIZEREL "${CMAKE_SHARED_LINKER_FLAGS_MINSIZEREL} /SAFESEH:NO")
-	set(CMAKE_SHARED_LINKER_FLAGS_RELEASE "${CMAKE_SHARED_LINKER_FLAGS_RELEASE} /SAFESEH:NO")
-	set(CMAKE_SHARED_LINKER_FLAGS_RELWITHDEBINFO "${CMAKE_SHARED_LINKER_FLAGS_RELWITHDEBINFO} /SAFESEH:NO")
-	set(CMAKE_MODULE_LINKER_FLAGS_DEBUG "${CMAKE_MODULE_LINKER_FLAGS_DEBUG} /SAFESEH:NO")
-	set(CMAKE_MODULE_LINKER_FLAGS_MINSIZEREL "${CMAKE_MODULE_LINKER_FLAGS_MINSIZEREL} /SAFESEH:NO")
-	set(CMAKE_MODULE_LINKER_FLAGS_RELEASE "${CMAKE_MODULE_LINKER_FLAGS_RELEASE} /SAFESEH:NO")
-	set(CMAKE_MODULE_LINKER_FLAGS_RELWITHDEBINFO "${CMAKE_MODULE_LINKER_FLAGS_RELWITHDEBINFO} /SAFESEH:NO")
-endif(MSVC)
+# Put modules in their own folder
+set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 
-file(GLOB INSPIRCD_SOURCES RELATIVE ${CMAKE_CURRENT_SOURCE_DIR}
-"${INSPIRCD_BASE}/win/inspircd_win32wrapper.cpp"
-"${INSPIRCD_BASE}/win/win32service.cpp" "${INSPIRCD_BASE}/src/*.cpp"
-"${INSPIRCD_BASE}/src/modes/*.cpp"
-"${INSPIRCD_BASE}/src/socketengines/socketengine_select.cpp"
-"${INSPIRCD_BASE}/src/threadengines/threadengine_win32.cpp")
-list(SORT INSPIRCD_SOURCES)
+add_compile_definitions(
+	"_WIN32_WINNT=0x0A00"      # Set the minimum OS to Windows 10
+	"FD_SETSIZE=24000"         # Increase the default socket limit to something reasonable
+	"NOMINMAX"                 # Avoid the Windows API breaking std::{min,max}
+	"NTDDI_VERSION=0x0A000005" # Set the minimum OS to Windows 10 1803 "Redstone 4"
+	"WIN32_LEAN_AND_MEAN"      # Trim down the size of the included headers.
+)
+
+add_compile_options("/utf-8")
 
 include_directories("${INSPIRCD_BASE}/win" "${INSPIRCD_BASE}/include")
+include_directories(SYSTEM "${INSPIRCD_BASE}/vendor")
 
-include_directories(${EXTRA_INCLUDES})
-link_directories(${EXTRA_LIBS})
+# win32memory is statically linked into every target later
+add_library("win32memory" STATIC "${INSPIRCD_BASE}/win/win32memory.cpp")
 
-if(MSVC)
-	add_library(win32_memory STATIC "${INSPIRCD_BASE}/win/inspircd_memory_functions.cpp")
-endif(MSVC)
+# Grab version info from version.sh
+file(STRINGS "${INSPIRCD_BASE}/src/version.sh" VERSIONSH)
+string(REGEX REPLACE ".*InspIRCd-([0-9]*).*" "\\1" VERSION_MAJOR "${VERSIONSH}")
+string(REGEX REPLACE ".*InspIRCd-[0-9]*\\.([0-9]*).*" "\\1" VERSION_MINOR "${VERSIONSH}")
+string(REGEX REPLACE ".*InspIRCd-[0-9]*\\.[0-9]*\\.([0-9]*).*" "\\1" VERSION_PATCH "${VERSIONSH}")
+string(REGEX REPLACE ".*InspIRCd-([^\"]+).*" "\\1" VERSION_FULL "${VERSIONSH}")
 
+# Preconfigure files that the InspIRCd build needs.
+configure_file("${INSPIRCD_BASE}/make/template/config.h" "${INSPIRCD_BASE}/include/config.h")
 configure_file("${INSPIRCD_BASE}/win/inspircd.rc.cmake" "${INSPIRCD_BASE}/win/inspircd.rc")
-configure_file("${INSPIRCD_BASE}/win/inspircd_version.h.cmake" "${INSPIRCD_BASE}/win/inspircd_version.h")
-configure_file("${INSPIRCD_BASE}/win/inspircd_config.h.cmake" "${INSPIRCD_BASE}/win/inspircd_config.h")
 
-add_executable(inspircd ${INSPIRCD_SOURCES} "${INSPIRCD_BASE}/win/inspircd.rc")
-target_link_libraries(inspircd win32_memory)
-set_target_properties(inspircd PROPERTIES ENABLE_EXPORTS ON)
-install(TARGETS inspircd DESTINATION .)
+file(GLOB INSPIRCD_HEADERS
+	"${INSPIRCD_BASE}/include/*.h"
+	"${INSPIRCD_BASE}/include/modules/*.h"
+	"${INSPIRCD_BASE}/include/utility/*.h"
+)
+list(SORT INSPIRCD_HEADERS)
 
-add_subdirectory(modules)
+file(GLOB INSPIRCD_SOURCES
+	"${INSPIRCD_BASE}/src/*.cpp"
+	"${INSPIRCD_BASE}/src/socketengines/select.cpp"
+	"${INSPIRCD_BASE}/win/win32wrapper.cpp"
+	"${INSPIRCD_BASE}/win/win32service.cpp"
+)
+list(SORT INSPIRCD_SOURCES)
 
-# Package any DLLs in win/
-file(GLOB EXTRA_DLLS RELATIVE ${CMAKE_CURRENT_SOURCE_DIR} "${INSPIRCD_BASE}/win/*.dll")
-install(FILES ${EXTRA_DLLS} DESTINATION .)
+# The main server executable
+add_executable("inspircd" ${INSPIRCD_HEADERS} ${INSPIRCD_SOURCES} "${INSPIRCD_BASE}/win/inspircd.rc")
+add_dependencies("inspircd" "win32memory")
+target_compile_definitions("inspircd" PRIVATE "FMT_LIB_EXPORT" "INSPIRCD_CORE")
+set_target_properties("inspircd" PROPERTIES "ENABLE_EXPORTS" ON)
+target_link_libraries("inspircd" "win32memory")
+install(TARGETS "inspircd" RUNTIME DESTINATION ".")
+
+# Also build modules
+add_subdirectory("modules")
+
+# Package any DLLs from Conan
+file(GLOB EXTRA_DLLS "${CMAKE_CURRENT_SOURCE_DIR}/*.dll")
+install(FILES ${EXTRA_DLLS} DESTINATION ".")
 
 # Install example configs
-file(GLOB_RECURSE EXAMPLE_CONFIGS RELATIVE ${CMAKE_CURRENT_SOURCE_DIR} "${INSPIRCD_BASE}/docs/conf/*.example")
-install(FILES ${EXAMPLE_CONFIGS} DESTINATION conf)
-
-# Install nationalchars files
-file(GLOB_RECURSE EXAMPLE_LOCALES RELATIVE ${CMAKE_CURRENT_SOURCE_DIR} "${INSPIRCD_BASE}/locales/*")
-install(FILES ${EXAMPLE_LOCALES} DESTINATION locales)
+install(DIRECTORY "${INSPIRCD_BASE}/docs/conf/" DESTINATION "${CONFIG_DIR}/examples")
+install(DIRECTORY "${INSPIRCD_BASE}/docs/sql/" DESTINATION "${CONFIG_DIR}/sql")
 
 # Create an empty data and logs directory and install them
-file(MAKE_DIRECTORY ${DATA_PATH})
-install(DIRECTORY ${DATA_PATH} DESTINATION .)
-file(MAKE_DIRECTORY ${LOG_PATH})
-install(DIRECTORY ${LOG_PATH} DESTINATION .)
+file(MAKE_DIRECTORY ${DATA_DIR})
+install(DIRECTORY ${DATA_DIR} DESTINATION .)
+file(MAKE_DIRECTORY ${LOG_DIR})
+install(DIRECTORY ${LOG_DIR} DESTINATION .)
 
 if(EXISTS "${CMAKE_ROOT}/Modules/CPack.cmake")
-	set(CMAKE_INSTALL_SYSTEM_RUNTIME_DESTINATION ".") # place runtime libraries next to InspIRCd binary
-	include(InstallRequiredSystemLibraries)
+	# Place runtime libraries next to the InspIRCd binary
+	set(CMAKE_INSTALL_SYSTEM_RUNTIME_DESTINATION ".")
+	include("InstallRequiredSystemLibraries")
 
-	set(CPACK_PACKAGE_NAME "InspIRCd IRC Daemon")
-	set(CPACK_PACKAGE_VENDOR "InspIRCd Development Team")
-	set(CPACK_PACKAGE_VERSION_MAJOR ${MAJOR_VERSION})
-	set(CPACK_PACKAGE_VERSION_MINOR ${MINOR_VERSION})
-	set(CPACK_PACKAGE_VERSION_PATCH ${PATCH_VERSION})
-	set(CPACK_PACKAGE_FILE_NAME "InspIRCd-${FULL_VERSION}")
-	set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_CURRENT_SOURCE_DIR}/../docs/LICENSE.txt")
+	set(CPACK_PACKAGE_NAME "InspIRCd -- Internet Relay Chat Daemon")
+	set(CPACK_PACKAGE_VENDOR "InspIRCd Team")
+	set(CPACK_PACKAGE_VERSION_MAJOR ${VERSION_MAJOR})
+	set(CPACK_PACKAGE_VERSION_MINOR ${VERSION_MINOR})
+	set(CPACK_PACKAGE_VERSION_PATCH ${VERSION_PATCH})
+	set(CPACK_PACKAGE_FILE_NAME "InspIRCd-${VERSION_FULL}")
+	set(CPACK_RESOURCE_FILE_LICENSE "${INSPIRCD_BASE}/docs/LICENSE.txt")
 
 	set(CPACK_GENERATOR "NSIS")
 	set(CPACK_PACKAGE_INSTALL_DIRECTORY "InspIRCd")
@@ -103,8 +137,8 @@ if(EXISTS "${CMAKE_ROOT}/Modules/CPack.cmake")
 	set(CPACK_NSIS_MUI_ICON "${INSPIRCD_BASE}/win\\\\inspircd.ico")
 	set(CPACK_NSIS_MUI_UNIICON "${INSPIRCD_BASE}/win\\\\inspircd.ico")
 	set(CPACK_NSIS_INSTALLED_ICON_NAME "inspircd.exe")
-	set(CPACK_NSIS_URL_INFO_ABOUT "http://www.inspircd.org/")
+	set(CPACK_NSIS_URL_INFO_ABOUT "https://www.inspircd.org")
 	set(CPACK_NSIS_COMPRESSOR "/SOLID zlib")
 
-	include(CPack)
-endif(EXISTS "${CMAKE_ROOT}/Modules/CPack.cmake")
+	include("CPack")
+endif()

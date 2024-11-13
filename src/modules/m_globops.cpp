@@ -1,9 +1,12 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
- *   Copyright (C) 2007 Dennis Friis <peavey@inspircd.org>
- *   Copyright (C) 2007 Robin Burchell <robin+git@viroteck.net>
- *   Copyright (C) 2004-2006 Craig Edwards <craigedwards@brainbox.cc>
+ *   Copyright (C) 2019-2023 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
+ *   Copyright (C) 2009-2010 Daniel De Graaf <danieldg@inspircd.org>
+ *   Copyright (C) 2009 Uli Schlachter <psychon@znc.in>
+ *   Copyright (C) 2007-2008 Dennis Friis <peavey@inspircd.org>
+ *   Copyright (C) 2006 Craig Edwards <brain@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -23,41 +26,47 @@
 
 #include "inspircd.h"
 
-/* $ModDesc: Provides support for GLOBOPS and snomask +g */
-
-/** Handle /GLOBOPS
- */
-class CommandGlobops : public Command
+class CommandGlobops final
+	: public Command
 {
- public:
-	CommandGlobops(Module* Creator) : Command(Creator,"GLOBOPS", 1,1)
+public:
+	CommandGlobops(Module* Creator)
+		: Command(Creator, "GLOBOPS", 1, 1)
 	{
-		flags_needed = 'o'; syntax = "<any-text>";
-		TRANSLATE2(TR_TEXT, TR_END);
+		access_needed = CmdAccess::OPERATOR;
+		allow_empty_last_param = true;
+		syntax = { ":<message>" };
 	}
 
-	CmdResult Handle (const std::vector<std::string> &parameters, User *user)
+	CmdResult Handle(User* user, const Params& parameters) override
 	{
-		ServerInstance->SNO->WriteGlobalSno('g', "From " + user->nick + ": " + parameters[0]);
-		return CMD_SUCCESS;
+		if (parameters[0].empty())
+		{
+			user->WriteNumeric(ERR_NOTEXTTOSEND, "No text to send");
+			return CmdResult::FAILURE;
+		}
+
+		ServerInstance->SNO.WriteGlobalSno('g', "From " + user->nick + ": " + parameters[0]);
+		return CmdResult::SUCCESS;
 	}
 };
 
-class ModuleGlobops : public Module
+class ModuleGlobops final
+	: public Module
 {
+private:
 	CommandGlobops cmd;
- public:
-	ModuleGlobops() : cmd(this) {}
 
-	void init()
+public:
+	ModuleGlobops()
+		: Module(VF_VENDOR | VF_OPTCOMMON, "Adds the /GLOBOPS command which allows server operators to send messages to all server operators with the g (globops) snomask.")
+		, cmd(this)
 	{
-		ServerInstance->Modules->AddService(cmd);
-		ServerInstance->SNO->EnableSnomask('g',"GLOBOPS");
 	}
 
-	virtual Version GetVersion()
+	void init() override
 	{
-		return Version("Provides support for GLOBOPS and snomask +g", VF_VENDOR);
+		ServerInstance->SNO.EnableSnomask('g', "GLOBOPS");
 	}
 
 };

@@ -1,9 +1,13 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
- *   Copyright (C) 2007-2008 Robin Burchell <robin+git@viroteck.net>
+ *   Copyright (C) 2017-2021, 2023 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
+ *   Copyright (C) 2012 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2009-2010 Daniel De Graaf <danieldg@inspircd.org>
+ *   Copyright (C) 2008 Robin Burchell <robin+git@viroteck.net>
  *   Copyright (C) 2007 Dennis Friis <peavey@inspircd.org>
- *   Copyright (C) 2004, 2006 Craig Edwards <craigedwards@brainbox.cc>
+ *   Copyright (C) 2004 Craig Edwards <brain@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -20,82 +24,47 @@
 
 
 #include "inspircd.h"
+#include "modules/exemption.h"
+#include "modules/extban.h"
 
-/* $ModDesc: Provides support for channel mode +N & extban +b N: which prevents nick changes on channel */
-
-class NoNicks : public SimpleChannelModeHandler
+class ModuleNoNickChange final
+	: public Module
 {
- public:
-	NoNicks(Module* Creator) : SimpleChannelModeHandler(Creator, "nonick", 'N') { }
-};
+private:
+	CheckExemption::EventProvider exemptionprov;
+	ExtBan::Acting extban;
+	SimpleChannelMode nn;
 
-class ModuleNoNickChange : public Module
-{
-	NoNicks nn;
-	bool override;
- public:
-	ModuleNoNickChange() : nn(this)
+public:
+	ModuleNoNickChange()
+		: Module(VF_VENDOR, "Adds channel mode N (nonick) which prevents users from changing their nickname whilst in the channel.")
+		, exemptionprov(this)
+		, extban(this, "nonick", 'N')
+		, nn(this, "nonick", 'N')
 	{
 	}
 
-	void init()
+	ModResult OnUserPreNick(LocalUser* user, const std::string& newnick) override
 	{
-		OnRehash(NULL);
-		ServerInstance->Modules->AddService(nn);
-		Implementation eventlist[] = { I_OnUserPreNick, I_On005Numeric, I_OnRehash };
-		ServerInstance->Modules->Attach(eventlist, this, sizeof(eventlist)/sizeof(Implementation));
-	}
-
-	virtual ~ModuleNoNickChange()
-	{
-	}
-
-	virtual Version GetVersion()
-	{
-		return Version("Provides support for channel mode +N & extban +b N: which prevents nick changes on channel", VF_VENDOR);
-	}
-
-
-	virtual void On005Numeric(std::string &output)
-	{
-		ServerInstance->AddExtBanChar('N');
-	}
-
-	virtual ModResult OnUserPreNick(User* user, const std::string &newnick)
-	{
-		if (!IS_LOCAL(user))
-			return MOD_RES_PASSTHRU;
-
-		// Allow forced nick changes.
-		if (ServerInstance->NICKForced.get(user))
-			return MOD_RES_PASSTHRU;
-
-		for (UCListIter i = user->chans.begin(); i != user->chans.end(); i++)
+		for (const auto* memb : user->chans)
 		{
-			Channel* curr = *i;
-
-			ModResult res = ServerInstance->OnCheckExemption(user,curr,"nonick");
-
+			ModResult res = exemptionprov.Check(user, memb->chan, "nonick");
 			if (res == MOD_RES_ALLOW)
 				continue;
 
-			if (override && IS_OPER(user))
+			if (user->HasPrivPermission("channels/ignore-nonicks"))
 				continue;
 
-			if (!curr->GetExtBanStatus(user, 'N').check(!curr->IsModeSet('N')))
+			bool modeset = memb->chan->IsModeSet(nn);
+			if (!extban.GetStatus(user, memb->chan).check(!modeset))
 			{
-				user->WriteNumeric(ERR_CANTCHANGENICK, "%s :Can't change nickname while on %s (+N is set)",
-					user->nick.c_str(), curr->name.c_str());
+				user->WriteNumeric(ERR_CANTCHANGENICK, INSP_FORMAT("Can't change nickname while on {} ({})",
+					memb->chan->name, modeset ? "+N is set" : "you're extbanned"));
 				return MOD_RES_DENY;
 			}
 		}
 
 		return MOD_RES_PASSTHRU;
-	}
-
-	virtual void OnRehash(User* user)
-	{
-		override = ServerInstance->Config->ConfValue("nonicks")->getBool("operoverride", false);
 	}
 };
 

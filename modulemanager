@@ -1,8 +1,10 @@
 #!/usr/bin/env perl
-
 #
 # InspIRCd -- Internet Relay Chat Daemon
 #
+#   Copyright (C) 2012-2014, 2017-2021, 2024 Sadie Powell <sadie@witchery.services>
+#   Copyright (C) 2012 Robby <robby@chatbelgie.be>
+#   Copyright (C) 2010 Daniel De Graaf <danieldg@inspircd.org>
 #   Copyright (C) 2008-2009 Robin Burchell <robin+git@viroteck.net>
 #
 # This file is part of InspIRCd.  InspIRCd is free software: you can
@@ -19,29 +21,26 @@
 #
 
 
-use strict;
-use warnings FATAL => qw(all);
-
 BEGIN {
-	require 5.8.0;
-	push @INC, '.';
-}
-
-BEGIN {
-	# HACK: for some reason this needs to be in a second BEGIN block
-	# or it doesn't receive the updated @INC from above.
-	use make::configure;
-	unless (module_installed("LWP::Simple")) {
+	unless (eval "use LWP::Simple; 1") {
 		die "Your system is missing the LWP::Simple Perl module!";
 	}
-	unless (module_installed("Crypt::SSLeay") || module_installed("IO::Socket::SSL")) {
+	unless (eval "use Crypt::SSLeay; 1" || eval "use IO::Socket::SSL; 1") {
 		die "Your system is missing the Crypt::SSLeay or IO::Socket::SSL Perl modules!";
 	}
 }
 
-use LWP::Simple;
+use v5.26.0;
+use strict;
+use warnings FATAL => qw(all);
 
-our @modlist;
+use File::Basename qw(basename);
+use FindBin        qw($RealDir);
+
+use lib $RealDir;
+use make::common;
+use make::console;
+use make::directive;
 
 my %installed;
 # $installed{name} = $version
@@ -66,7 +65,7 @@ sub parse_url {
 	return if $url_seen{$src};
 	$url_seen{$src}++;
 
-	my $ua = LWP::UserAgent->new(ssl_opts => { verify_hostname => 0 });
+	my $ua = LWP::UserAgent->new;
 	my $response = $ua->get($src);
 
 	unless ($response->is_success) {
@@ -101,14 +100,12 @@ sub parse_url {
 			$mod->{mask} = $1;
 		} elsif (/^source (\S+)/) {
 			parse_url $1;
-		} else {
-			print "Unknown line in $src: $_\n";
 		}
 	}
 }
 
 # hash of installed module versions from our mini-database, key (m_foobar) to version (00abacca..).
-my %mod_versions;
+my %mod_versions = read_config_file "$RealDir/.modulemanager";
 
 # useless helper stub
 sub getmodversion {
@@ -116,32 +113,17 @@ sub getmodversion {
 	return $mod_versions{$file};
 }
 
-# read in installed versions
-if (-e '.modulemanager')
-{
-	open SRC, '.modulemanager' or die ".modulemanager exists but i can't read it: $!";
-	while (<SRC>)
-	{
-		s/\n//;
-		(my $mod, my $ver) = split(/ /, $_);
-		$mod_versions{$mod} = $ver;
-	}
-	close SRC;
-}
-
 # read in external URL sources
-open SRC, 'sources.list' or die "Could not open sources.list: $!";
+open SRC, "$RealDir/sources.list" or die "Could not open sources.list: $!";
 while (<SRC>) {
 	next if /^\s*#/;
 	parse_url($_);
 }
 close SRC;
 
-getmodules(1);
-
 # determine core version
-`./src/version.sh` =~ /InspIRCd-([0-9.]+)/ or die "Cannot determine inspircd version";
-$installed{core} = $1;
+my %version = get_version();
+$installed{core} = "$version{MAJOR}.$version{MINOR}.$version{PATCH}";
 for my $mod (keys %modules) {
 	MODVER: for my $mver (keys %{$modules{$mod}}) {
 		for my $dep (@{$modules{$mod}{$mver}{depends}}) {
@@ -154,7 +136,7 @@ for my $mod (keys %modules) {
 	}
 	delete $modules{$mod} unless %{$modules{$mod}};
 }
-$modules{core}{$1} = {
+$modules{core}{$installed{core}} = {
 	url => 'NONE',
 	depends => [],
 	conflicts => [],
@@ -162,9 +144,8 @@ $modules{core}{$1} = {
 };
 
 # set up core module list
-for my $modname (@modlist) {
-	my $mod = "m_$modname";
-	my $modfile = "src/modules/$mod.cpp";
+for my $modname (<$RealDir/src/modules/m_*.cpp>) {
+	my $mod = basename($modname, '.cpp');
 	my $ver = getmodversion($mod) || '0.0';
 	$ver =~ s/\$Rev: (.*) \$/$1/; # for storing revision in SVN
 	$installed{$mod} = $ver;
@@ -271,24 +252,26 @@ sub resolve_deps {
 	}
 }
 
-my $action = $#ARGV >= 0 ? lc shift @ARGV : 'help';
-
-if ($action eq 'install') {
-	for my $mod (@ARGV) {
+command 'install', 'Install a third-party module', sub {
+	for my $mod (@_) {
+		my $hmod = module_shrink($mod);
+		$mod = "m_$hmod";
 		my $vers = $mod =~ s/=([-0-9.]+)// ? $1 : undef;
 		$mod = lc $mod;
 		unless ($modules{$mod}) {
-			print "Cannot find module $mod\n";
+			print "Cannot find module $hmod\n";
 			exit 1;
 		}
 		my $ver = find_mod_in_range($mod, $vers, $vers ? 1 : 0);
 		unless ($ver) {
-			print "Cannot find suitable version of $mod\n";
+			print "Cannot find suitable version of $hmod\n";
 			exit 1;
 		}
 		$todo{$mod} = $ver;
 	}
-} elsif ($action eq 'upgrade') {
+};
+
+command 'upgrade', 'Upgrade third-party modules', sub {
 	my @installed = sort keys %installed;
 	for my $mod (@installed) {
 		next unless $mod =~ /^m_/;
@@ -298,9 +281,12 @@ if ($action eq 'install') {
 			%todo = %saved;
 		}
 	}
-} elsif ($action eq 'list') {
+};
+
+command 'list', 'List available third-party modules', sub {
 	my @all = sort keys %modules;
 	for my $mod (@all) {
+		my $hmod = module_shrink($mod);
 		my @vers = sort { ver_cmp() } keys %{$modules{$mod}};
 		my $desc = '';
 		for my $ver (@vers) {
@@ -310,69 +296,63 @@ if ($action eq 'install') {
 		next if @vers == 1 && $modules{$mod}{$vers[0]}{url} eq 'NONE';
 		my $instver = $installed{$mod} || '';
 		my $vers = join ' ', map { $_ eq $instver ? "\e[1m$_\e[m" : $_ } @vers;
-		print "$mod ($vers) - $desc\n";
+		print "$hmod ($vers) - $desc\n";
 	}
-} else {
-	print <<ENDUSAGE
-Use: $0 <action> <args>
-Action is one of the following
- install   install new modules
- upgrade   upgrade installed modules
- list      lists available modules
+	exit 0;
+};
 
-For installing a package, specify its name or name=version to force the
-installation of a specific version.
-ENDUSAGE
-;exit 1;
-}
+execute_command @ARGV;
 
 resolve_deps(0);
 
 $| = 1; # immediate print of lines without \n
 
-print "Processing changes for $action...\n";
+print "Processing changes...\n";
 for my $mod (keys %installed) {
 	next if $todo{$mod};
-	print "Uninstalling $mod $installed{$mod}\n";
-	unlink "src/modules/$mod.cpp";
+	my $hmod = module_shrink($mod);
+	print "Uninstalling $hmod $installed{$mod}\n";
+	unlink "$RealDir/src/modules/$mod.cpp";
 }
 
 my $count = scalar keys %todo;
 print "Checking $count items...\n";
 for my $mod (sort keys %todo) {
+	my $hmod = module_shrink($mod);
 	my $ver = $todo{$mod};
 	my $oldver = $installed{$mod};
 	if ($modules{$mod}{$ver}{mask}) {
-		print "Module $mod $ver is masked: $modules{$mod}{$ver}{mask}\n";
+		print "Module $hmod $ver is masked: $modules{$mod}{$ver}{mask}\n";
 	}
 	next if $oldver && $oldver eq $ver;
 	my $url = $modules{$mod}{$ver}{url};
 	if ($oldver) {
-		print "Upgrading $mod from $oldver to $ver using $url"
+		print "Upgrading $hmod from $oldver to $ver using $url"
 	} else {
-		print "Installing $mod $ver from $url";
+		print "Installing $hmod $ver from $url";
 	}
 	$mod_versions{$mod} = $ver;
 
-	my $ua = LWP::UserAgent->new(ssl_opts => { verify_hostname => 0 });
+	my $ua = LWP::UserAgent->new;
 	my $response = $ua->get($url);
 
 	if ($response->is_success) {
-		open(MF, ">src/modules/$mod.cpp") or die "\nFilesystem not writable: $!";
+		open(MF, '>', "$RealDir/src/modules/$mod.cpp") or die "\nFilesystem not writable: $!";
 		print MF $response->content;
 		close(MF);
 		print " - done\n";
+
+		say "You can add this module to your config with:";
+		say " <module name=\"$hmod\">";
+		for my $tag (get_directives("$RealDir/src/modules/$mod.cpp", 'ModConfig', 0)) {
+			say " $tag" if $tag;
+		}
 	} else {
 		printf "\nHTTP %s: %s\n", $response->code, $response->message;
 	}
 }
 
 # write database of installed versions
-open SRC, '>.modulemanager' or die "can't write installed versions to .modulemanager, won't be able to track upgrades properly: $!";
-foreach my $key (keys %mod_versions)
-{
-	print SRC "$key $mod_versions{$key}\n";
-}
-close SRC;
+write_config_file "$RealDir/.modulemanager", %mod_versions;
 
 print "Finished!\n";

@@ -1,10 +1,15 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
+ *   Copyright (C) 2021-2023 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2021 Dominic Hamon
+ *   Copyright (C) 2013-2014 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
+ *   Copyright (C) 2009 Uli Schlachter <psychon@znc.in>
+ *   Copyright (C) 2009 Daniel De Graaf <danieldg@inspircd.org>
  *   Copyright (C) 2008 Robin Burchell <robin+git@viroteck.net>
  *   Copyright (C) 2007 Dennis Friis <peavey@inspircd.org>
- *   Copyright (C) 2006-2007 Craig Edwards <craigedwards@brainbox.cc>
- *   Copyright (C) 2006 Oliver Lupton <oliverlupton@gmail.com>
+ *   Copyright (C) 2007 Craig Edwards <brain@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -20,60 +25,71 @@
  */
 
 
-/* $Core */
-
 #include "inspircd.h"
-#include "timer.h"
 
-TimerManager::TimerManager()
+void Timer::SetInterval(unsigned long newinterval, bool restart)
+{
+	secs = newinterval;
+	if (!restart)
+		return;
+
+	ServerInstance->Timers.DelTimer(this);
+	SetTrigger(ServerInstance->Time() + newinterval);
+	ServerInstance->Timers.AddTimer(this);
+}
+
+Timer::Timer(unsigned long secs_from_now, bool repeating)
+	: secs(secs_from_now)
+	, repeat(repeating)
 {
 }
 
-TimerManager::~TimerManager()
+Timer::~Timer()
 {
-	for(std::vector<Timer *>::iterator i = Timers.begin(); i != Timers.end(); i++)
-		delete *i;
+	if (GetTrigger())
+		ServerInstance->Timers.DelTimer(this);
 }
 
-void TimerManager::TickTimers(time_t TIME)
+void TimerManager::TickTimers()
 {
-	while ((Timers.size()) && (TIME > (*Timers.begin())->GetTimer()))
+	const time_t now = ServerInstance->Time();
+	for (TimerMap::iterator i = Timers.begin(); i != Timers.end(); )
 	{
-		std::vector<Timer *>::iterator i = Timers.begin();
-		Timer *t = (*i);
+		Timer* t = i->second;
+		if (t->GetTrigger() > now)
+			break;
 
-		// Probable fix: move vector manipulation to *before* we modify the vector.
-		Timers.erase(i);
+		Timers.erase(i++);
 
-		t->Tick(TIME);
+		if (!t->Tick())
+			continue;
+
 		if (t->GetRepeat())
 		{
-			t->SetTimer(TIME + t->GetSecs());
+			t->SetTrigger(now + t->GetInterval());
 			AddTimer(t);
 		}
-		else
-			delete t;
 	}
 }
 
-void TimerManager::DelTimer(Timer* T)
+void TimerManager::DelTimer(Timer* t)
 {
-	std::vector<Timer *>::iterator i = std::find(Timers.begin(), Timers.end(), T);
+	std::pair<TimerMap::iterator, TimerMap::iterator> itpair = Timers.equal_range(t->GetTrigger());
 
-	if (i != Timers.end())
+	for (TimerMap::iterator i = itpair.first; i != itpair.second; ++i)
 	{
-		delete (*i);
-		Timers.erase(i);
+		if (i->second == t)
+		{
+			t->SetTrigger(0);
+			Timers.erase(i);
+			break;
+		}
 	}
 }
 
-void TimerManager::AddTimer(Timer* T)
+void TimerManager::AddTimer(Timer* t)
 {
-	Timers.push_back(T);
-	std::sort(Timers.begin(), Timers.end(), TimerManager::TimerComparison);
-}
-
-bool TimerManager::TimerComparison( Timer *one, Timer *two)
-{
-	return (one->GetTimer()) < (two->GetTimer());
+	time_t trigger = ServerInstance->Time() + t->GetInterval();
+	t->SetTrigger(trigger);
+	Timers.emplace(trigger, t);
 }

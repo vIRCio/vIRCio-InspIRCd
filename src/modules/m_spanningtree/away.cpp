@@ -1,6 +1,10 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
+ *   Copyright (C) 2018, 2020, 2023 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2018 B00mX0r <b00mx0r@aureus.pw>
+ *   Copyright (C) 2013 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
  *   Copyright (C) 2009 Daniel De Graaf <danieldg@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
@@ -21,32 +25,28 @@
 
 #include "main.h"
 #include "utils.h"
-#include "treeserver.h"
-#include "treesocket.h"
+#include "commands.h"
 
-bool TreeSocket::Away(const std::string &prefix, parameterlist &params)
+CmdResult CommandAway::HandleRemote(::RemoteUser* u, Params& params)
 {
-	User* u = ServerInstance->FindNick(prefix);
-	if ((!u) || (IS_SERVER(u)))
-		return true;
-	if (params.size())
+	const auto prevstate = u->away;
+	if (!params.empty())
 	{
-		FOREACH_MOD(I_OnSetAway, OnSetAway(u, params[params.size() - 1]));
-
-		if (params.size() > 1)
-			u->awaytime = atoi(params[0].c_str());
-		else
-			u->awaytime = ServerInstance->Time();
-
-		u->awaymsg = params[params.size() - 1];
-
-		params[params.size() - 1] = ":" + params[params.size() - 1];
+		time_t awaytime = params.size() > 1 ? ServerCommand::ExtractTS(params[0]) : 0;
+		u->away.emplace(params.back(), awaytime);
+		awayevprov.Call(&Away::EventListener::OnUserAway, u, prevstate);
 	}
 	else
 	{
-		FOREACH_MOD(I_OnSetAway, OnSetAway(u, ""));
-		u->awaymsg.clear();
+		u->away.reset();
+		awayevprov.Call(&Away::EventListener::OnUserBack, u, prevstate);
 	}
-	Utils->DoOneToAllButSender(prefix,"AWAY",params,u->server);
-	return true;
+	return CmdResult::SUCCESS;
+}
+
+CommandAway::Builder::Builder(User* user)
+	: CmdBuilder(user, "AWAY")
+{
+	if (user->IsAway())
+		push_int(user->away->time).push_last(user->away->message);
 }

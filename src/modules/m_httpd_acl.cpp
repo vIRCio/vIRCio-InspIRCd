@@ -1,8 +1,13 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
+ *   Copyright (C) 2018 linuxdaemon <linuxdaemon.irc@gmail.com>
+ *   Copyright (C) 2013, 2017, 2019-2023 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2013, 2015 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
  *   Copyright (C) 2009-2010 Daniel De Graaf <danieldg@inspircd.org>
- *   Copyright (C) 2008 Craig Edwards <craigedwards@brainbox.cc>
+ *   Copyright (C) 2008 Robin Burchell <robin+git@viroteck.net>
+ *   Copyright (C) 2008 Craig Edwards <brain@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -19,43 +24,51 @@
 
 
 #include "inspircd.h"
-#include "httpd.h"
-#include "protocol.h"
+#include "modules/httpd.h"
+#include "stringutils.h"
+#include "utility/string.h"
 
-/* $ModDesc: Provides access control lists (passwording of resources, ip restrictions etc) to m_httpd.so dependent modules */
-
-class HTTPACL
+class HTTPACL final
 {
- public:
+public:
 	std::string path;
 	std::string username;
 	std::string password;
 	std::string whitelist;
 	std::string blacklist;
 
-	HTTPACL(const std::string &set_path, const std::string &set_username, const std::string &set_password,
-		const std::string &set_whitelist, const std::string &set_blacklist)
-		: path(set_path), username(set_username), password(set_password), whitelist(set_whitelist),
-		blacklist(set_blacklist) { }
-
-	~HTTPACL() { }
+	HTTPACL(const std::string& set_path, const std::string& set_username, const std::string& set_password,
+		const std::string& set_whitelist, const std::string& set_blacklist)
+		: path(set_path)
+		, username(set_username)
+		, password(set_password)
+		, whitelist(set_whitelist)
+		, blacklist(set_blacklist)
+	{
+	}
 };
 
-class ModuleHTTPAccessList : public Module
+class ModuleHTTPAccessList final
+	: public Module
+	, public HTTPACLEventListener
 {
-
-	std::string stylesheet;
+private:
 	std::vector<HTTPACL> acl_list;
+	HTTPdAPI API;
 
- public:
-
-	void OnRehash(User* user)
+public:
+	ModuleHTTPAccessList()
+		: Module(VF_VENDOR, "Allows the server administrator to control who can access resources served over HTTP with the httpd module.")
+		, HTTPACLEventListener(this)
+		, API(this)
 	{
-		acl_list.clear();
-		ConfigTagList acls = ServerInstance->Config->ConfTags("httpdacl");
-		for (ConfigIter i = acls.first; i != acls.second; i++)
+	}
+
+	void ReadConfig(ConfigStatus& status) override
+	{
+		std::vector<HTTPACL> new_acls;
+		for (const auto& [_, c] : ServerInstance->Config->ConfTags("httpdacl"))
 		{
-			ConfigTag* c = i->second;
 			std::string path = c->getString("path");
 			std::string types = c->getString("types");
 			irc::commasepstream sep(types);
@@ -67,83 +80,81 @@ class ModuleHTTPAccessList : public Module
 
 			while (sep.GetToken(type))
 			{
-				if (type == "password")
+				if (insp::equalsci(type, "password"))
 				{
 					username = c->getString("username");
 					password = c->getString("password");
 				}
-				else if (type == "whitelist")
+				else if (insp::equalsci(type, "whitelist"))
 				{
 					whitelist = c->getString("whitelist");
 				}
-				else if (type == "blacklist")
+				else if (insp::equalsci(type, "blacklist"))
 				{
 					blacklist = c->getString("blacklist");
 				}
 				else
 				{
-					throw ModuleException("Invalid HTTP ACL type '" + type + "'");
+					throw ModuleException(this, "Invalid HTTP ACL type '" + type + "'");
 				}
 			}
 
-			ServerInstance->Logs->Log("m_httpd_acl", DEBUG, "Read ACL: path=%s pass=%s whitelist=%s blacklist=%s", path.c_str(),
-					password.c_str(), whitelist.c_str(), blacklist.c_str());
+			ServerInstance->Logs.Debug(MODNAME, "Read ACL: path={} pass={} whitelist={} blacklist={}", path,
+					password, whitelist, blacklist);
 
-			acl_list.push_back(HTTPACL(path, username, password, whitelist, blacklist));
+			new_acls.emplace_back(path, username, password, whitelist, blacklist);
 		}
+		acl_list.swap(new_acls);
 	}
 
-	void init()
+	void BlockAccess(HTTPRequest* http, unsigned int returnval, const std::string& extraheaderkey = "", const std::string& extraheaderval="")
 	{
-		OnRehash(NULL);
-		Implementation eventlist[] = { I_OnEvent, I_OnRehash };
-		ServerInstance->Modules->Attach(eventlist, this, sizeof(eventlist)/sizeof(Implementation));
-	}
+		ServerInstance->Logs.Debug(MODNAME, "BlockAccess ({})", returnval);
 
-	void BlockAccess(HTTPRequest* http, int returnval, const std::string &extraheaderkey = "", const std::string &extraheaderval="")
-	{
-		ServerInstance->Logs->Log("m_httpd_acl", DEBUG, "BlockAccess (%d)", returnval);
+		std::stringstream data;
+		data << "<html><head></head><body style='font-family: sans-serif; text-align: center'>"
+			<< "<h1 style='font-size: 48pt'>Error " << returnval << "</h1>"
+			<< "<h2 style='font-size: 24pt'>Access to this resource is denied by an access control list.</h2>"
+			<< "<h2 style='font-size: 24pt'>Please contact your IRC administrator.</h2><hr>"
+			<< "<small>Powered by <a href='https://www.inspircd.org'>InspIRCd</a></small></body></html>";
 
-		std::stringstream data("Access to this resource is denied by an access control list. Please contact your IRC administrator.");
 		HTTPDocumentResponse response(this, *http, &data, returnval);
-		response.headers.SetHeader("X-Powered-By", "m_httpd_acl.so");
+		response.headers.SetHeader("X-Powered-By", MODNAME);
 		if (!extraheaderkey.empty())
 			response.headers.SetHeader(extraheaderkey, extraheaderval);
-		response.Send();
+		API->SendResponse(response);
 	}
 
-	void OnEvent(Event& event)
+	bool IsAccessAllowed(HTTPRequest* http)
 	{
-		if (event.id == "httpd_acl")
 		{
-			ServerInstance->Logs->Log("m_http_stats", DEBUG,"Handling httpd acl event");
-			HTTPRequest* http = (HTTPRequest*)&event;
+			ServerInstance->Logs.Debug(MODNAME, "Handling httpd acl event");
 
-			for (std::vector<HTTPACL>::const_iterator this_acl = acl_list.begin(); this_acl != acl_list.end(); ++this_acl)
+			for (const auto& acl : acl_list)
 			{
-				if (InspIRCd::Match(http->GetURI(), this_acl->path, ascii_case_insensitive_map))
+				if (InspIRCd::Match(http->GetPath(), acl.path, ascii_case_insensitive_map))
 				{
-					if (!this_acl->blacklist.empty())
+					if (!acl.blacklist.empty())
 					{
 						/* Blacklist */
-						irc::commasepstream sep(this_acl->blacklist);
+						irc::commasepstream sep(acl.blacklist);
 						std::string entry;
 
 						while (sep.GetToken(entry))
 						{
 							if (InspIRCd::Match(http->GetIP(), entry, ascii_case_insensitive_map))
 							{
-								ServerInstance->Logs->Log("m_httpd_acl", DEBUG, "Denying access to blacklisted resource %s (matched by pattern %s) from ip %s (matched by entry %s)",
-										http->GetURI().c_str(), this_acl->path.c_str(), http->GetIP().c_str(), entry.c_str());
+								ServerInstance->Logs.Debug(MODNAME, "Denying access to blacklisted resource {} (matched by pattern {}) from ip {} (matched by entry {})",
+										http->GetPath(), acl.path, http->GetIP(), entry);
 								BlockAccess(http, 403);
-								return;
+								return false;
 							}
 						}
 					}
-					if (!this_acl->whitelist.empty())
+					if (!acl.whitelist.empty())
 					{
 						/* Whitelist */
-						irc::commasepstream sep(this_acl->whitelist);
+						irc::commasepstream sep(acl.whitelist);
 						std::string entry;
 						bool allow_access = false;
 
@@ -155,17 +166,17 @@ class ModuleHTTPAccessList : public Module
 
 						if (!allow_access)
 						{
-							ServerInstance->Logs->Log("m_httpd_acl", DEBUG, "Denying access to whitelisted resource %s (matched by pattern %s) from ip %s (Not in whitelist)",
-									http->GetURI().c_str(), this_acl->path.c_str(), http->GetIP().c_str());
+							ServerInstance->Logs.Debug(MODNAME, "Denying access to whitelisted resource {} (matched by pattern {}) from ip {} (Not in whitelist)",
+									http->GetPath(), acl.path, http->GetIP());
 							BlockAccess(http, 403);
-							return;
+							return false;
 						}
 					}
-					if (!this_acl->password.empty() && !this_acl->username.empty())
+					if (!acl.password.empty() && !acl.username.empty())
 					{
 						/* Password auth, first look to see if we have a basic authentication header */
-						ServerInstance->Logs->Log("m_httpd_acl", DEBUG, "Checking HTTP auth password for resource %s (matched by pattern %s) from ip %s, against username %s",
-								http->GetURI().c_str(), this_acl->path.c_str(), http->GetIP().c_str(), this_acl->username.c_str());
+						ServerInstance->Logs.Debug(MODNAME, "Checking HTTP auth password for resource {} (matched by pattern {}) from ip {}, against username {}",
+								http->GetPath(), acl.path, http->GetIP(), acl.username);
 
 						if (http->headers->IsSet("Authorization"))
 						{
@@ -182,8 +193,8 @@ class ModuleHTTPAccessList : public Module
 								std::string pass;
 
 								sep.GetToken(base64);
-								std::string userpass = Base64ToBin(base64);
-								ServerInstance->Logs->Log("m_httpd_acl", DEBUG, "HTTP authorization: %s (%s)", userpass.c_str(), base64.c_str());
+								std::string userpass = Base64::Decode(base64);
+								ServerInstance->Logs.Debug(MODNAME, "HTTP authorization: {} ({})", userpass, base64);
 
 								irc::sepstream userpasspair(userpass, ':');
 								if (userpasspair.GetToken(user))
@@ -191,44 +202,54 @@ class ModuleHTTPAccessList : public Module
 									userpasspair.GetToken(pass);
 
 									/* Access granted if username and password are correct */
-									if (user == this_acl->username && pass == this_acl->password)
+									if (InspIRCd::TimingSafeCompare(user, acl.username) && InspIRCd::TimingSafeCompare(pass, acl.password))
 									{
-										ServerInstance->Logs->Log("m_httpd_acl", DEBUG, "HTTP authorization: password and username match");
-										return;
+										ServerInstance->Logs.Debug(MODNAME, "HTTP authorization: password and username match");
+										return true;
 									}
 									else
+									{
 										/* Invalid password */
+										ServerInstance->Logs.Debug(MODNAME, "HTTP authorization: password and username do not match");
 										BlockAccess(http, 401, "WWW-Authenticate", "Basic realm=\"Restricted Object\"");
+									}
 								}
 								else
+								{
 									/* Malformed user:pass pair */
+									ServerInstance->Logs.Debug(MODNAME, "HTTP authorization: password and username malformed");
 									BlockAccess(http, 401, "WWW-Authenticate", "Basic realm=\"Restricted Object\"");
+								}
 							}
 							else
+							{
 								/* Unsupported authentication type */
+								ServerInstance->Logs.Debug(MODNAME, "HTTP authorization: unsupported auth type: {}", authtype);
 								BlockAccess(http, 401, "WWW-Authenticate", "Basic realm=\"Restricted Object\"");
+							}
 						}
 						else
 						{
 							/* No password given at all, access denied */
+							ServerInstance->Logs.Debug(MODNAME, "HTTP authorization: password and username not sent");
 							BlockAccess(http, 401, "WWW-Authenticate", "Basic realm=\"Restricted Object\"");
 						}
+						return false;
 					}
 
 					/* A path may only match one ACL (the first it finds in the config file) */
-					return;
+					break;
 				}
 			}
 		}
+		return true;
 	}
 
-	virtual ~ModuleHTTPAccessList()
+	ModResult OnHTTPACLCheck(HTTPRequest& req) override
 	{
-	}
-
-	virtual Version GetVersion()
-	{
-		return Version("Provides access control lists (passwording of resources, ip restrictions etc) to m_httpd.so dependent modules", VF_VENDOR);
+		if (IsAccessAllowed(&req))
+			return MOD_RES_PASSTHRU;
+		return MOD_RES_DENY;
 	}
 };
 

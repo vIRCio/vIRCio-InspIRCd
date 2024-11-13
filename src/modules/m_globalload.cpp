@@ -1,12 +1,14 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
- *   Copyright (C) 2011 Jackmcbarn <jackmcbarn@jackmcbarn.no-ip.org>
- *   Copyright (C) 2009 Daniel De Graaf <danieldg@inspircd.org>
- *   Copyright (C) 2006-2008 Craig Edwards <craigedwards@brainbox.cc>
+ *   Copyright (C) 2013, 2017, 2019-2023 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2012, 2014-2016 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
+ *   Copyright (C) 2009-2010 Daniel De Graaf <danieldg@inspircd.org>
+ *   Copyright (C) 2009 Robin Burchell <robin+git@viroteck.net>
  *   Copyright (C) 2007-2008 Dennis Friis <peavey@inspircd.org>
- *   Copyright (C) 2006-2007 Robin Burchell <robin+git@viroteck.net>
- *   Copyright (C) 2006 John Brooks <john.brooks@dereferenced.net>
+ *   Copyright (C) 2007-2008 Craig Edwards <brain@inspircd.org>
+ *   Copyright (C) 2007 John Brooks <john@jbrooks.io>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -22,185 +24,155 @@
  */
 
 
-/* $ModDesc: Allows global loading of a module. */
-
 #include "inspircd.h"
 
-/** Handle /GLOADMODULE
- */
-class CommandGloadmodule : public Command
+class CommandGLoadModule final
+	: public Command
 {
- public:
-	CommandGloadmodule(Module* Creator) : Command(Creator,"GLOADMODULE", 1)
+public:
+	CommandGLoadModule(Module* Creator)
+		: Command(Creator, "GLOADMODULE", 1)
 	{
-		flags_needed = 'o';
-		syntax = "<modulename> [servermask]";
-		TRANSLATE3(TR_TEXT, TR_TEXT, TR_END);
+		access_needed = CmdAccess::OPERATOR;
+		syntax = { "<modulename> [<servermask>]" };
 	}
 
-	CmdResult Handle (const std::vector<std::string> &parameters, User *user)
+	CmdResult Handle(User* user, const Params& parameters) override
 	{
 		std::string servername = parameters.size() > 1 ? parameters[1] : "*";
 
-		if (InspIRCd::Match(ServerInstance->Config->ServerName.c_str(), servername))
+		if (InspIRCd::Match(ServerInstance->Config->ServerName, servername))
 		{
-			if (ServerInstance->Modules->Load(parameters[0].c_str()))
+			if (ServerInstance->Modules.Load(parameters[0]))
 			{
-				ServerInstance->SNO->WriteToSnoMask('a', "NEW MODULE '%s' GLOBALLY LOADED BY '%s'",parameters[0].c_str(), user->nick.c_str());
-				user->WriteNumeric(975, "%s %s :Module successfully loaded.",user->nick.c_str(), parameters[0].c_str());
+				ServerInstance->SNO.WriteToSnoMask('a', "NEW MODULE '{}' GLOBALLY LOADED BY '{}'", parameters[0], user->nick);
+				user->WriteRemoteNumeric(RPL_LOADEDMODULE, parameters[0], "Module successfully loaded.");
 			}
 			else
 			{
-				user->WriteNumeric(974, "%s %s :%s",user->nick.c_str(), parameters[0].c_str(), ServerInstance->Modules->LastError().c_str());
+				user->WriteRemoteNumeric(ERR_CANTLOADMODULE, parameters[0], ServerInstance->Modules.LastError());
 			}
 		}
 		else
-			ServerInstance->SNO->WriteToSnoMask('a', "MODULE '%s' GLOBAL LOAD BY '%s' (not loaded here)",parameters[0].c_str(), user->nick.c_str());
+			ServerInstance->SNO.WriteToSnoMask('a', "MODULE '{}' GLOBAL LOAD BY '{}' (not loaded here)", parameters[0], user->nick);
 
-		return CMD_SUCCESS;
+		return CmdResult::SUCCESS;
 	}
 
-	RouteDescriptor GetRouting(User* user, const std::vector<std::string>& parameters)
+	RouteDescriptor GetRouting(User* user, const Params& parameters) override
 	{
 		return ROUTE_BROADCAST;
 	}
 };
 
-/** Handle /GUNLOADMODULE
- */
-class CommandGunloadmodule : public Command
+class CommandGUnloadModule final
+	: public Command
 {
- public:
-	CommandGunloadmodule(Module* Creator) : Command(Creator,"GUNLOADMODULE", 1)
+public:
+	CommandGUnloadModule(Module* Creator)
+		: Command(Creator, "GUNLOADMODULE", 1)
 	{
-		flags_needed = 'o';
-		syntax = "<modulename> [servermask]";
+		access_needed = CmdAccess::OPERATOR;
+		syntax = { "<modulename> [<servermask>]" };
 	}
 
-	CmdResult Handle (const std::vector<std::string> &parameters, User *user)
+	CmdResult Handle(User* user, const Params& parameters) override
 	{
+		if (InspIRCd::Match(parameters[0], "core_*", ascii_case_insensitive_map))
+		{
+			user->WriteRemoteNumeric(ERR_CANTUNLOADMODULE, parameters[0], "You cannot unload core commands!");
+			return CmdResult::FAILURE;
+		}
+
 		std::string servername = parameters.size() > 1 ? parameters[1] : "*";
 
-		if (InspIRCd::Match(ServerInstance->Config->ServerName.c_str(), servername))
+		if (InspIRCd::Match(ServerInstance->Config->ServerName, servername))
 		{
-			Module* m = ServerInstance->Modules->Find(parameters[0]);
+			Module* m = ServerInstance->Modules.Find(parameters[0]);
 			if (m)
 			{
-				if (ServerInstance->Modules->Unload(m))
+				if (ServerInstance->Modules.Unload(m))
 				{
-					ServerInstance->SNO->WriteToSnoMask('a', "MODULE '%s' GLOBALLY UNLOADED BY '%s'",parameters[0].c_str(), user->nick.c_str());
-					user->SendText(":%s 973 %s %s :Module successfully unloaded.",
-						ServerInstance->Config->ServerName.c_str(), user->nick.c_str(), parameters[0].c_str());
+					ServerInstance->SNO.WriteToSnoMask('a', "MODULE '{}' GLOBALLY UNLOADED BY '{}'", parameters[0], user->nick);
+					user->WriteRemoteNumeric(RPL_UNLOADEDMODULE, parameters[0], "Module successfully unloaded.");
 				}
 				else
 				{
-					user->WriteNumeric(972, "%s %s :%s",user->nick.c_str(), parameters[0].c_str(), ServerInstance->Modules->LastError().c_str());
+					user->WriteRemoteNumeric(ERR_CANTUNLOADMODULE, parameters[0], ServerInstance->Modules.LastError());
 				}
 			}
 			else
-				user->SendText(":%s 972 %s %s :No such module", ServerInstance->Config->ServerName.c_str(), user->nick.c_str(), parameters[0].c_str());
+				user->WriteRemoteNumeric(ERR_CANTUNLOADMODULE, parameters[0], "No such module");
 		}
 		else
-			ServerInstance->SNO->WriteToSnoMask('a', "MODULE '%s' GLOBAL UNLOAD BY '%s' (not unloaded here)",parameters[0].c_str(), user->nick.c_str());
+			ServerInstance->SNO.WriteToSnoMask('a', "MODULE '{}' GLOBAL UNLOAD BY '{}' (not unloaded here)", parameters[0], user->nick);
 
-		return CMD_SUCCESS;
+		return CmdResult::SUCCESS;
 	}
 
-	RouteDescriptor GetRouting(User* user, const std::vector<std::string>& parameters)
+	RouteDescriptor GetRouting(User* user, const Params& parameters) override
 	{
 		return ROUTE_BROADCAST;
 	}
 };
 
-class GReloadModuleWorker : public HandlerBase1<void, bool>
+class CommandGReloadModule final
+	: public Command
 {
- public:
-	const std::string nick;
-	const std::string name;
-	const std::string uid;
-	GReloadModuleWorker(const std::string& usernick, const std::string& uuid, const std::string& modn)
-		: nick(usernick), name(modn), uid(uuid) {}
-	void Call(bool result)
+public:
+	CommandGReloadModule(Module* Creator)
+		: Command(Creator, "GRELOADMODULE", 1)
 	{
-		ServerInstance->SNO->WriteToSnoMask('a', "MODULE '%s' GLOBALLY RELOADED BY '%s'%s", name.c_str(), nick.c_str(), result ? "" : " (failed here)");
-		User* user = ServerInstance->FindNick(uid);
-		if (user)
-			user->WriteNumeric(975, "%s %s :Module %ssuccessfully reloaded.",
-				user->nick.c_str(), name.c_str(), result ? "" : "un");
-		ServerInstance->GlobalCulls.AddItem(this);
-	}
-};
-
-/** Handle /GRELOADMODULE
- */
-class CommandGreloadmodule : public Command
-{
- public:
-	CommandGreloadmodule(Module* Creator) : Command(Creator, "GRELOADMODULE", 1)
-	{
-		flags_needed = 'o'; syntax = "<modulename> [servermask]";
+		access_needed = CmdAccess::OPERATOR;
+		syntax = { "<modulename> [<servermask>]" };
 	}
 
-	CmdResult Handle(const std::vector<std::string> &parameters, User *user)
+	CmdResult Handle(User* user, const Params& parameters) override
 	{
 		std::string servername = parameters.size() > 1 ? parameters[1] : "*";
 
-		if (InspIRCd::Match(ServerInstance->Config->ServerName.c_str(), servername))
+		if (InspIRCd::Match(ServerInstance->Config->ServerName, servername))
 		{
-			Module* m = ServerInstance->Modules->Find(parameters[0]);
+			Module* m = ServerInstance->Modules.Find(parameters[0]);
 			if (m)
 			{
-				GReloadModuleWorker* worker = NULL;
-				if ((m != creator) && (!creator->dying))
-					worker = new GReloadModuleWorker(user->nick, user->uuid, parameters[0]);
-				ServerInstance->Modules->Reload(m, worker);
+				ServerInstance->SNO.WriteToSnoMask('a', "MODULE '{}' GLOBALLY RELOADED BY '{}'", parameters[0], user->nick);
+				ServerInstance->Parser.CallHandler("RELOADMODULE", parameters, user);
 			}
 			else
 			{
-				user->WriteNumeric(975, "%s %s :Could not find module by that name", user->nick.c_str(), parameters[0].c_str());
-				return CMD_FAILURE;
+				user->WriteRemoteNumeric(ERR_CANTUNLOADMODULE, parameters[0], "Could not find a loaded module by that name");
+				return CmdResult::FAILURE;
 			}
 		}
 		else
-			ServerInstance->SNO->WriteToSnoMask('a', "MODULE '%s' GLOBAL RELOAD BY '%s' (not reloaded here)",parameters[0].c_str(), user->nick.c_str());
+			ServerInstance->SNO.WriteToSnoMask('a', "MODULE '{}' GLOBAL RELOAD BY '{}' (not reloaded here)", parameters[0], user->nick);
 
-		return CMD_SUCCESS;
+		return CmdResult::SUCCESS;
 	}
 
-	RouteDescriptor GetRouting(User* user, const std::vector<std::string>& parameters)
+	RouteDescriptor GetRouting(User* user, const Params& parameters) override
 	{
 		return ROUTE_BROADCAST;
 	}
 };
 
-class ModuleGlobalLoad : public Module
+class ModuleGlobalLoad final
+	: public Module
 {
-	CommandGloadmodule cmd1;
-	CommandGunloadmodule cmd2;
-	CommandGreloadmodule cmd3;
+private:
+	CommandGLoadModule cmdgloadmodule;
+	CommandGUnloadModule cmdgunloadmodule;
+	CommandGReloadModule cmdgreloadmodule;
 
- public:
+public:
 	ModuleGlobalLoad()
-		: cmd1(this), cmd2(this), cmd3(this)
+		: Module(VF_VENDOR | VF_COMMON, "Adds the /GLOADMODULE, /GRELOADMODULE, and /GUNLOADMODULE commands which allows server operators to load, reload, and unload modules on remote servers.")
+		, cmdgloadmodule(this)
+		, cmdgunloadmodule(this)
+		, cmdgreloadmodule(this)
 	{
-	}
-
-	void init()
-	{
-		ServerInstance->Modules->AddService(cmd1);
-		ServerInstance->Modules->AddService(cmd2);
-		ServerInstance->Modules->AddService(cmd3);
-	}
-
-	~ModuleGlobalLoad()
-	{
-	}
-
-	Version GetVersion()
-	{
-		return Version("Allows global loading of a module.", VF_COMMON | VF_VENDOR);
 	}
 };
 
 MODULE_INIT(ModuleGlobalLoad)
-

@@ -1,12 +1,13 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
- *   Copyright (C) 2009-2010 Daniel De Graaf <danieldg@inspircd.org>
- *   Copyright (C) 2008 Thomas Stagner <aquanight@inspircd.org>
- *   Copyright (C) 2007 Dennis Friis <peavey@inspircd.org>
- *   Copyright (C) 2005-2007 Robin Burchell <robin+git@viroteck.net>
- *   Copyright (C) 2006-2007 Craig Edwards <craigedwards@brainbox.cc>
- *   Copyright (C) 2004 Christopher Hall <typobox43@gmail.com>
+ *   Copyright (C) 2019-2023 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2012-2014 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
+ *   Copyright (C) 2009 Daniel De Graaf <danieldg@inspircd.org>
+ *   Copyright (C) 2008 Thomas Stagner <aquanight@gmail.com>
+ *   Copyright (C) 2007-2008 Dennis Friis <peavey@inspircd.org>
+ *   Copyright (C) 2006-2007 Craig Edwards <brain@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -24,86 +25,50 @@
 
 #include "inspircd.h"
 
-/* $ModDesc: Forces opers to join the specified channel(s) on oper-up */
-
-class ModuleOperjoin : public Module
+class ModuleOperjoin final
+	: public Module
 {
-	private:
-		std::string operChan;
-		std::vector<std::string> operChans;
-		bool override;
+private:
+	std::vector<std::string> operChans;
+	bool override;
 
-		int tokenize(const std::string &str, std::vector<std::string> &tokens)
+public:
+	ModuleOperjoin()
+		: Module(VF_VENDOR, "Allows the server administrator to force server operators to join one or more channels when logging into their server operator account.")
+	{
+	}
+
+	void ReadConfig(ConfigStatus& status) override
+	{
+		const auto& tag = ServerInstance->Config->ConfValue("operjoin");
+
+		override = tag->getBool("override", false);
+		irc::commasepstream ss(tag->getString("channel"));
+		operChans.clear();
+
+		for (std::string channame; ss.GetToken(channame); )
+			operChans.push_back(channame);
+	}
+
+	void OnPostOperLogin(User* user, bool automatic) override
+	{
+		LocalUser* localuser = IS_LOCAL(user);
+		if (!localuser)
+			return;
+
+		for (const auto& operchan : operChans)
 		{
-			// skip delimiters at beginning.
-			std::string::size_type lastPos = str.find_first_not_of(",", 0);
-			// find first "non-delimiter".
-			std::string::size_type pos = str.find_first_of(",", lastPos);
-
-			while (std::string::npos != pos || std::string::npos != lastPos)
-			{
-				// found a token, add it to the vector.
-				tokens.push_back(str.substr(lastPos, pos - lastPos));
-				// skip delimiters. Note the "not_of"
-				lastPos = str.find_first_not_of(",", pos);
-				// find next "non-delimiter"
-				pos = str.find_first_of(",", lastPos);
-			}
-			return tokens.size();
+			if (ServerInstance->Channels.IsChannel(operchan))
+				Channel::JoinUser(localuser, operchan, override);
 		}
 
-	public:
-		void init()
+		irc::commasepstream ss(localuser->oper->GetConfig()->getString("autojoin"));
+		for (std::string channame; ss.GetToken(channame); )
 		{
-			OnRehash(NULL);
-			Implementation eventlist[] = { I_OnPostOper, I_OnRehash };
-			ServerInstance->Modules->Attach(eventlist, this, sizeof(eventlist)/sizeof(Implementation));
+			if (ServerInstance->Channels.IsChannel(channame))
+				Channel::JoinUser(localuser, channame, override);
 		}
-
-
-		virtual void OnRehash(User* user)
-		{
-			ConfigTag* tag = ServerInstance->Config->ConfValue("operjoin");
-
-			operChan = tag->getString("channel");
-			override = tag->getBool("override", false);
-			operChans.clear();
-			if (!operChan.empty())
-				tokenize(operChan,operChans);
-		}
-
-		virtual ~ModuleOperjoin()
-		{
-		}
-
-		virtual Version GetVersion()
-		{
-			return Version("Forces opers to join the specified channel(s) on oper-up", VF_VENDOR);
-		}
-
-		virtual void OnPostOper(User* user, const std::string &opertype, const std::string &opername)
-		{
-			if (!IS_LOCAL(user))
-				return;
-
-			for(std::vector<std::string>::iterator it = operChans.begin(); it != operChans.end(); it++)
-				if (ServerInstance->IsChannel(it->c_str(), ServerInstance->Config->Limits.ChanMax))
-					Channel::JoinUser(user, it->c_str(), override, "", false, ServerInstance->Time());
-
-			std::string chanList = IS_OPER(user)->getConfig("autojoin");
-			if (!chanList.empty())
-			{
-				std::vector<std::string> typechans;
-				tokenize(chanList, typechans);
-				for (std::vector<std::string>::const_iterator it = typechans.begin(); it != typechans.end(); ++it)
-				{
-					if (ServerInstance->IsChannel(it->c_str(), ServerInstance->Config->Limits.ChanMax))
-					{
-						Channel::JoinUser(user, it->c_str(), override, "", false, ServerInstance->Time());
-					}
-				}
-			}
-		}
+	}
 };
 
 MODULE_INIT(ModuleOperjoin)

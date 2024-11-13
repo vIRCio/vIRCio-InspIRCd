@@ -1,10 +1,13 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
+ *   Copyright (C) 2013, 2017, 2019-2023 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2012, 2014-2016 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
  *   Copyright (C) 2009-2010 Daniel De Graaf <danieldg@inspircd.org>
+ *   Copyright (C) 2009 Robin Burchell <robin+git@viroteck.net>
  *   Copyright (C) 2007, 2009 Dennis Friis <peavey@inspircd.org>
- *   Copyright (C) 2007-2008 Robin Burchell <robin+git@viroteck.net>
- *   Copyright (C) 2005-2006 Craig Edwards <craigedwards@brainbox.cc>
+ *   Copyright (C) 2006, 2008 Craig Edwards <brain@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -21,173 +24,155 @@
 
 
 #include "inspircd.h"
+#include "extension.h"
+#include "numerichelper.h"
 
-/* $ModDesc: Provides the NICKLOCK command, allows an oper to change a users nick and lock them to it until they quit */
-
-/** Handle /NICKLOCK
- */
-class CommandNicklock : public Command
+enum
 {
- public:
-	LocalIntExt& locked;
-	CommandNicklock (Module* Creator, LocalIntExt& ext) : Command(Creator,"NICKLOCK", 2),
-		locked(ext)
+	// InspIRCd-specific.
+	ERR_NICKNOTLOCKED = 946,
+	RPL_NICKLOCKON = 947,
+	RPL_NICKLOCKOFF = 945
+};
+
+class CommandNicklock final
+	: public Command
+{
+public:
+	BoolExtItem& locked;
+	CommandNicklock (Module* Creator, BoolExtItem& ext)
+		: Command(Creator, "NICKLOCK", 2)
+		, locked(ext)
 	{
-		flags_needed = 'o';
-		syntax = "<oldnick> <newnick>";
-		TRANSLATE3(TR_NICK, TR_TEXT, TR_END);
+		access_needed = CmdAccess::OPERATOR;
+		syntax = { "<nick> <newnick>" };
+		translation = { TR_NICK, TR_TEXT };
 	}
 
-	CmdResult Handle(const std::vector<std::string>& parameters, User *user)
+	CmdResult Handle(User* user, const Params& parameters) override
 	{
-		User* target = ServerInstance->FindNick(parameters[0]);
-
-		if ((!target) || (target->registered != REG_ALL))
+		auto* target = ServerInstance->Users.Find(parameters[0], true);
+		if (!target)
 		{
-			user->WriteServ("NOTICE %s :*** No such nickname: '%s'", user->nick.c_str(), parameters[0].c_str());
-			return CMD_FAILURE;
+			user->WriteNumeric(Numerics::NoSuchNick(parameters[0]));
+			return CmdResult::FAILURE;
 		}
 
 		/* Do local sanity checks and bails */
 		if (IS_LOCAL(user))
 		{
-			if (!ServerInstance->IsNick(parameters[1].c_str(), ServerInstance->Config->Limits.NickMax))
+			if (!ServerInstance->IsNick(parameters[1]))
 			{
-				user->WriteServ("NOTICE %s :*** Invalid nickname '%s'", user->nick.c_str(), parameters[1].c_str());
-				return CMD_FAILURE;
+				user->WriteNotice("*** Invalid nickname '" + parameters[1] + "'");
+				return CmdResult::FAILURE;
 			}
 
-			user->WriteServ("947 %s %s :Nickname now locked.", user->nick.c_str(), parameters[1].c_str());
+			user->WriteNumeric(RPL_NICKLOCKON, parameters[1], "Nickname now locked.");
 		}
 
 		/* If we made it this far, extend the user */
 		if (IS_LOCAL(target))
 		{
-			locked.set(target, 1);
+			locked.Set(target);
 
 			std::string oldnick = target->nick;
-			if (target->ForceNickChange(parameters[1].c_str()))
-				ServerInstance->SNO->WriteGlobalSno('a', user->nick+" used NICKLOCK to change and hold "+oldnick+" to "+parameters[1]);
+			if (target->ChangeNick(parameters[1]))
+				ServerInstance->SNO.WriteGlobalSno('a', user->nick+" used NICKLOCK to change and hold "+oldnick+" to "+parameters[1]);
 			else
 			{
 				std::string newnick = target->nick;
-				ServerInstance->SNO->WriteGlobalSno('a', user->nick+" used NICKLOCK, but "+oldnick+" failed nick change to "+parameters[1]+" and was locked to "+newnick+" instead");
+				ServerInstance->SNO.WriteGlobalSno('a', user->nick+" used NICKLOCK, but "+oldnick+" failed nick change to "+parameters[1]+" and was locked to "+newnick+" instead");
 			}
 		}
 
-		return CMD_SUCCESS;
+		return CmdResult::SUCCESS;
 	}
 
-	RouteDescriptor GetRouting(User* user, const std::vector<std::string>& parameters)
+	RouteDescriptor GetRouting(User* user, const Params& parameters) override
 	{
-		User* dest = ServerInstance->FindNick(parameters[0]);
-		if (dest)
-			return ROUTE_OPT_UCAST(dest->server);
-		return ROUTE_LOCALONLY;
+		return ROUTE_OPT_UCAST(parameters[0]);
 	}
 };
 
-/** Handle /NICKUNLOCK
- */
-class CommandNickunlock : public Command
+class CommandNickunlock final
+	: public Command
 {
- public:
-	LocalIntExt& locked;
-	CommandNickunlock (Module* Creator, LocalIntExt& ext) : Command(Creator,"NICKUNLOCK", 1),
-		locked(ext)
+public:
+	BoolExtItem& locked;
+	CommandNickunlock (Module* Creator, BoolExtItem& ext)
+		: Command(Creator, "NICKUNLOCK", 1)
+		, locked(ext)
 	{
-		flags_needed = 'o';
-		syntax = "<locked-nick>";
-		TRANSLATE2(TR_NICK, TR_END);
+		access_needed = CmdAccess::OPERATOR;
+		syntax = { "<nick>" };
+		translation = { TR_NICK };
 	}
 
-	CmdResult Handle (const std::vector<std::string>& parameters, User *user)
+	CmdResult Handle(User* user, const Params& parameters) override
 	{
-		User* target = ServerInstance->FindNick(parameters[0]);
+		auto* target = ServerInstance->Users.Find(parameters[0]);
 
 		if (!target)
 		{
-			user->WriteServ("NOTICE %s :*** No such nickname: '%s'", user->nick.c_str(), parameters[0].c_str());
-			return CMD_FAILURE;
+			user->WriteNumeric(Numerics::NoSuchNick(parameters[0]));
+			return CmdResult::FAILURE;
 		}
 
 		if (IS_LOCAL(target))
 		{
-			if (locked.set(target, 0))
+			if (locked.Get(target))
 			{
-				ServerInstance->SNO->WriteGlobalSno('a', user->nick+" used NICKUNLOCK on "+target->nick);
-				user->SendText(":%s 945 %s %s :Nickname now unlocked.",
-					ServerInstance->Config->ServerName.c_str(),user->nick.c_str(),target->nick.c_str());
+				locked.Unset(target);
+				ServerInstance->SNO.WriteGlobalSno('a', user->nick+" used NICKUNLOCK on "+target->nick);
+				user->WriteRemoteNumeric(RPL_NICKLOCKOFF, target->nick, "Nickname now unlocked.");
 			}
 			else
 			{
-				user->SendText(":%s 946 %s %s :This user's nickname is not locked.",
-					ServerInstance->Config->ServerName.c_str(),user->nick.c_str(),target->nick.c_str());
-				return CMD_FAILURE;
+				user->WriteRemoteNumeric(ERR_NICKNOTLOCKED, target->nick, "This user's nickname is not locked.");
+				return CmdResult::FAILURE;
 			}
 		}
 
-		return CMD_SUCCESS;
+		return CmdResult::SUCCESS;
 	}
 
-	RouteDescriptor GetRouting(User* user, const std::vector<std::string>& parameters)
+	RouteDescriptor GetRouting(User* user, const Params& parameters) override
 	{
-		User* dest = ServerInstance->FindNick(parameters[0]);
-		if (dest)
-			return ROUTE_OPT_UCAST(dest->server);
-		return ROUTE_LOCALONLY;
+		return ROUTE_OPT_UCAST(parameters[0]);
 	}
 };
 
-
-class ModuleNickLock : public Module
+class ModuleNickLock final
+	: public Module
 {
-	LocalIntExt locked;
+private:
+	BoolExtItem locked;
 	CommandNicklock cmd1;
 	CommandNickunlock cmd2;
- public:
+
+public:
 	ModuleNickLock()
-		: locked("nick_locked", this), cmd1(this, locked), cmd2(this, locked)
+		: Module(VF_VENDOR | VF_OPTCOMMON, "Adds the /NICKLOCK command which allows server operators to change a user's nickname and prevent them from changing it again until they disconnect.")
+		, locked(this, "nick-locked", ExtensionType::USER)
+		, cmd1(this, locked)
+		, cmd2(this, locked)
 	{
 	}
 
-	void init()
+	ModResult OnUserPreNick(LocalUser* user, const std::string& newnick) override
 	{
-		ServerInstance->Modules->AddService(cmd1);
-		ServerInstance->Modules->AddService(cmd2);
-		ServerInstance->Modules->AddService(locked);
-		ServerInstance->Modules->Attach(I_OnUserPreNick, this);
-	}
-
-	~ModuleNickLock()
-	{
-	}
-
-	Version GetVersion()
-	{
-		return Version("Provides the NICKLOCK command, allows an oper to change a users nick and lock them to it until they quit", VF_OPTCOMMON | VF_VENDOR);
-	}
-
-	ModResult OnUserPreNick(User* user, const std::string &newnick)
-	{
-		if (!IS_LOCAL(user))
-			return MOD_RES_PASSTHRU;
-
-		if (ServerInstance->NICKForced.get(user)) /* Allow forced nick changes */
-			return MOD_RES_PASSTHRU;
-
-		if (locked.get(user))
+		if (locked.Get(user))
 		{
-			user->WriteNumeric(447, "%s :You cannot change your nickname (your nick is locked)",user->nick.c_str());
+			user->WriteNumeric(ERR_CANTCHANGENICK, "You cannot change your nickname (your nick is locked)");
 			return MOD_RES_DENY;
 		}
 		return MOD_RES_PASSTHRU;
 	}
 
-	void Prioritize()
+	void Prioritize() override
 	{
-		Module *nflood = ServerInstance->Modules->Find("m_nickflood.so");
-		ServerInstance->Modules->SetPriority(this, I_OnUserPreNick, PRIORITY_BEFORE, &nflood);
+		Module* nflood = ServerInstance->Modules.Find("nickflood");
+		ServerInstance->Modules.SetPriority(this, I_OnUserPreNick, PRIORITY_BEFORE, nflood);
 	}
 };
 

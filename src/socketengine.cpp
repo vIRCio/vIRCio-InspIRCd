@@ -1,11 +1,17 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
+ *   Copyright (C) 2021 Dominic Hamon
+ *   Copyright (C) 2017-2018, 2021-2023 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2017 Robin Burchell <robin+git@viroteck.net>
+ *   Copyright (C) 2013-2014 Adam <Adam@anope.org>
+ *   Copyright (C) 2012, 2014-2015 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
+ *   Copyright (C) 2012 ChrisTX <xpipe@hotmail.de>
  *   Copyright (C) 2009 Daniel De Graaf <danieldg@inspircd.org>
- *   Copyright (C) 2008 Robin Burchell <robin+git@viroteck.net>
- *   Copyright (C) 2005-2008 Craig Edwards <craigedwards@brainbox.cc>
- *   Copyright (C) 2007 Burlex <???@???>
+ *   Copyright (C) 2007 burlex
  *   Copyright (C) 2007 Dennis Friis <peavey@inspircd.org>
+ *   Copyright (C) 2006-2008 Craig Edwards <brain@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -21,33 +27,70 @@
  */
 
 
+#ifndef _WIN32
+# include <fcntl.h>
+# include <sys/resource.h>
+# include <unistd.h>
+#endif
+
+#include <fmt/color.h>
+
 #include "inspircd.h"
 
-EventHandler::EventHandler()
-{
-	fd = -1;
-	event_mask = 0;
-}
+/** Reference table, contains all current handlers
+ **/
+std::vector<EventHandler*> SocketEngine::ref;
+
+/** Current number of descriptors in the engine
+ */
+size_t SocketEngine::CurrentSetSize = 0;
+
+/** List of handlers that want a trial read/write
+ */
+std::set<int> SocketEngine::trials;
+
+size_t SocketEngine::MaxSetSize = 0;
+
+/** Socket engine statistics: count of various events, bandwidth usage
+ */
+SocketEngine::Statistics SocketEngine::stats;
 
 void EventHandler::SetFd(int FD)
 {
 	this->fd = FD;
 }
 
-SocketEngine::SocketEngine()
-{
-	TotalEvents = WriteEvents = ReadEvents = ErrorEvents = 0;
-	lastempty = ServerInstance->Time();
-	indata = outdata = 0;
-}
-
-SocketEngine::~SocketEngine()
+void EventHandler::OnEventHandlerWrite()
 {
 }
 
-void SocketEngine::SetEventMask(EventHandler* eh, int mask)
+void EventHandler::OnEventHandlerError(int errornum)
 {
-	eh->event_mask = mask;
+}
+
+void SocketEngine::InitError()
+{
+	fmt::println(stderr, "{} Socket engine initialization failed. {}.", fmt::styled("FATAL ERROR!", fmt::emphasis::bold | fmt::fg(fmt::terminal_color::red)), strerror(errno));
+	exit(EXIT_FAILURE);
+}
+
+void SocketEngine::LookupMaxFds()
+{
+#if defined _WIN32
+	MaxSetSize = FD_SETSIZE;
+#else
+	struct rlimit limits;
+	if (!getrlimit(RLIMIT_NOFILE, &limits))
+		MaxSetSize = limits.rlim_cur;
+
+#if defined __APPLE__
+	limits.rlim_cur = limits.rlim_max == RLIM_INFINITY ? OPEN_MAX : limits.rlim_max;
+#else
+	limits.rlim_cur = limits.rlim_max;
+#endif
+	if (!setrlimit(RLIMIT_NOFILE, &limits))
+		MaxSetSize = limits.rlim_cur;
+#endif
 }
 
 void SocketEngine::ChangeEventMask(EventHandler* eh, int change)
@@ -60,7 +103,7 @@ void SocketEngine::ChangeEventMask(EventHandler* eh, int change)
 		new_m &= ~FD_WANT_READ_MASK;
 	if (change & FD_WANT_WRITE_MASK)
 		new_m &= ~FD_WANT_WRITE_MASK;
-	
+
 	// if adding a trial read/write, insert it into the set
 	if (change & FD_TRIAL_NOTE_MASK && !(old_m & FD_TRIAL_NOTE_MASK))
 		trials.insert(eh->GetFd());
@@ -79,57 +122,67 @@ void SocketEngine::DispatchTrialWrites()
 	working_list.reserve(trials.size());
 	working_list.assign(trials.begin(), trials.end());
 	trials.clear();
-	for(unsigned int i=0; i < working_list.size(); i++)
+	for(int fd : working_list)
 	{
-		int fd = working_list[i];
 		EventHandler* eh = GetRef(fd);
 		if (!eh)
 			continue;
+
 		int mask = eh->event_mask;
 		eh->event_mask &= ~(FD_ADD_TRIAL_READ | FD_ADD_TRIAL_WRITE);
 		if ((mask & (FD_ADD_TRIAL_READ | FD_READ_WILL_BLOCK)) == FD_ADD_TRIAL_READ)
-			eh->HandleEvent(EVENT_READ, 0);
+			eh->OnEventHandlerRead();
 		if ((mask & (FD_ADD_TRIAL_WRITE | FD_WRITE_WILL_BLOCK)) == FD_ADD_TRIAL_WRITE)
-			eh->HandleEvent(EVENT_WRITE, 0);
+			eh->OnEventHandlerWrite();
+	}
+}
+
+bool SocketEngine::AddFdRef(EventHandler* eh)
+{
+	int fd = eh->GetFd();
+	if (HasFd(fd))
+		return false;
+
+	while (static_cast<unsigned int>(fd) >= ref.size())
+		ref.resize(ref.empty() ? 1 : (ref.size() * 2));
+	ref[fd] = eh;
+	CurrentSetSize++;
+	return true;
+}
+
+void SocketEngine::DelFdRef(EventHandler* eh)
+{
+	int fd = eh->GetFd();
+	if (GetRef(fd) == eh)
+	{
+		ref[fd] = nullptr;
+		CurrentSetSize--;
 	}
 }
 
 bool SocketEngine::HasFd(int fd)
 {
-	if ((fd < 0) || (fd > GetMaxFds()))
-		return false;
-	return (ref[fd] != NULL);
+	return GetRef(fd) != nullptr;
 }
 
 EventHandler* SocketEngine::GetRef(int fd)
 {
-	if ((fd < 0) || (fd > GetMaxFds()))
-		return 0;
+	if (fd < 0 || static_cast<size_t>(fd) >= ref.size())
+		return nullptr;
 	return ref[fd];
 }
 
-bool SocketEngine::BoundsCheckFd(EventHandler* eh)
+int SocketEngine::Accept(EventHandler* eh, sockaddr* addr, socklen_t* addrlen)
 {
-	if (!eh)
-		return false;
-	if ((eh->GetFd() < 0) || (eh->GetFd() > GetMaxFds()))
-		return false;
-	return true;
+	return accept(eh->GetFd(), addr, addrlen);
 }
 
-
-int SocketEngine::Accept(EventHandler* fd, sockaddr *addr, socklen_t *addrlen)
+int SocketEngine::Close(EventHandler* eh)
 {
-	return accept(fd->GetFd(), addr, addrlen);
-}
-
-int SocketEngine::Close(EventHandler* fd)
-{
-#ifdef _WIN32
-	return closesocket(fd->GetFd());
-#else
-	return close(fd->GetFd());
-#endif
+	DelFd(eh);
+	int ret = Close(eh->GetFd());
+	eh->SetFd(-1);
+	return ret;
 }
 
 int SocketEngine::Close(int fd)
@@ -163,47 +216,63 @@ int SocketEngine::NonBlocking(int fd)
 #endif
 }
 
-void SocketEngine::SetReuse(int fd)
+ssize_t SocketEngine::RecvFrom(EventHandler* eh, void* buf, size_t len, int flags, sockaddr* from, socklen_t* fromlen)
 {
-	int on = 1;
-	setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, (char*)&on, sizeof(on));
-}
-
-int SocketEngine::RecvFrom(EventHandler* fd, void *buf, size_t len, int flags, sockaddr *from, socklen_t *fromlen)
-{
-	int nbRecvd = recvfrom(fd->GetFd(), (char*)buf, len, flags, from, fromlen);
-	if (nbRecvd > 0)
-		this->UpdateStats(nbRecvd, 0);
+	ssize_t nbRecvd = recvfrom(eh->GetFd(), static_cast<char*>(buf), len, flags, from, fromlen);
+	stats.UpdateReadCounters(nbRecvd);
 	return nbRecvd;
 }
 
-int SocketEngine::Send(EventHandler* fd, const void *buf, size_t len, int flags)
+ssize_t SocketEngine::Send(EventHandler* eh, const void* buf, size_t len, int flags)
 {
-	int nbSent = send(fd->GetFd(), (const char*)buf, len, flags);
-	if (nbSent > 0)
-		this->UpdateStats(0, nbSent);
+	ssize_t nbSent = send(eh->GetFd(), static_cast<const char*>(buf), len, flags);
+	stats.UpdateWriteCounters(nbSent);
 	return nbSent;
 }
 
-int SocketEngine::Recv(EventHandler* fd, void *buf, size_t len, int flags)
+ssize_t SocketEngine::Recv(EventHandler* eh, void* buf, size_t len, int flags)
 {
-	int nbRecvd = recv(fd->GetFd(), (char*)buf, len, flags);
-	if (nbRecvd > 0)
-		this->UpdateStats(nbRecvd, 0);
+	ssize_t nbRecvd = recv(eh->GetFd(), static_cast<char*>(buf), len, flags);
+	stats.UpdateReadCounters(nbRecvd);
 	return nbRecvd;
 }
 
-int SocketEngine::SendTo(EventHandler* fd, const void *buf, size_t len, int flags, const sockaddr *to, socklen_t tolen)
+ssize_t SocketEngine::SendTo(EventHandler* eh, const void* buf, size_t len, int flags, const irc::sockets::sockaddrs& address)
 {
-	int nbSent = sendto(fd->GetFd(), (const char*)buf, len, flags, to, tolen);
-	if (nbSent > 0)
-		this->UpdateStats(0, nbSent);
+	ssize_t nbSent = sendto(eh->GetFd(), static_cast<const char*>(buf), len, flags, &address.sa, address.sa_size());
+	stats.UpdateWriteCounters(nbSent);
 	return nbSent;
 }
 
-int SocketEngine::Connect(EventHandler* fd, const sockaddr *serv_addr, socklen_t addrlen)
+ssize_t SocketEngine::WriteV(EventHandler* eh, const IOVector* iovec, int count)
 {
-	int ret = connect(fd->GetFd(), serv_addr, addrlen);
+	ssize_t sent = writev(eh->GetFd(), iovec, count);
+	stats.UpdateWriteCounters(sent);
+	return sent;
+}
+
+#ifdef _WIN32
+int SocketEngine::WriteV(EventHandler* eh, const iovec* iovec, int count)
+{
+	// On Windows the fields in iovec are not in the order required by the Winsock API; IOVector has
+	// the fields in the correct order.
+	// Create temporary IOVectors from the iovecs and pass them to the WriteV() method that accepts the
+	// platform's native struct.
+	IOVector wiovec[128];
+	count = std::min(count, static_cast<int>(sizeof(wiovec) / sizeof(IOVector)));
+
+	for (int i = 0; i < count; i++)
+	{
+		wiovec[i].iov_len = iovec[i].iov_len;
+		wiovec[i].iov_base = reinterpret_cast<char*>(iovec[i].iov_base);
+	}
+	return WriteV(eh, wiovec, count);
+}
+#endif
+
+int SocketEngine::Connect(EventHandler* eh, const irc::sockets::sockaddrs& address)
+{
+	int ret = connect(eh->GetFd(), &address.sa, address.sa_size());
 #ifdef _WIN32
 	if ((ret == SOCKET_ERROR) && (WSAGetLastError() == WSAEWOULDBLOCK))
 		errno = EINPROGRESS;
@@ -211,46 +280,59 @@ int SocketEngine::Connect(EventHandler* fd, const sockaddr *serv_addr, socklen_t
 	return ret;
 }
 
-int SocketEngine::Shutdown(EventHandler* fd, int how)
+int SocketEngine::Shutdown(EventHandler* eh, int how)
 {
-	return shutdown(fd->GetFd(), how);
+	return shutdown(eh->GetFd(), how);
 }
 
-int SocketEngine::Bind(int fd, const irc::sockets::sockaddrs& addr)
+int SocketEngine::Bind(EventHandler* eh, const irc::sockets::sockaddrs& addr)
 {
-	return bind(fd, &addr.sa, addr.sa_size());
+	return bind(eh->GetFd(), &addr.sa, addr.sa_size());
 }
 
-int SocketEngine::Listen(int sockfd, int backlog)
+int SocketEngine::Listen(EventHandler* eh, int backlog)
 {
-	return listen(sockfd, backlog);
+	return listen(eh->GetFd(), backlog);
 }
 
-int SocketEngine::Shutdown(int fd, int how)
+void SocketEngine::Statistics::UpdateReadCounters(ssize_t len_in)
 {
-	return shutdown(fd, how);
+	CheckFlush();
+
+	ReadEvents++;
+	if (len_in > 0)
+		indata += static_cast<size_t>(len_in);
+	else if (len_in < 0)
+		ErrorEvents++;
 }
 
-void SocketEngine::RecoverFromFork()
+void SocketEngine::Statistics::UpdateWriteCounters(ssize_t len_out)
 {
+	CheckFlush();
+
+	WriteEvents++;
+	if (len_out > 0)
+		outdata += static_cast<size_t>(len_out);
+	else if (len_out < 0)
+		ErrorEvents++;
 }
 
-void SocketEngine::UpdateStats(size_t len_in, size_t len_out)
+void SocketEngine::Statistics::CheckFlush() const
 {
-	if (lastempty != ServerInstance->Time())
+	// Reset the in/out byte counters if it has been more than a second
+	time_t now = ServerInstance->Time();
+	if (lastempty != now)
 	{
-		lastempty = ServerInstance->Time();
+		lastempty = now;
 		indata = outdata = 0;
 	}
-	indata += len_in;
-	outdata += len_out;
 }
 
-void SocketEngine::GetStats(float &kbitpersec_in, float &kbitpersec_out, float &kbitpersec_total)
+void SocketEngine::Statistics::GetBandwidth(float& kbitpersec_in, float& kbitpersec_out, float& kbitpersec_total) const
 {
-	UpdateStats(0, 0); /* Forces emptying of the values if its been more than a second */
-	float in_kbit = indata * 8;
-	float out_kbit = outdata * 8;
+	CheckFlush();
+	float in_kbit = static_cast<float>(indata) * 8;
+	float out_kbit = static_cast<float>(outdata) * 8;
 	kbitpersec_total = ((in_kbit + out_kbit) / 1024);
 	kbitpersec_in = in_kbit / 1024;
 	kbitpersec_out = out_kbit / 1024;
@@ -261,17 +343,10 @@ std::string SocketEngine::LastError()
 #ifndef _WIN32
 	return strerror(errno);
 #else
-	char szErrorString[500];
-	DWORD dwErrorCode = WSAGetLastError();
-	if (FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, NULL, dwErrorCode, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (LPSTR)szErrorString, _countof(szErrorString), NULL) == 0)
-		sprintf_s(szErrorString, _countof(szErrorString), "Error code: %u", dwErrorCode);
-
-	std::string::size_type p;
-	std::string ret = szErrorString;
-	while ((p = ret.find_last_of("\r\n")) != std::string::npos)
-		ret.erase(p, 1);
-
-	return ret;
+	std::string err = GetErrorMessage(WSAGetLastError());
+	for (size_t pos = 0; ((pos = err.find_first_of("\r\n", pos)) != std::string::npos); )
+		err[pos] = ' ';
+	return err;
 #endif
 }
 

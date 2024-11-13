@@ -1,7 +1,12 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
- *   Copyright (C) 2007 Craig Edwards <craigedwards@brainbox.cc>
+ *   Copyright (C) 2018, 2021-2023 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2013, 2016 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
+ *   Copyright (C) 2009 Uli Schlachter <psychon@znc.in>
+ *   Copyright (C) 2009 Daniel De Graaf <danieldg@inspircd.org>
+ *   Copyright (C) 2007 Craig Edwards <brain@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -16,39 +21,26 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-
-/* $ModDesc: Provides a spanning tree server link protocol */
-
 #include "inspircd.h"
-#include "socket.h"
-#include "xline.h"
+#include "modules/whois.h"
+#include "numerichelper.h"
 
 #include "main.h"
-#include "utils.h"
-#include "treeserver.h"
-#include "treesocket.h"
+#include "commandbuilder.h"
 
-/* $ModDep: m_spanningtree/main.h m_spanningtree/utils.h m_spanningtree/treeserver.h m_spanningtree/treesocket.h */
-
-ModResult ModuleSpanningTree::HandleRemoteWhois(const std::vector<std::string>& parameters, User* user)
+ModResult ModuleSpanningTree::HandleRemoteWhois(const CommandBase::Params& parameters, User* user)
 {
-	if ((IS_LOCAL(user)) && (parameters.size() > 1))
+	auto* remote = ServerInstance->Users.FindNick(parameters[1]);
+	if (remote && !IS_LOCAL(remote))
 	{
-		User* remote = ServerInstance->FindNickOnly(parameters[1]);
-		if (remote && !IS_LOCAL(remote))
-		{
-			parameterlist params;
-			params.push_back(remote->uuid);
-			Utils->DoOneToOne(user->uuid,"IDLE",params,remote->server);
-			return MOD_RES_DENY;
-		}
-		else if (!remote)
-		{
-			user->WriteNumeric(401, "%s %s :No such nick/channel",user->nick.c_str(), parameters[1].c_str());
-			user->WriteNumeric(318, "%s %s :End of /WHOIS list.",user->nick.c_str(), parameters[1].c_str());
-			return MOD_RES_DENY;
-		}
+		CmdBuilder(user, "IDLE").push(remote->uuid).Unicast(remote);
+		return MOD_RES_DENY;
+	}
+	else if (!remote)
+	{
+		user->WriteNumeric(Numerics::NoSuchNick(parameters[0]));
+		user->WriteNumeric(RPL_ENDOFWHOIS, parameters[0], "End of /WHOIS list.");
+		return MOD_RES_DENY;
 	}
 	return MOD_RES_PASSTHRU;
 }
-

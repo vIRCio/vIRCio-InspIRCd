@@ -1,0 +1,51 @@
+name: Windows CI
+on:
+  pull_request:
+  push:
+  release:
+    types:
+      - published
+  schedule:
+    - cron: '0 0 * * 0'
+jobs:
+  build:
+    if: "!contains(github.event.head_commit.message, '[skip windows ci]')"
+    runs-on: windows-2019
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2.0.0
+        with:
+          msbuild-architecture: x64
+
+      - name: Setup Conan
+        uses: turtlebrowser/get-conan@v1.2
+        with:
+          version: 1.65.0
+
+      - name: Install libraries
+        working-directory: ${{ github.workspace }}/win/build
+        run: |
+          (Get-Content ../conanfile.txt).replace('##', '') | Set-Content ../conanfile.txt
+          conan install .. --build=missing
+
+      - name: Run CMake
+        working-directory: ${{ github.workspace }}/win/build
+        env:
+          LDFLAGS: /DEBUG:FASTLINK /INCREMENTAL
+        run: |
+          cmake -A x64 -D CMAKE_BUILD_TYPE=${{ github.event_name == 'release' && 'Release' || 'Debug' }} -G "Visual Studio 16 2019" -Wdev ..
+
+      - name: Build InspIRCd
+        working-directory: ${{ github.workspace }}/win/build
+        run: |
+          msbuild PACKAGE.vcxproj /M:3 /P:Configuration=${{ github.event_name == 'release' && 'Release' || 'Debug' }} /P:Platform=x64 /VERBOSITY:MINIMAL
+
+      - name: Upload installer
+        if: "${{ github.event_name == 'release' }}"
+        working-directory: ${{ github.workspace }}/win/build
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload ${{ github.event.release.tag_name }} $(Get-ChildItem InspIRCd-*.exe)

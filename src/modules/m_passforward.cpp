@@ -1,6 +1,11 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
+ *   Copyright (C) 2019-2024 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2019 linuxdaemon <linuxdaemon.irc@gmail.com>
+ *   Copyright (C) 2014 Googolplexed <googol@googolplexed.net>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
+ *   Copyright (C) 2012 Attila Molnar <attilamolnar@hush.com>
  *   Copyright (C) 2010 Daniel De Graaf <danieldg@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
@@ -17,92 +22,81 @@
  */
 
 
-/* $ModDesc: Forwards a password users can send on connect (for example for NickServ identification). */
-
 #include "inspircd.h"
+#include "modules/account.h"
+#include "stringutils.h"
 
-class ModulePassForward : public Module
+class ModulePassForward final
+	: public Module
 {
- private:
+private:
+	Account::API accountapi;
 	std::string nickrequired, forwardmsg, forwardcmd;
 
- public:
-	void init()
+public:
+	ModulePassForward()
+		: Module(VF_VENDOR, "Allows an account password to be forwarded to a services pseudoclient such as NickServ.")
+		, accountapi(this)
 	{
-		OnRehash(NULL);
-		Implementation eventlist[] = { I_OnPostConnect, I_OnRehash };
-		ServerInstance->Modules->Attach(eventlist, this, sizeof(eventlist)/sizeof(Implementation));
 	}
 
-	Version GetVersion()
+	void ReadConfig(ConfigStatus& status) override
 	{
-		return Version("Sends server password to NickServ", VF_VENDOR);
-	}
-
-	void OnRehash(User* user)
-	{
-		ConfigTag* tag = ServerInstance->Config->ConfValue("passforward");
+		const auto& tag = ServerInstance->Config->ConfValue("passforward");
 		nickrequired = tag->getString("nick", "NickServ");
-		forwardmsg = tag->getString("forwardmsg", "NOTICE $nick :*** Forwarding PASS to $nickrequired");
-		forwardcmd = tag->getString("cmd", "PRIVMSG $nickrequired :IDENTIFY $pass");
+		forwardmsg = tag->getString("forwardmsg", "NOTICE %nick% :*** Forwarding password to %nickrequired%");
+		forwardcmd = tag->getString("cmd", "SQUERY %nickrequired% :IDENTIFY %nick% %pass%", 1);
 	}
 
-	void FormatStr(std::string& result, const std::string& format, const LocalUser* user)
+	std::string FormatStr(const LocalUser* user, const std::string& format, const std::string& pass)
 	{
-		for (unsigned int i = 0; i < format.length(); i++)
-		{
-			char c = format[i];
-			if (c == '$')
-			{
-				if (format.substr(i, 13) == "$nickrequired")
-				{
-					result.append(nickrequired);
-					i += 12;
-				}
-				else if (format.substr(i, 5) == "$nick")
-				{
-					result.append(user->nick);
-					i += 4;
-				}
-				else if (format.substr(i, 5) == "$user")
-				{
-					result.append(user->ident);
-					i += 4;
-				}
-				else if (format.substr(i,5) == "$pass")
-				{
-					result.append(user->password);
-					i += 4;
-				}
-				else
-					result.push_back(c);
-			}
-			else
-				result.push_back(c);
-		}
+		return Template::Replace(format, {
+			{ "nick",         user->nick,          },
+			{ "nickrequired", nickrequired,        },
+			{ "pass",         pass,                },
+			{ "user",         user->GetRealUser(), },
+		});
 	}
 
-	virtual void OnPostConnect(User* ruser)
+	void OnPostConnect(User* ruser) override
 	{
 		LocalUser* user = IS_LOCAL(ruser);
 		if (!user || user->password.empty())
 			return;
 
+		// If the connect class requires a password, don't forward it
+		if (!user->GetClass()->password.empty())
+			return;
+
+		if (accountapi && accountapi->GetAccountName(user))
+		{
+			// User is logged in already (probably via SASL) don't forward the password
+			return;
+		}
+
+		ForwardPass(user, user->password);
+	}
+
+	void OnPostCommand(Command* command, const CommandBase::Params& parameters, LocalUser* user, CmdResult result, bool loop) override
+	{
+		if (command->name == "NICK" && parameters.size() > 1)
+			ForwardPass(user, parameters[1]);
+	}
+
+	void ForwardPass(LocalUser* user, const std::string& pass)
+	{
 		if (!nickrequired.empty())
 		{
-			/* Check if nick exists and its server is ulined */
-			User* u = ServerInstance->FindNick(nickrequired);
-			if (!u || !ServerInstance->ULine(u->server))
+			/* Check if nick exists and is on a services server. */
+			auto* u = ServerInstance->Users.Find(nickrequired);
+			if (!u || !u->server->IsService())
 				return;
 		}
 
-		std::string tmp;
-		FormatStr(tmp,forwardmsg, user);
-		user->WriteServ(tmp);
+		if (!forwardmsg.empty())
+			ServerInstance->Parser.ProcessBuffer(user, FormatStr(user, forwardmsg, pass));
 
-		tmp.clear();
-		FormatStr(tmp,forwardcmd, user);
-		ServerInstance->Parser->ProcessBuffer(tmp,user);
+		ServerInstance->Parser.ProcessBuffer(user, FormatStr(user, forwardcmd, pass));
 	}
 };
 

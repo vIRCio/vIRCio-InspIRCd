@@ -1,11 +1,14 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
- *   Copyright (C) 2009 Daniel De Graaf <danieldg@inspircd.org>
- *   Copyright (C) 2006-2008 Craig Edwards <craigedwards@brainbox.cc>
- *   Copyright (C) 2007-2008 Robin Burchell <robin+git@viroteck.net>
- *   Copyright (C) 2007 Dennis Friis <peavey@inspircd.org>
- *   Copyright (C) 2006 Oliver Lupton <oliverlupton@gmail.com>
+ *   Copyright (C) 2017-2023 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2012-2013 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
+ *   Copyright (C) 2009-2010 Daniel De Graaf <danieldg@inspircd.org>
+ *   Copyright (C) 2008 Robin Burchell <robin+git@viroteck.net>
+ *   Copyright (C) 2007-2008 Dennis Friis <peavey@inspircd.org>
+ *   Copyright (C) 2007 Craig Edwards <brain@inspircd.org>
+ *   Copyright (C) 2006 Oliver Lupton <om@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -22,114 +25,127 @@
 
 
 #include "inspircd.h"
-#include "u_listmode.h"
+#include "listmode.h"
+#include "modules/extban.h"
+#include "modules/isupport.h"
 
-/* $ModDesc: Provides support for the +e channel mode */
-/* $ModDep: ../../include/u_listmode.h */
-
-/* Written by Om<om@inspircd.org>, April 2005. */
-/* Rewritten to use the listmode utility by Om, December 2005 */
-/* Adapted from m_exception, which was originally based on m_chanprotect and m_silence */
-
-// The +e channel mode takes a nick!ident@host, glob patterns allowed,
-// and if a user matches an entry on the +e list then they can join the channel, overriding any (+b) bans set on them
-// Now supports CIDR and IP addresses -- Brain
-
-
-/** Handles +e channel mode
- */
-class BanException : public ListModeBase
+enum
 {
- public:
-	BanException(Module* Creator) : ListModeBase(Creator, "banexception", 'e', "End of Channel Exception List", 348, 349, true) { }
+	// From RFC 2812.
+	RPL_EXCEPTLIST = 348,
+	RPL_ENDOFEXCEPTLIST = 349
 };
 
-
-class ModuleBanException : public Module
+class BanException final
+	: public ListModeBase
 {
+private:
+	ExtBan::ManagerRef extbanmgr;
+
+public:
+	BanException(Module* Creator)
+		: ListModeBase(Creator, "banexception", 'e', RPL_EXCEPTLIST, RPL_ENDOFEXCEPTLIST)
+		, extbanmgr(Creator)
+	{
+		syntax = "<mask>";
+	}
+
+	bool CompareEntry(const std::string& entry, const std::string& value) const override
+	{
+		if (extbanmgr)
+		{
+			auto res = extbanmgr->CompareEntry(this, entry, value);
+			if (res != ExtBan::Comparison::NOT_AN_EXTBAN)
+				return res == ExtBan::Comparison::MATCH;
+		}
+		return irc::equals(entry, value);
+	}
+
+	bool ValidateParam(LocalUser* user, Channel* channel, std::string& parameter) override
+	{
+		if (!extbanmgr || !extbanmgr->Canonicalize(parameter))
+			ModeParser::CleanMask(parameter);
+		return true;
+	}
+};
+
+class ModuleBanException final
+	: public Module
+	, public ExtBan::EventListener
+	, public ISupport::EventListener
+{
+private:
 	BanException be;
 
 public:
-	ModuleBanException() : be(this)
+	ModuleBanException()
+		: Module(VF_VENDOR, "Adds channel mode e (banexception) which allows channel operators to exempt user masks from channel mode b (ban).")
+		, ExtBan::EventListener(this)
+		, ISupport::EventListener(this)
+		, be(this)
 	{
 	}
 
-	void init()
+	void OnBuildISupport(ISupport::TokenMap& tokens) override
 	{
-		ServerInstance->Modules->AddService(be);
-
-		be.DoImplements(this);
-		Implementation list[] = { I_OnRehash, I_On005Numeric, I_OnExtBanCheck, I_OnCheckChannelBan };
-		ServerInstance->Modules->Attach(list, this, sizeof(list)/sizeof(Implementation));
+		tokens["EXCEPTS"] = ConvToStr(be.GetModeChar());
 	}
 
-	void On005Numeric(std::string &output)
+	ModResult OnExtBanCheck(User* user, Channel* chan, ExtBan::Base* extban) override
 	{
-		output.append(" EXCEPTS=e");
-	}
+		ListModeBase::ModeList* list = be.GetList(chan);
+		if (!list)
+			return MOD_RES_PASSTHRU;
 
-	ModResult OnExtBanCheck(User *user, Channel *chan, char type)
-	{
-		if (chan != NULL)
+		for (const auto& ban : *list)
 		{
-			modelist *list = be.extItem.get(chan);
+			bool inverted;
+			std::string name;
+			std::string value;
+			if (!ExtBan::Parse(ban.mask, name, value, inverted))
+				continue;
 
-			if (!list)
-				return MOD_RES_PASSTHRU;
-
-			for (modelist::iterator it = list->begin(); it != list->end(); it++)
+			if (name.size() == 1)
 			{
-				if (it->mask.length() <= 2 || it->mask[0] != type || it->mask[1] != ':')
+				// It is an extban but not this extban.
+				if (name[0] != extban->GetLetter())
 					continue;
-
-				if (chan->CheckBan(user, it->mask.substr(2)))
-				{
-					// They match an entry on the list, so let them pass this.
-					return MOD_RES_ALLOW;
-				}
 			}
-		}
+			else
+			{
+				// It is an extban but not this extban.
+				if (!irc::equals(name, extban->GetName()))
+					continue;
+			}
 
+			return extban->IsMatch(user, chan, value) != inverted ? MOD_RES_ALLOW : MOD_RES_PASSTHRU;
+		}
 		return MOD_RES_PASSTHRU;
 	}
 
-	ModResult OnCheckChannelBan(User* user, Channel* chan)
+	ModResult OnCheckChannelBan(User* user, Channel* chan) override
 	{
-		if (chan)
+		ListModeBase::ModeList* list = be.GetList(chan);
+		if (!list)
 		{
-			modelist *list = be.extItem.get(chan);
+			// No list, proceed normally
+			return MOD_RES_PASSTHRU;
+		}
 
-			if (!list)
+		for (const auto& entry : *list)
+		{
+			if (chan->CheckBan(user, entry.mask))
 			{
-				// No list, proceed normally
-				return MOD_RES_PASSTHRU;
-			}
-
-			for (modelist::iterator it = list->begin(); it != list->end(); it++)
-			{
-				if (chan->CheckBan(user, it->mask))
-				{
-					// They match an entry on the list, so let them in.
-					return MOD_RES_ALLOW;
-				}
+				// They match an entry on the list, so let them in.
+				return MOD_RES_ALLOW;
 			}
 		}
 		return MOD_RES_PASSTHRU;
 	}
 
-	void OnSyncChannel(Channel* chan, Module* proto, void* opaque)
-	{
-		be.DoSyncChannel(chan, proto, opaque);
-	}
-
-	void OnRehash(User* user)
+	void ReadConfig(ConfigStatus& status) override
 	{
 		be.DoRehash();
-	}
-
-	Version GetVersion()
-	{
-		return Version("Provides support for the +e channel mode", VF_VENDOR);
 	}
 };
 

@@ -1,7 +1,12 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
+ *   Copyright (C) 2017-2020, 2022-2024 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2013-2016 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2012, 2019 Robby <robby@chatbelgie.be>
  *   Copyright (C) 2009-2010 Daniel De Graaf <danieldg@inspircd.org>
+ *   Copyright (C) 2009 Uli Schlachter <psychon@znc.in>
+ *   Copyright (C) 2008-2010 Craig Edwards <brain@inspircd.org>
  *   Copyright (C) 2008 Robin Burchell <robin+git@viroteck.net>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
@@ -19,137 +24,145 @@
 
 
 #include "inspircd.h"
-#include "socket.h"
-#include "xline.h"
-#include "socketengine.h"
+#include "modules/ssl.h"
 
 #include "main.h"
 #include "utils.h"
 #include "link.h"
 #include "treeserver.h"
 #include "treesocket.h"
-
-/* $ModDep: m_spanningtree/main.h m_spanningtree/utils.h m_spanningtree/treeserver.h m_spanningtree/treesocket.h m_spanningtree/link.h */
+#include "commands.h"
 
 /*
  * Some server somewhere in the network introducing another server.
  *	-- w
  */
-bool TreeSocket::RemoteServer(const std::string &prefix, parameterlist &params)
+CmdResult CommandServer::HandleServer(TreeServer* ParentOfThis, Params& params)
 {
-	if (params.size() < 5)
-	{
-		SendError("Protocol error - Not enough parameters for SERVER command");
-		return false;
-	}
+	const std::string& servername = params[0];
+	const std::string& sid = params[1];
+	const std::string& description = params.back();
+	TreeSocket* socket = ParentOfThis->GetSocket();
 
-	std::string servername = params[0];
-	// password is not used for a remote server
-	// hopcount is not used (ever)
-	std::string sid = params[3];
-	std::string description = params[4];
-	TreeServer* ParentOfThis = Utils->FindServer(prefix);
-
-	if (!ParentOfThis)
+	if (!InspIRCd::IsSID(sid))
 	{
-		this->SendError("Protocol error - Introduced remote server from unknown server "+prefix);
-		return false;
-	}
-	if (!ServerInstance->IsSID(sid))
-	{
-		this->SendError("Invalid format server ID: "+sid+"!");
-		return false;
+		socket->SendError("Invalid format server ID: "+sid+"!");
+		return CmdResult::FAILURE;
 	}
 	TreeServer* CheckDupe = Utils->FindServer(servername);
 	if (CheckDupe)
 	{
-		this->SendError("Server "+servername+" already exists!");
-		ServerInstance->SNO->WriteToSnoMask('L', "Server \2"+CheckDupe->GetName()+"\2 being introduced from \2" + ParentOfThis->GetName() + "\2 denied, already exists. Closing link with " + ParentOfThis->GetName());
-		return false;
+		socket->SendError("Server "+servername+" already exists!");
+		ServerInstance->SNO.WriteToSnoMask('L', "Server \002"+CheckDupe->GetName()+"\002 being introduced from \002" + ParentOfThis->GetName() + "\002 denied, already exists. Closing link with " + ParentOfThis->GetName());
+		return CmdResult::FAILURE;
 	}
 	CheckDupe = Utils->FindServer(sid);
 	if (CheckDupe)
 	{
-		this->SendError("Server ID "+sid+" already exists! You may want to specify the server ID for the server manually with <server:id> so they do not conflict.");
-		ServerInstance->SNO->WriteToSnoMask('L', "Server \2"+servername+"\2 being introduced from \2" + ParentOfThis->GetName() + "\2 denied, server ID already exists on the network. Closing link with " + ParentOfThis->GetName());
-		return false;
+		socket->SendError("Server ID "+sid+" already exists! You may want to specify the server ID for the server manually with <server:id> so they do not conflict.");
+		ServerInstance->SNO.WriteToSnoMask('L', "Server \002"+servername+"\002 being introduced from \002" + ParentOfThis->GetName() + "\002 denied, server ID already exists on the network. Closing link with " + ParentOfThis->GetName());
+		return CmdResult::FAILURE;
 	}
 
+	TreeServer* route = ParentOfThis->GetRoute();
+	std::shared_ptr<Link> lnk = Utils->FindLink(route->GetName());
+	auto* Node = new TreeServer(servername, description, sid, ParentOfThis, ParentOfThis->GetSocket(), lnk ? lnk->Hidden : false);
 
-	Link* lnk = Utils->FindLink(servername);
+	HandleExtra(Node, params);
 
-	TreeServer *Node = new TreeServer(Utils, servername, description, sid, ParentOfThis,NULL, lnk ? lnk->Hidden : false);
-
-	ParentOfThis->AddChild(Node);
-	params[4] = ":" + params[4];
-	Utils->DoOneToAllButSender(prefix,"SERVER",params,prefix);
-	ServerInstance->SNO->WriteToSnoMask('L', "Server \002"+ParentOfThis->GetName()+"\002 introduced server \002"+servername+"\002 ("+description+")");
-	return true;
+	ServerInstance->SNO.WriteToSnoMask('L', "Server \002"+ParentOfThis->GetName()+"\002 introduced server \002"+servername+"\002 ("+description+")");
+	return CmdResult::SUCCESS;
 }
 
+void CommandServer::HandleExtra(TreeServer* newserver, Params& params)
+{
+	for (CommandBase::Params::const_iterator i = params.begin() + 2; i != params.end() - 1; ++i)
+	{
+		const std::string& prop = *i;
+		std::string::size_type p = prop.find('=');
+
+		std::string key = prop;
+		std::string val;
+		if (p != std::string::npos)
+		{
+			key.erase(p);
+			val.assign(prop, p+1, std::string::npos);
+		}
+
+		if (irc::equals(key, "burst"))
+			newserver->BeginBurst(ConvToNum<uint64_t>(val));
+		else if (irc::equals(key, "hidden"))
+			newserver->Hidden = ConvToNum<bool>(val);
+	}
+}
+
+std::shared_ptr<Link> TreeSocket::AuthRemote(const CommandBase::Params& params)
+{
+	size_t offset = proto_version == PROTO_INSPIRCD_3;
+	if (params.size() < 4+offset)
+	{
+		SendError("Protocol error - Not enough parameters for SERVER command");
+		return nullptr;
+	}
+
+	const std::string& sname = params[0];
+	const std::string& password = params[1];
+	const std::string& sid = params[2+offset];
+	const std::string& description = params.back();
+
+	this->SendCapabilities(2);
+
+	if (!InspIRCd::IsSID(sid))
+	{
+		this->SendError("Invalid format server ID: "+sid+"!");
+		return nullptr;
+	}
+
+	for (const auto& x : Utils->LinkBlocks)
+	{
+		if (!InspIRCd::Match(sname, x->Name))
+			continue;
+
+		if (!ComparePass(*x, password))
+		{
+			ServerInstance->SNO.WriteToSnoMask('l', "Invalid password on link: {}", x->Name);
+			continue;
+		}
+
+		if (!CheckDuplicate(sname, sid))
+			return nullptr;
+
+		const SSLIOHook* const ssliohook = SSLIOHook::IsSSL(this);
+		if (ssliohook)
+		{
+			std::string ciphersuite;
+			ssliohook->GetCiphersuite(ciphersuite);
+			ServerInstance->SNO.WriteToSnoMask('l', "Negotiated ciphersuite {} on link {}", ciphersuite, x->Name);
+		}
+		else if (!capab->remotesa.is_local())
+		{
+			this->SendError("Non-local server connections MUST be linked with SSL!");
+			return nullptr;
+		}
+
+		ServerInstance->SNO.WriteToSnoMask('l', "Verified server connection " + linkID + " ("+description+")");
+		return x;
+	}
+
+	this->SendError("Mismatched server name or password (check the other server's snomask output for details - e.g. user mode +s +Ll)");
+	ServerInstance->SNO.WriteToSnoMask('l', "Server connection from \002"+sname+"\002 denied, invalid link credentials");
+	return nullptr;
+}
 
 /*
  * This is used after the other side of a connection has accepted our credentials.
  * They are then introducing themselves to us, BEFORE either of us burst. -- w
  */
-bool TreeSocket::Outbound_Reply_Server(parameterlist &params)
+bool TreeSocket::Outbound_Reply_Server(CommandBase::Params& params)
 {
-	if (params.size() < 5)
+	const std::shared_ptr<Link> x = AuthRemote(params);
+	if (x)
 	{
-		SendError("Protocol error - Not enough parameters for SERVER command");
-		return false;
-	}
-
-	irc::string servername = params[0].c_str();
-	std::string sname = params[0];
-	std::string password = params[1];
-	std::string sid = params[3];
-	std::string description = params[4];
-	int hops = atoi(params[2].c_str());
-
-	this->SendCapabilities(2);
-
-	if (hops)
-	{
-		this->SendError("Server too far away for authentication");
-		ServerInstance->SNO->WriteToSnoMask('l',"Server connection from \2"+sname+"\2 denied, server is too far away for authentication");
-		return false;
-	}
-
-	if (!ServerInstance->IsSID(sid))
-	{
-		this->SendError("Invalid format server ID: "+sid+"!");
-		return false;
-	}
-
-	for (std::vector<reference<Link> >::iterator i = Utils->LinkBlocks.begin(); i < Utils->LinkBlocks.end(); i++)
-	{
-		Link* x = *i;
-		if (x->Name != servername && x->Name != "*") // open link allowance
-			continue;
-
-		if (!ComparePass(*x, password))
-		{
-			ServerInstance->SNO->WriteToSnoMask('l',"Invalid password on link: %s", x->Name.c_str());
-			continue;
-		}
-
-		TreeServer* CheckDupe = Utils->FindServer(sname);
-		if (CheckDupe)
-		{
-			std::string pname = CheckDupe->GetParent() ? CheckDupe->GetParent()->GetName() : "<ourself>";
-			SendError("Server "+sname+" already exists on server "+pname+"!");
-			ServerInstance->SNO->WriteToSnoMask('l',"Server connection from \2"+sname+"\2 denied, already exists on server "+pname);
-			return false;
-		}
-		CheckDupe = Utils->FindServer(sid);
-		if (CheckDupe)
-		{
-			this->SendError("Server ID "+sid+" already exists on the network! You may want to specify the server ID for the server manually with <server:id> so they do not conflict.");
-			ServerInstance->SNO->WriteToSnoMask('l',"Server \2"+assign(servername)+"\2 being introduced denied, server ID already exists on the network. Closing link.");
-			return false;
-		}
-
 		/*
 		 * They're in WAIT_AUTH_2 (having accepted our credentials).
 		 * Set our state to CONNECTED (since everything's peachy so far) and send our
@@ -158,49 +171,34 @@ bool TreeSocket::Outbound_Reply_Server(parameterlist &params)
 		 * While we're at it, create a treeserver object so we know about them.
 		 *   -- w
 		 */
-		this->LinkState = CONNECTED;
-
-		Utils->timeoutlist.erase(this);
-		linkID = sname;
-
-		MyRoot = new TreeServer(Utils, sname, description, sid, Utils->TreeRoot, this, x->Hidden);
-		Utils->TreeRoot->AddChild(MyRoot);
-		this->DoBurst(MyRoot);
-
-		params[4] = ":" + params[4];
-
-		/* IMPORTANT: Take password/hmac hash OUT of here before we broadcast the introduction! */
-		params[1] = "*";
-		Utils->DoOneToAllButSender(ServerInstance->Config->GetSID(),"SERVER",params,sname);
+		FinishAuth(params[0], params[proto_version == PROTO_INSPIRCD_3 ? 3 : 2], params.back(), x->Hidden);
 
 		return true;
 	}
 
-	this->SendError("Mismatched server name or password (check the other server's snomask output for details - e.g. umode +s +Ll)");
-	ServerInstance->SNO->WriteToSnoMask('l',"Server connection from \2"+sname+"\2 denied, invalid link credentials");
 	return false;
 }
 
 bool TreeSocket::CheckDuplicate(const std::string& sname, const std::string& sid)
 {
-	/* Check for fully initialized instances of the server by name */
+	// Check if the server name is not in use by a server that's already fully connected
 	TreeServer* CheckDupe = Utils->FindServer(sname);
 	if (CheckDupe)
 	{
 		std::string pname = CheckDupe->GetParent() ? CheckDupe->GetParent()->GetName() : "<ourself>";
 		SendError("Server "+sname+" already exists on server "+pname+"!");
-		ServerInstance->SNO->WriteToSnoMask('l',"Server connection from \2"+sname+"\2 denied, already exists on server "+pname);
+		ServerInstance->SNO.WriteToSnoMask('l', "Server connection from \002"+sname+"\002 denied, already exists on server "+pname);
 		return false;
 	}
 
-	/* Check for fully initialized instances of the server by id */
-	ServerInstance->Logs->Log("m_spanningtree",DEBUG,"Looking for dupe SID %s", sid.c_str());
+	// Check if the id is not in use by a server that's already fully connected
+	ServerInstance->Logs.Debug(MODNAME, "Looking for dupe SID {}", sid);
 	CheckDupe = Utils->FindServerID(sid);
 
 	if (CheckDupe)
 	{
-		this->SendError("Server ID "+CheckDupe->GetID()+" already exists on server "+CheckDupe->GetName()+"! You may want to specify the server ID for the server manually with <server:id> so they do not conflict.");
-		ServerInstance->SNO->WriteToSnoMask('l',"Server connection from \2"+sname+"\2 denied, server ID '"+CheckDupe->GetID()+
+		this->SendError("Server ID "+CheckDupe->GetId()+" already exists on server "+CheckDupe->GetName()+"! You may want to specify the server ID for the server manually with <server:id> so they do not conflict.");
+		ServerInstance->SNO.WriteToSnoMask('l', "Server connection from \002"+sname+"\002 denied, server ID '"+CheckDupe->GetId()+
 				"' already exists on server "+CheckDupe->GetName());
 		return false;
 	}
@@ -212,72 +210,42 @@ bool TreeSocket::CheckDuplicate(const std::string& sname, const std::string& sid
  * Someone else is attempting to connect to us if this is called. Validate their credentials etc.
  *		-- w
  */
-bool TreeSocket::Inbound_Server(parameterlist &params)
+bool TreeSocket::Inbound_Server(CommandBase::Params& params)
 {
-	if (params.size() < 5)
+	const std::shared_ptr<Link> x = AuthRemote(params);
+	if (x)
 	{
-		SendError("Protocol error - Missing SID");
-		return false;
-	}
-
-	irc::string servername = params[0].c_str();
-	std::string sname = params[0];
-	std::string password = params[1];
-	std::string sid = params[3];
-	std::string description = params[4];
-	int hops = atoi(params[2].c_str());
-
-	this->SendCapabilities(2);
-
-	if (hops)
-	{
-		this->SendError("Server too far away for authentication");
-		ServerInstance->SNO->WriteToSnoMask('l',"Server connection from \2"+sname+"\2 denied, server is too far away for authentication");
-		return false;
-	}
-
-	if (!ServerInstance->IsSID(sid))
-	{
-		this->SendError("Invalid format server ID: "+sid+"!");
-		return false;
-	}
-
-	for (std::vector<reference<Link> >::iterator i = Utils->LinkBlocks.begin(); i < Utils->LinkBlocks.end(); i++)
-	{
-		Link* x = *i;
-		if (x->Name != servername && x->Name != "*") // open link allowance
-			continue;
-
-		if (!ComparePass(*x, password))
-		{
-			ServerInstance->SNO->WriteToSnoMask('l',"Invalid password on link: %s", x->Name.c_str());
-			continue;
-		}
-
-		if (!CheckDuplicate(sname, sid))
-			return false;
-
-		ServerInstance->SNO->WriteToSnoMask('l',"Verified incoming server connection " + linkID + " ("+description+")");
-
-		this->SendCapabilities(2);
-
 		// Save these for later, so when they accept our credentials (indicated by BURST) we remember them
 		this->capab->hidden = x->Hidden;
-		this->capab->sid = sid;
-		this->capab->description = description;
-		this->capab->name = sname;
+		this->capab->sid = params[proto_version == PROTO_INSPIRCD_3 ? 3 : 2];
+		this->capab->description = params.back();
+		this->capab->name = params[0];
 
 		// Send our details: Our server name and description and hopcount of 0,
 		// along with the sendpass from this block.
-		this->WriteLine("SERVER "+ServerInstance->Config->ServerName+" "+this->MakePass(x->SendPass, this->GetTheirChallenge())+" 0 "+ServerInstance->Config->GetSID()+" :"+ServerInstance->Config->ServerDesc);
+		this->WriteLine(INSP_FORMAT("SERVER {} {} {}{} :{}",
+			ServerInstance->Config->ServerName,
+			TreeSocket::MakePass(x->SendPass, this->GetTheirChallenge()),
+			proto_version == PROTO_INSPIRCD_3 ? "0 " : "",
+			ServerInstance->Config->ServerId,
+			ServerInstance->Config->ServerDesc
+		));
 
 		// move to the next state, we are now waiting for THEM.
 		this->LinkState = WAIT_AUTH_2;
 		return true;
 	}
 
-	this->SendError("Mismatched server name or password (check the other server's snomask output for details - e.g. umode +s +Ll)");
-	ServerInstance->SNO->WriteToSnoMask('l',"Server connection from \2"+sname+"\2 denied, invalid link credentials");
 	return false;
 }
 
+CommandServer::Builder::Builder(TreeServer* server)
+	: CmdBuilder(server->GetParent(), "SERVER")
+{
+	push(server->GetName());
+	push(server->GetId());
+	if (server->IsBursting())
+		push_property("burst", ConvToStr(server->StartBurst));
+	push_property("hidden", ConvToStr(server->Hidden));
+	push_last(server->GetDesc());
+}

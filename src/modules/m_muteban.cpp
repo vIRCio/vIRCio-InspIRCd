@@ -1,6 +1,8 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
+ *   Copyright (C) 2017, 2019-2024 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2012, 2018 Robby <robby@chatbelgie.be>
  *   Copyright (C) 2009 Daniel De Graaf <danieldg@inspircd.org>
  *   Copyright (C) 2008 Robin Burchell <robin+git@viroteck.net>
  *
@@ -19,54 +21,87 @@
 
 
 #include "inspircd.h"
+#include "clientprotocolevent.h"
+#include "modules/ctctags.h"
+#include "modules/extban.h"
+#include "numerichelper.h"
 
-/* $ModDesc: Implements extban +b m: - mute bans */
-
-class ModuleQuietBan : public Module
+class ModuleQuietBan final
+	: public Module
+	, public CTCTags::EventListener
 {
- private:
- public:
-	void init()
+private:
+	ExtBan::Acting extban;
+	bool notifyuser;
+
+public:
+	ModuleQuietBan()
+		: Module(VF_VENDOR | VF_OPTCOMMON, "Adds extended ban m: (mute) which bans specific masks from speaking in a channel.")
+		, CTCTags::EventListener(this)
+		, extban(this, "mute", 'm')
 	{
-		Implementation eventlist[] = { I_OnUserPreMessage, I_OnUserPreNotice, I_On005Numeric };
-		ServerInstance->Modules->Attach(eventlist, this, sizeof(eventlist)/sizeof(Implementation));
 	}
 
-	virtual ~ModuleQuietBan()
+	void ReadConfig(ConfigStatus& status) override
 	{
+		const auto& tag = ServerInstance->Config->ConfValue("muteban");
+		notifyuser = tag->getBool("notifyuser", true);
 	}
 
-	virtual Version GetVersion()
+	ModResult HandleMessage(User* user, const MessageTarget& target, bool& echo_original)
 	{
-		return Version("Implements extban +b m: - mute bans",VF_OPTCOMMON|VF_VENDOR);
-	}
-
-	virtual ModResult OnUserPreMessage(User *user, void *dest, int target_type, std::string &text, char status, CUList &exempt_list)
-	{
-		if (!IS_LOCAL(user) || target_type != TYPE_CHANNEL)
+		if (!IS_LOCAL(user) || target.type != MessageTarget::TYPE_CHANNEL)
 			return MOD_RES_PASSTHRU;
 
-		Channel* chan = static_cast<Channel*>(dest);
-		if (chan->GetExtBanStatus(user, 'm') == MOD_RES_DENY && chan->GetPrefixValue(user) < VOICE_VALUE)
+		auto* chan = target.Get<Channel>();
+		if (extban.GetStatus(user, chan) == MOD_RES_DENY && chan->GetPrefixValue(user) < VOICE_VALUE)
 		{
-			user->WriteNumeric(404, "%s %s :Cannot send to channel (you're muted)", user->nick.c_str(), chan->name.c_str());
+			if (!notifyuser)
+			{
+				echo_original = true;
+				return MOD_RES_DENY;
+			}
+
+			user->WriteNumeric(Numerics::CannotSendTo(chan, "messages", extban));
 			return MOD_RES_DENY;
 		}
 
 		return MOD_RES_PASSTHRU;
 	}
 
-	virtual ModResult OnUserPreNotice(User *user, void *dest, int target_type, std::string &text, char status, CUList &exempt_list)
+	ModResult OnUserPreMessage(User* user, MessageTarget& target, MessageDetails& details) override
 	{
-		return OnUserPreMessage(user, dest, target_type, text, status, exempt_list);
+		return HandleMessage(user, target, details.echo_original);
 	}
 
-	virtual void On005Numeric(std::string &output)
+	ModResult OnUserPreTagMessage(User* user, MessageTarget& target, CTCTags::TagMessageDetails& details) override
 	{
-		ServerInstance->AddExtBanChar('m');
+		return HandleMessage(user, target, details.echo_original);
+	}
+
+	void OnUserPart(Membership* memb, std::string& partmessage, CUList& except_list) override
+	{
+		LocalUser* luser = IS_LOCAL(memb->user);
+		if (!luser)
+			return;
+
+		if (extban.GetStatus(memb->user, memb->chan) != MOD_RES_DENY)
+			return;
+
+		if (!notifyuser)
+		{
+			// Send fake part
+			const std::string oldreason = partmessage;
+			ClientProtocol::Messages::Part partmsg(memb, oldreason);
+			ClientProtocol::Event ev(ServerInstance->GetRFCEvents().part, partmsg);
+			luser->Send(ev);
+
+			// Don't send the user the changed message
+			except_list.insert(luser);
+			return;
+		}
+		partmessage.clear();
 	}
 };
 
-
 MODULE_INIT(ModuleQuietBan)
-

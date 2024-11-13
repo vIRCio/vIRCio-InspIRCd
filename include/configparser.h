@@ -1,7 +1,10 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
- *   Copyright (C) 2009 Daniel De Graaf <danieldg@inspircd.org>
+ *   Copyright (C) 2014 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2013, 2016, 2020-2023 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
+ *   Copyright (C) 2009-2010 Daniel De Graaf <danieldg@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -17,64 +20,21 @@
  */
 
 
-struct fpos
-{
-	std::string filename;
-	int line;
-	int col;
-	fpos(const std::string& name, int l = 1, int c = 1) : filename(name), line(l), col(c) {}
-	std::string str()
-	{
-		return filename + ":" + ConvToStr(line) + ":" + ConvToStr(col);
-	}
-};
+#pragma once
 
-enum ParseFlags
-{
-	FLAG_USE_XML = 1,
-	FLAG_NO_EXEC = 2,
-	FLAG_NO_INC = 4
-};
+typedef std::unique_ptr<FILE, int(*)(FILE*)> FilePtr;
 
-struct ParseStack
+struct ParseStack final
 {
 	std::vector<std::string> reading;
-	std::map<std::string, std::string> vars;
-	ConfigDataHash& output;
-	ConfigFileCache& FilesOutput;
+	insp::flat_map<std::string, std::string, irc::insensitive_swo> vars;
+	ServerConfig::TagMap& output;
+	ServerConfig::FileSource& FilesOutput;
 	std::stringstream& errstr;
 
-	ParseStack(ServerConfig* conf)
-		: output(conf->config_data), FilesOutput(conf->Files), errstr(conf->errstr)
-	{
-		vars["amp"] = "&";
-		vars["quot"] = "\"";
-		vars["newline"] = vars["nl"] = "\n";
-	}
-	bool ParseFile(const std::string& name, int flags, const std::string& mandatory_tag = "");
-	bool ParseExec(const std::string& name, int flags, const std::string& mandatory_tag = "");
-	void DoInclude(ConfigTag* includeTag, int flags);
+	ParseStack(ServerConfig* conf);
+	bool ParseFile(const std::string& name, int flags, const std::string& mandatory_tag = std::string(), bool isexec = false);
+	void DoInclude(const std::shared_ptr<ConfigTag>& includeTag, int flags);
 	void DoReadFile(const std::string& key, const std::string& file, int flags, bool exec);
+	static FilePtr DoOpenFile(const std::string& name, bool isexec);
 };
-
-/** RAII wrapper on FILE* to close files on exceptions */
-struct FileWrapper
-{
-	FILE* const f;
-	bool close_with_pclose;
-	FileWrapper(FILE* file, bool use_pclose = false) : f(file), close_with_pclose(use_pclose) {}
-	operator bool() { return (f != NULL); }
-	operator FILE*() { return f; }
-	~FileWrapper()
-	{
-		if (f)
-		{
-			if (close_with_pclose)
-				pclose(f);
-			else
-				fclose(f);
-		}
-	}
-};
-
-

@@ -1,13 +1,19 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
+ *   Copyright (C) 2021 Dominic Hamon
+ *   Copyright (C) 2018 linuxdaemon <linuxdaemon.irc@gmail.com>
+ *   Copyright (C) 2016 Adam <Adam@anope.org>
+ *   Copyright (C) 2013, 2017-2024 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2012-2016 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2012, 2019 Robby <robby@chatbelgie.be>
+ *   Copyright (C) 2009 Matt Smith <dz@inspircd.org>
  *   Copyright (C) 2009 Daniel De Graaf <danieldg@inspircd.org>
- *   Copyright (C) 2008 John Brooks <john.brooks@dereferenced.net>
- *   Copyright (C) 2008 Pippijn van Steenhoven <pip88nl@gmail.com>
- *   Copyright (C) 2006-2008 Craig Edwards <craigedwards@brainbox.cc>
+ *   Copyright (C) 2008 John Brooks <john@jbrooks.io>
+ *   Copyright (C) 2008 Craig Edwards <brain@inspircd.org>
  *   Copyright (C) 2007-2008 Robin Burchell <robin+git@viroteck.net>
- *   Copyright (C) 2007 Dennis Friis <peavey@inspircd.org>
- *   Copyright (C) 2006 Jamie ??? <???@???>
+ *   Copyright (C) 2007-2008 Dennis Friis <peavey@inspircd.org>
+ *   Copyright (C) 2006 jamie
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -24,27 +30,75 @@
 
 
 #include "inspircd.h"
+#include "extension.h"
+#include "numerichelper.h"
+#include "timeutils.h"
 
-/* $ModDesc: Provides support for the /DCCALLOW command */
-
-class BannedFileList
+enum
 {
- public:
+	// From ircd-ratbox.
+	RPL_HELPSTART = 704,
+	RPL_HELPTXT = 705,
+	RPL_ENDOFHELP = 706,
+
+	// InspIRCd-specific?
+	RPL_DCCALLOWSTART = 990,
+	RPL_DCCALLOWLIST = 991,
+	RPL_DCCALLOWEND = 992,
+	RPL_DCCALLOWTIMED = 993,
+	RPL_DCCALLOWPERMANENT = 994,
+	RPL_DCCALLOWREMOVED = 995,
+	ERR_DCCALLOWINVALID = 996,
+	RPL_DCCALLOWEXPIRED = 997,
+	ERR_UNKNOWNDCCALLOWCMD = 998
+};
+
+static const char* const helptext[] =
+{
+	"You may allow DCCs from specific users by specifying a",
+	"DCC allow for the user you want to receive DCCs from.",
+	"For example, to allow the user Brain to send you inspircd.exe",
+	"you would type:",
+	"/DCCALLOW +Brain",
+	"Brain would then be able to send you files. They would have to",
+	"resend the file again if the server gave them an error message",
+	"before you added them to your DCCALLOW list.",
+	"DCCALLOW entries will be temporary. If you want to add",
+	"them to your DCCALLOW list until you leave IRC, type:",
+	"/DCCALLOW +Brain 0",
+	"To remove the user from your DCCALLOW list, type:",
+	"/DCCALLOW -Brain",
+	"To see the users in your DCCALLOW list, type:",
+	"/DCCALLOW LIST",
+	"NOTE: If the user leaves IRC or changes their nickname",
+	"  they will be removed from your DCCALLOW list.",
+	"  Your DCCALLOW list will be deleted when you leave IRC."
+};
+
+class BannedFileList final
+{
+public:
 	std::string filemask;
 	std::string action;
 };
 
-class DCCAllow
+class DCCAllow final
 {
- public:
+public:
 	std::string nickname;
 	std::string hostmask;
 	time_t set_on;
-	long length;
+	unsigned long length;
 
-	DCCAllow() { }
+	DCCAllow() = default;
 
-	DCCAllow(const std::string &nick, const std::string &hm, const time_t so, const long ln) : nickname(nick), hostmask(hm), set_on(so), length(ln) { }
+	DCCAllow(const std::string& nick, const std::string& hm, time_t so, unsigned long ln)
+		: nickname(nick)
+		, hostmask(hm)
+		, set_on(so)
+		, length(ln)
+	{
+	}
 };
 
 typedef std::vector<User *> userlist;
@@ -53,63 +107,149 @@ typedef std::vector<DCCAllow> dccallowlist;
 dccallowlist* dl;
 typedef std::vector<BannedFileList> bannedfilelist;
 bannedfilelist bfl;
-SimpleExtItem<dccallowlist>* ext;
 
-class CommandDccallow : public Command
+class DCCAllowExt final
+	: public SimpleExtItem<dccallowlist>
 {
- public:
-	unsigned int maxentries;
-	CommandDccallow(Module* parent) : Command(parent, "DCCALLOW", 0)
+public:
+	unsigned long maxentries;
+
+	DCCAllowExt(Module* Creator)
+		: SimpleExtItem<dccallowlist>(Creator, "dccallow", ExtensionType::USER)
 	{
-		syntax = "[(+|-)<nick> [<time>]]|[LIST|HELP]";
-		/* XXX we need to fix this so it can work with translation stuff (i.e. move +- into a seperate param */
 	}
 
-	CmdResult Handle(const std::vector<std::string> &parameters, User *user)
+	void FromInternal(Extensible* container, const std::string& value) noexcept override
 	{
-		/* syntax: DCCALLOW [+|-]<nick> (<time>) */
-		if (!parameters.size())
+		if (container->extype != this->extype)
+			return;
+
+		LocalUser* user = IS_LOCAL(static_cast<User*>(container));
+		if (!user)
+			return;
+
+		// Remove the old list and create a new one.
+		Unset(user, false);
+		auto* list = new dccallowlist();
+
+		irc::spacesepstream ts(value);
+		while (!ts.StreamEnd())
+		{
+			// Check we have space for another entry.
+			if (list->size() >= maxentries)
+			{
+				ServerInstance->Logs.Debug(MODNAME, "Oversized DCC allow list received for {}: {}",
+					user->uuid, value);
+				delete list;
+				return;
+			}
+
+			// Extract the fields.
+			DCCAllow dccallow;
+			if (!ts.GetToken(dccallow.nickname) ||
+				!ts.GetToken(dccallow.hostmask) ||
+				!ts.GetNumericToken(dccallow.set_on) ||
+				!ts.GetNumericToken(dccallow.length))
+			{
+				ServerInstance->Logs.Debug(MODNAME, "Malformed DCC allow list received for {}: {}",
+					user->uuid, value);
+				delete list;
+				return;
+			}
+
+			// Store the DCC allow entry.
+			list->push_back(dccallow);
+		}
+
+		// If we have an empty list then don't store it.
+		if (list->empty())
+		{
+			delete list;
+			return;
+		}
+
+		// The value was well formed.
+		Set(user, list);
+	}
+
+	std::string ToInternal(const Extensible* container, void* item) const noexcept override
+	{
+		dccallowlist* list = static_cast<dccallowlist*>(item);
+		std::string buf;
+		for (dccallowlist::const_iterator iter = list->begin(); iter != list->end(); ++iter)
+		{
+			if (iter != list->begin())
+				buf.push_back(' ');
+
+			buf.append(iter->nickname);
+			buf.push_back(' ');
+			buf.append(iter->hostmask);
+			buf.push_back(' ');
+			buf.append(ConvToStr(iter->set_on));
+			buf.push_back(' ');
+			buf.append(ConvToStr(iter->length));
+		}
+		return buf;
+	}
+};
+
+class CommandDccallow final
+	: public Command
+{
+public:
+	DCCAllowExt& ext;
+	unsigned long defaultlength;
+	CommandDccallow(Module* parent, DCCAllowExt& Ext)
+		: Command(parent, "DCCALLOW", 0)
+		, ext(Ext)
+	{
+		syntax = { "[(+|-)<nick> [<time>]]", "LIST", "HELP" };
+		/* XXX we need to fix this so it can work with translation stuff (i.e. move +- into a separate param */
+	}
+
+	CmdResult Handle(User* user, const Params& parameters) override
+	{
+		/* syntax: DCCALLOW [(+|-)<nick> [<time>]]|[LIST|HELP] */
+		if (parameters.empty())
 		{
 			// display current DCCALLOW list
 			DisplayDCCAllowList(user);
-			return CMD_FAILURE;
+			return CmdResult::FAILURE;
 		}
-		else if (parameters.size() > 0)
+		else
 		{
-			char action = *parameters[0].c_str();
+			char action = parameters[0][0];
 
 			// if they didn't specify an action, this is probably a command
 			if (action != '+' && action != '-')
 			{
-				if (!strcasecmp(parameters[0].c_str(), "LIST"))
+				if (irc::equals(parameters[0], "LIST"))
 				{
 					// list current DCCALLOW list
 					DisplayDCCAllowList(user);
-					return CMD_FAILURE;
+					return CmdResult::FAILURE;
 				}
-				else if (!strcasecmp(parameters[0].c_str(), "HELP"))
+				else if (irc::equals(parameters[0], "HELP"))
 				{
 					// display help
 					DisplayHelp(user);
-					return CMD_FAILURE;
+					return CmdResult::FAILURE;
 				}
 				else
 				{
-					user->WriteNumeric(998, "%s :DCCALLOW command not understood. For help on DCCALLOW, type /DCCALLOW HELP", user->nick.c_str());
-					return CMD_FAILURE;
+					user->WriteNumeric(ERR_UNKNOWNDCCALLOWCMD, "DCCALLOW command not understood. For help on DCCALLOW, type /DCCALLOW HELP");
+					return CmdResult::FAILURE;
 				}
 			}
 
-			std::string nick = parameters[0].substr(1);
-			User *target = ServerInstance->FindNickOnly(nick);
-
-			if ((target) && (!IS_SERVER(target)) && (!target->quitting) && (target->registered == REG_ALL))
+			std::string nick(parameters[0], 1);
+			auto* target = ServerInstance->Users.FindNick(nick, true);
+			if (target && !target->quitting)
 			{
-
 				if (action == '-')
 				{
 					// check if it contains any entries
-					dl = ext->get(user);
+					dl = ext.Get(user);
 					if (dl)
 					{
 						for (dccallowlist::iterator i = dl->begin(); i != dl->end(); ++i)
@@ -118,7 +258,7 @@ class CommandDccallow : public Command
 							if (i->nickname == target->nick)
 							{
 								dl->erase(i);
-								user->WriteNumeric(995, "%s %s :Removed %s from your DCCALLOW list", user->nick.c_str(), user->nick.c_str(), target->nick.c_str());
+								user->WriteNumeric(RPL_DCCALLOWREMOVED, user->nick, INSP_FORMAT("Removed {} from your DCCALLOW list", target->nick));
 								break;
 							}
 						}
@@ -128,108 +268,95 @@ class CommandDccallow : public Command
 				{
 					if (target == user)
 					{
-						user->WriteNumeric(996, "%s %s :You cannot add yourself to your own DCCALLOW list!", user->nick.c_str(), user->nick.c_str());
-						return CMD_FAILURE;
+						user->WriteNumeric(ERR_DCCALLOWINVALID, user->nick, "You cannot add yourself to your own DCCALLOW list!");
+						return CmdResult::FAILURE;
 					}
 
-					dl = ext->get(user);
+					dl = ext.Get(user);
 					if (!dl)
 					{
 						dl = new dccallowlist;
-						ext->set(user, dl);
+						ext.Set(user, dl);
 						// add this user to the userlist
 						ul.push_back(user);
 					}
 
-					if (dl->size() >= maxentries)
+					if (dl->size() >= ext.maxentries)
 					{
-						user->WriteNumeric(996, "%s %s :Too many nicks on DCCALLOW list", user->nick.c_str(), user->nick.c_str());
-						return CMD_FAILURE;
+						user->WriteNumeric(ERR_DCCALLOWINVALID, user->nick, "Too many nicks on DCCALLOW list");
+						return CmdResult::FAILURE;
 					}
 
-					for (dccallowlist::const_iterator k = dl->begin(); k != dl->end(); ++k)
+					for (const auto& dccallow : *dl)
 					{
-						if (k->nickname == target->nick)
+						if (dccallow.nickname == target->nick)
 						{
-							user->WriteNumeric(996, "%s %s :%s is already on your DCCALLOW list", user->nick.c_str(), user->nick.c_str(), target->nick.c_str());
-							return CMD_FAILURE;
+							user->WriteNumeric(ERR_DCCALLOWINVALID, user->nick, INSP_FORMAT("{} is already on your DCCALLOW list", target->nick));
+							return CmdResult::FAILURE;
 						}
 					}
 
-					std::string mask = target->nick+"!"+target->ident+"@"+target->dhost;
-					std::string default_length = ServerInstance->Config->ConfValue("dccallow")->getString("length");
-
-					long length;
+					std::string mask = target->GetMask();
+					unsigned long length;
 					if (parameters.size() < 2)
 					{
-						length = ServerInstance->Duration(default_length);
+						length = defaultlength;
 					}
-					else if (!atoi(parameters[1].c_str()))
+					else if (!Duration::IsValid(parameters[1]))
 					{
-						length = 0;
+						user->WriteNumeric(ERR_DCCALLOWINVALID, user->nick, INSP_FORMAT("{} is not a valid DCCALLOW duration", parameters[1]));
+						return CmdResult::FAILURE;
 					}
 					else
 					{
-						length = ServerInstance->Duration(parameters[1]);
+						if (!Duration::TryFrom(parameters[1], length))
+						{
+							user->WriteNotice("*** Invalid duration for DCC allow");
+							return CmdResult::FAILURE;
+						}
 					}
 
-					if (!ServerInstance->IsValidMask(mask))
+					if (!InspIRCd::IsValidMask(mask))
 					{
-						return CMD_FAILURE;
+						return CmdResult::FAILURE;
 					}
 
-					dl->push_back(DCCAllow(target->nick, mask, ServerInstance->Time(), length));
+					dl->emplace_back(target->nick, mask, ServerInstance->Time(), length);
 
 					if (length > 0)
 					{
-						user->WriteNumeric(993, "%s %s :Added %s to DCCALLOW list for %ld seconds", user->nick.c_str(), user->nick.c_str(), target->nick.c_str(), length);
+						user->WriteNumeric(RPL_DCCALLOWTIMED, user->nick, INSP_FORMAT("Added {} to DCCALLOW list for {}", target->nick, Duration::ToString(length)));
 					}
 					else
 					{
-						user->WriteNumeric(994, "%s %s :Added %s to DCCALLOW list for this session", user->nick.c_str(), user->nick.c_str(), target->nick.c_str());
+						user->WriteNumeric(RPL_DCCALLOWPERMANENT, user->nick, INSP_FORMAT("Added {} to DCCALLOW list for this session", target->nick));
 					}
 
 					/* route it. */
-					return CMD_SUCCESS;
+					return CmdResult::SUCCESS;
 				}
 			}
 			else
 			{
 				// nick doesn't exist
-				user->WriteNumeric(401, "%s %s :No such nick/channel", user->nick.c_str(), nick.c_str());
-				return CMD_FAILURE;
+				user->WriteNumeric(Numerics::NoSuchNick(nick));
+				return CmdResult::FAILURE;
 			}
 		}
-		return CMD_FAILURE;
+		return CmdResult::FAILURE;
 	}
 
-	RouteDescriptor GetRouting(User* user, const std::vector<std::string>& parameters)
+	RouteDescriptor GetRouting(User* user, const Params& parameters) override
 	{
 		return ROUTE_BROADCAST;
 	}
 
-	void DisplayHelp(User* user)
+	static void DisplayHelp(User* user)
 	{
-		user->WriteNumeric(998, "%s :DCCALLOW [(+|-)<nick> [<time>]]|[LIST|HELP]", user->nick.c_str());
-		user->WriteNumeric(998, "%s :You may allow DCCs from specific users by specifying a", user->nick.c_str());
-		user->WriteNumeric(998, "%s :DCC allow for the user you want to receive DCCs from.", user->nick.c_str());
-		user->WriteNumeric(998, "%s :For example, to allow the user Brain to send you inspircd.exe", user->nick.c_str());
-		user->WriteNumeric(998, "%s :you would type:", user->nick.c_str());
-		user->WriteNumeric(998, "%s :/DCCALLOW +Brain", user->nick.c_str());
-		user->WriteNumeric(998, "%s :Brain would then be able to send you files. They would have to", user->nick.c_str());
-		user->WriteNumeric(998, "%s :resend the file again if the server gave them an error message", user->nick.c_str());
-		user->WriteNumeric(998, "%s :before you added them to your DCCALLOW list.", user->nick.c_str());
-		user->WriteNumeric(998, "%s :DCCALLOW entries will be temporary by default, if you want to add", user->nick.c_str());
-		user->WriteNumeric(998, "%s :them to your DCCALLOW list until you leave IRC, type:", user->nick.c_str());
-		user->WriteNumeric(998, "%s :/DCCALLOW +Brain 0", user->nick.c_str());
-		user->WriteNumeric(998, "%s :To remove the user from your DCCALLOW list, type:", user->nick.c_str());
-		user->WriteNumeric(998, "%s :/DCCALLOW -Brain", user->nick.c_str());
-		user->WriteNumeric(998, "%s :To see the users in your DCCALLOW list, type:", user->nick.c_str());
-		user->WriteNumeric(998, "%s :/DCCALLOW LIST", user->nick.c_str());
-		user->WriteNumeric(998, "%s :NOTE: If the user leaves IRC or changes their nickname", user->nick.c_str());
-		user->WriteNumeric(998, "%s :  they will be removed from your DCCALLOW list.", user->nick.c_str());
-		user->WriteNumeric(998, "%s :  your DCCALLOW list will be deleted when you leave IRC.", user->nick.c_str());
-		user->WriteNumeric(999, "%s :End of DCCALLOW HELP", user->nick.c_str());
+		user->WriteNumeric(RPL_HELPSTART, "*", "DCCALLOW [(+|-)<nick> [<time>]]|[LIST|HELP]");
+		for (const auto& helpline : helptext)
+			user->WriteNumeric(RPL_HELPTXT, "*", helpline);
+		user->WriteNumeric(RPL_ENDOFHELP, "*", "End of DCCALLOW HELP");
 
 		LocalUser* localuser = IS_LOCAL(user);
 		if (localuser)
@@ -238,123 +365,104 @@ class CommandDccallow : public Command
 
 	void DisplayDCCAllowList(User* user)
 	{
-		 // display current DCCALLOW list
-		user->WriteNumeric(990, "%s :Users on your DCCALLOW list:", user->nick.c_str());
+		// display current DCCALLOW list
+		user->WriteNumeric(RPL_DCCALLOWSTART, "Users on your DCCALLOW list:");
 
-		dl = ext->get(user);
+		dl = ext.Get(user);
 		if (dl)
 		{
-			for (dccallowlist::const_iterator c = dl->begin(); c != dl->end(); ++c)
+			for (const auto& dccallow : *dl)
 			{
-				user->WriteNumeric(991, "%s %s :%s (%s)", user->nick.c_str(), user->nick.c_str(), c->nickname.c_str(), c->hostmask.c_str());
+				user->WriteNumeric(RPL_DCCALLOWLIST, user->nick, INSP_FORMAT("{} ({})",
+					dccallow.nickname, dccallow.hostmask));
 			}
 		}
 
-		user->WriteNumeric(992, "%s :End of DCCALLOW list", user->nick.c_str());
+		user->WriteNumeric(RPL_DCCALLOWEND, "End of DCCALLOW list");
 	}
 
 };
 
-class ModuleDCCAllow : public Module
+class ModuleDCCAllow final
+	: public Module
 {
+private:
+	DCCAllowExt ext;
 	CommandDccallow cmd;
- public:
+	bool blockchat = false;
+	std::string defaultaction;
 
+public:
 	ModuleDCCAllow()
-		: cmd(this)
+		: Module(VF_VENDOR | VF_COMMON, "Allows the server administrator to configure what files are allowed to be sent via DCC SEND and allows users to configure who can send them DCC CHAT and DCC SEND requests.")
+		, ext(this)
+		, cmd(this, ext)
 	{
-		ext = NULL;
 	}
 
-	void init()
+	void OnUserQuit(User* user, const std::string& reason, const std::string& oper_message) override
 	{
-		ext = new SimpleExtItem<dccallowlist>("dccallow", this);
-		ServerInstance->Modules->AddService(*ext);
-		ServerInstance->Modules->AddService(cmd);
-		OnRehash(NULL);
-		Implementation eventlist[] = { I_OnUserPreMessage, I_OnUserPreNotice, I_OnUserQuit, I_OnUserPostNick, I_OnRehash };
-		ServerInstance->Modules->Attach(eventlist, this, sizeof(eventlist)/sizeof(Implementation));
-	}
-
-	virtual void OnRehash(User* user)
-	{
-		ReadFileConf();
-		ConfigTag* tag = ServerInstance->Config->ConfValue("dccallow");
-		cmd.maxentries = tag->getInt("maxentries", 20);
-	}
-
-	virtual void OnUserQuit(User* user, const std::string &reason, const std::string &oper_message)
-	{
-		dccallowlist* udl = ext->get(user);
+		dccallowlist* udl = ext.Get(user);
 
 		// remove their DCCALLOW list if they have one
 		if (udl)
-		{
-			userlist::iterator it = std::find(ul.begin(), ul.end(), user);
-			if (it != ul.end())
-				ul.erase(it);
-		}
+			stdalgo::erase(ul, user);
 
 		// remove them from any DCCALLOW lists
 		// they are currently on
 		RemoveNick(user);
 	}
 
-	virtual void OnUserPostNick(User* user, const std::string &oldnick)
+	void OnUserPostNick(User* user, const std::string& oldnick) override
 	{
 		RemoveNick(user);
 	}
 
-	virtual ModResult OnUserPreMessage(User* user, void* dest, int target_type, std::string &text, char status, CUList &exempt_list)
-	{
-		return OnUserPreNotice(user, dest, target_type, text, status, exempt_list);
-	}
-
-	virtual ModResult OnUserPreNotice(User* user, void* dest, int target_type, std::string &text, char status, CUList &exempt_list)
+	ModResult OnUserPreMessage(User* user, MessageTarget& target, MessageDetails& details) override
 	{
 		if (!IS_LOCAL(user))
 			return MOD_RES_PASSTHRU;
 
-		if (target_type == TYPE_USER)
+		if (target.type == MessageTarget::TYPE_USER)
 		{
-			User* u = (User*)dest;
+			auto* u = target.Get<User>();
 
 			/* Always allow a user to dcc themselves (although... why?) */
 			if (user == u)
 				return MOD_RES_PASSTHRU;
 
-			if ((text.length()) && (text[0] == '\1'))
+			std::string_view ctcpname;
+			std::string_view ctcpbody;
+			if (details.IsCTCP(ctcpname, ctcpbody))
 			{
 				Expire();
 
 				// :jamie!jamie@test-D4457903BA652E0F.silverdream.org PRIVMSG eimaj :DCC SEND m_dnsbl.cpp 3232235786 52650 9676
 				// :jamie!jamie@test-D4457903BA652E0F.silverdream.org PRIVMSG eimaj :VERSION
 
-				if (strncmp(text.c_str(), "\1DCC ", 5) == 0)
+				if (irc::equals(ctcpname, "DCC") && !ctcpbody.empty())
 				{
-					dl = ext->get(u);
-					if (dl && dl->size())
+					dl = ext.Get(u);
+					if (dl && !dl->empty())
 					{
-						for (dccallowlist::const_iterator iter = dl->begin(); iter != dl->end(); ++iter)
-							if (InspIRCd::Match(user->GetFullHost(), iter->hostmask))
+						for (const auto& dccallow : *dl)
+						{
+							if (InspIRCd::Match(user->GetMask(), dccallow.hostmask))
 								return MOD_RES_PASSTHRU;
+						}
 					}
 
-					std::string buf = text.substr(5);
-					size_t s = buf.find(' ');
+					size_t s = ctcpbody.find(' ');
 					if (s == std::string::npos)
 						return MOD_RES_PASSTHRU;
 
-					irc::string type = assign(buf.substr(0, s));
+					const std::string type = std::string(ctcpbody).substr(0, s);
 
-					ConfigTag* conftag = ServerInstance->Config->ConfValue("dccallow");
-					bool blockchat = conftag->getBool("blockchat");
-
-					if (type == "SEND")
+					if (irc::equals(type, "SEND"))
 					{
 						size_t first;
 
-						buf = buf.substr(s + 1);
+						std::string buf = std::string(ctcpbody).substr(s + 1);
 
 						if (!buf.empty() && buf[0] == '"')
 						{
@@ -375,16 +483,15 @@ class ModuleDCCAllow : public Module
 						if (s == std::string::npos)
 							return MOD_RES_PASSTHRU;
 
-						std::string defaultaction = conftag->getString("action");
 						std::string filename = buf.substr(first, s);
 
 						bool found = false;
-						for (unsigned int i = 0; i < bfl.size(); i++)
+						for (const auto& bf : bfl)
 						{
-							if (InspIRCd::Match(filename, bfl[i].filemask, ascii_case_insensitive_map))
+							if (InspIRCd::Match(filename, bf.filemask, ascii_case_insensitive_map))
 							{
 								/* We have a matching badfile entry, override whatever the default action is */
-								if (bfl[i].action == "allow")
+								if (insp::equalsci(bf.action, "allow"))
 									return MOD_RES_PASSTHRU;
 								else
 								{
@@ -398,16 +505,16 @@ class ModuleDCCAllow : public Module
 						if ((!found) && (defaultaction == "allow"))
 							return MOD_RES_PASSTHRU;
 
-						user->WriteServ("NOTICE %s :The user %s is not accepting DCC SENDs from you. Your file %s was not sent.", user->nick.c_str(), u->nick.c_str(), filename.c_str());
-						u->WriteServ("NOTICE %s :%s (%s@%s) attempted to send you a file named %s, which was blocked.", u->nick.c_str(), user->nick.c_str(), user->ident.c_str(), user->dhost.c_str(), filename.c_str());
-						u->WriteServ("NOTICE %s :If you trust %s and were expecting this, you can type /DCCALLOW HELP for information on the DCCALLOW system.", u->nick.c_str(), user->nick.c_str());
+						user->WriteNotice("The user " + u->nick + " is not accepting DCC SENDs from you. Your file " + filename + " was not sent.");
+						u->WriteNotice(user->nick + " (" + user->GetUserHost() + ") attempted to send you a file named " + filename + ", which was blocked.");
+						u->WriteNotice("If you trust " + user->nick + " and were expecting this, you can type /DCCALLOW HELP for information on the DCCALLOW system.");
 						return MOD_RES_DENY;
 					}
-					else if ((type == "CHAT") && (blockchat))
+					else if (blockchat && irc::equals(type, "CHAT"))
 					{
-						user->WriteServ("NOTICE %s :The user %s is not accepting DCC CHAT requests from you.", user->nick.c_str(), u->nick.c_str());
-						u->WriteServ("NOTICE %s :%s (%s@%s) attempted to initiate a DCC CHAT session, which was blocked.", u->nick.c_str(), user->nick.c_str(), user->ident.c_str(), user->dhost.c_str());
-						u->WriteServ("NOTICE %s :If you trust %s and were expecting this, you can type /DCCALLOW HELP for information on the DCCALLOW system.", u->nick.c_str(), user->nick.c_str());
+						user->WriteNotice("The user " + u->nick + " is not accepting DCC CHAT requests from you.");
+						u->WriteNotice(user->nick + " (" + user->GetUserHost() + ") attempted to initiate a DCC CHAT session, which was blocked.");
+						u->WriteNotice("If you trust " + user->nick + " and were expecting this, you can type /DCCALLOW HELP for information on the DCCALLOW system.");
 						return MOD_RES_DENY;
 					}
 				}
@@ -421,17 +528,18 @@ class ModuleDCCAllow : public Module
 		for (userlist::iterator iter = ul.begin(); iter != ul.end();)
 		{
 			User* u = (User*)(*iter);
-			dl = ext->get(u);
+			dl = ext.Get(u);
 			if (dl)
 			{
-				if (dl->size())
+				if (!dl->empty())
 				{
 					dccallowlist::iterator iter2 = dl->begin();
 					while (iter2 != dl->end())
 					{
-						if (iter2->length != 0 && (iter2->set_on + iter2->length) <= ServerInstance->Time())
+						time_t expires = iter2->set_on + iter2->length;
+						if (iter2->length != 0 && expires <= ServerInstance->Time())
 						{
-							u->WriteNumeric(997, "%s %s :DCCALLOW entry for %s has expired", u->nick.c_str(), u->nick.c_str(), iter2->nickname.c_str());
+							u->WriteNumeric(RPL_DCCALLOWEXPIRED, u->nick, INSP_FORMAT("DCCALLOW entry for {} has expired", iter2->nickname));
 							iter2 = dl->erase(iter2);
 						}
 						else
@@ -454,19 +562,19 @@ class ModuleDCCAllow : public Module
 		/* Iterate through all DCCALLOW lists and remove user */
 		for (userlist::iterator iter = ul.begin(); iter != ul.end();)
 		{
-			User *u = (User*)(*iter);
-			dl = ext->get(u);
+			User* u = (User*)(*iter);
+			dl = ext.Get(u);
 			if (dl)
 			{
-				if (dl->size())
+				if (!dl->empty())
 				{
 					for (dccallowlist::iterator i = dl->begin(); i != dl->end(); ++i)
 					{
 						if (i->nickname == user->nick)
 						{
 
-							u->WriteServ("NOTICE %s :%s left the network or changed their nickname and has been removed from your DCCALLOW list", u->nick.c_str(), i->nickname.c_str());
-							u->WriteNumeric(995, "%s %s :Removed %s from your DCCALLOW list", u->nick.c_str(), u->nick.c_str(), i->nickname.c_str());
+							u->WriteNotice(i->nickname + " left the network or changed their nickname and has been removed from your DCCALLOW list");
+							u->WriteNumeric(RPL_DCCALLOWREMOVED, u->nick, INSP_FORMAT("Removed {} from your DCCALLOW list", i->nickname));
 							dl->erase(i);
 							break;
 						}
@@ -481,7 +589,7 @@ class ModuleDCCAllow : public Module
 		}
 	}
 
-	void RemoveFromUserlist(User *user)
+	static void RemoveFromUserlist(User* user)
 	{
 		// remove user from userlist
 		for (userlist::iterator j = ul.begin(); j != ul.end(); ++j)
@@ -495,27 +603,24 @@ class ModuleDCCAllow : public Module
 		}
 	}
 
-	void ReadFileConf()
+	void ReadConfig(ConfigStatus& status) override
 	{
-		bfl.clear();
-		ConfigTagList tags = ServerInstance->Config->ConfTags("banfile");
-		for (ConfigIter i = tags.first; i != tags.second; ++i)
+		bannedfilelist newbfl;
+
+		for (const auto& [_, tag] : ServerInstance->Config->ConfTags("banfile"))
 		{
 			BannedFileList bf;
-			bf.filemask = i->second->getString("pattern");
-			bf.action = i->second->getString("action");
-			bfl.push_back(bf);
+			bf.filemask = tag->getString("pattern");
+			bf.action = tag->getString("action");
+			newbfl.push_back(bf);
 		}
-	}
+		bfl.swap(newbfl);
 
-	virtual ~ModuleDCCAllow()
-	{
-		delete ext;
-	}
-
-	virtual Version GetVersion()
-	{
-		return Version("Provides support for the /DCCALLOW command", VF_COMMON | VF_VENDOR);
+		const auto& tag = ServerInstance->Config->ConfValue("dccallow");
+		cmd.ext.maxentries = tag->getNum<unsigned long>("maxentries", 20, 1);
+		cmd.defaultlength = tag->getDuration("length", 0);
+		blockchat = tag->getBool("blockchat");
+		defaultaction = tag->getString("action");
 	}
 };
 

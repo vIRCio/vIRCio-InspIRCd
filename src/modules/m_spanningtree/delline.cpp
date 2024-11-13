@@ -1,6 +1,12 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
+ *   Copyright (C) 2019 Matt Schatz <genius3000@g3k.solutions>
+ *   Copyright (C) 2018, 2020, 2023 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2013, 2015 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
+ *   Copyright (C) 2009 Uli Schlachter <psychon@znc.in>
+ *   Copyright (C) 2009 Daniel De Graaf <danieldg@inspircd.org>
  *   Copyright (C) 2008 Robin Burchell <robin+git@viroteck.net>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
@@ -20,38 +26,19 @@
 #include "inspircd.h"
 #include "xline.h"
 
-#include "treesocket.h"
-#include "treeserver.h"
-#include "utils.h"
+#include "commands.h"
 
-/* $ModDep: m_spanningtree/utils.h m_spanningtree/treeserver.h m_spanningtree/treesocket.h */
-
-
-bool TreeSocket::DelLine(const std::string &prefix, parameterlist &params)
+CmdResult CommandDelLine::Handle(User* user, Params& params)
 {
-	if (params.size() < 2)
-		return true;
+	const std::string& setter = user->nick;
+	std::string reason;
 
-	std::string setter = "<unknown>";
-
-	User* user = ServerInstance->FindNick(prefix);
-	if (user)
-		setter = user->nick;
-	else
+	// XLineManager::DelLine() returns true if the xline existed, false if it didn't
+	if (ServerInstance->XLines->DelLine(params[1], params[0], reason, user))
 	{
-		TreeServer* t = Utils->FindServer(prefix);
-		if (t)
-			setter = t->GetName();
+		ServerInstance->SNO.WriteToSnoMask('X', "{} removed {}{} on {}: {}", setter,
+			params[0], params[0].length() <= 2 ? "-line" : "", params[1], reason);
+		return CmdResult::SUCCESS;
 	}
-
-
-	/* NOTE: No check needed on 'user', this function safely handles NULL */
-	if (ServerInstance->XLines->DelLine(params[1].c_str(), params[0], user))
-	{
-		ServerInstance->SNO->WriteToSnoMask('X',"%s removed %s%s on %s", setter.c_str(),
-				params[0].c_str(), params[0].length() == 1 ? "-line" : "", params[1].c_str());
-		Utils->DoOneToAllButSender(prefix,"DELLINE", params, prefix);
-	}
-	return true;
+	return CmdResult::FAILURE;
 }
-

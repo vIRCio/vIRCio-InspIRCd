@@ -1,7 +1,12 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
- *   Copyright (C) 2008 Craig Edwards <craigedwards@brainbox.cc>
+ *   Copyright (C) 2013, 2019-2021 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2012-2013 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
+ *   Copyright (C) 2009-2010 Daniel De Graaf <danieldg@inspircd.org>
+ *   Copyright (C) 2009 Uli Schlachter <psychon@znc.in>
+ *   Copyright (C) 2008 Craig Edwards <brain@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -19,44 +24,33 @@
 
 #include "inspircd.h"
 
-/* $ModDesc: Hide /MAP and /LINKS in the same form as ircu (mostly useless) */
-
-class ModuleMapHide : public Module
+class ModuleMapHide final
+	: public Module
 {
+private:
 	std::string url;
- public:
-	void init()
+
+public:
+	ModuleMapHide()
+		: Module(VF_VENDOR, "Allows the server administrator to replace the output of a /MAP and /LINKS with an URL.")
 	{
-		Implementation eventlist[] = { I_OnPreCommand, I_OnRehash };
-		ServerInstance->Modules->Attach(eventlist, this, sizeof(eventlist)/sizeof(Implementation));
-		OnRehash(NULL);
 	}
 
-	void OnRehash(User* user)
+	void ReadConfig(ConfigStatus& status) override
 	{
 		url = ServerInstance->Config->ConfValue("security")->getString("maphide");
 	}
 
-	ModResult OnPreCommand(std::string &command, std::vector<std::string> &parameters, LocalUser *user, bool validated, const std::string &original_line)
+	ModResult OnPreCommand(std::string& command, CommandBase::Params& parameters, LocalUser* user, bool validated) override
 	{
-		if (validated && !IS_OPER(user) && !url.empty() && (command == "MAP" || command == "LINKS"))
+		if (validated && !user->IsOper() && !url.empty() && (command == "MAP" || command == "LINKS"))
 		{
-			user->WriteServ("NOTICE %s :/%s has been disabled; visit %s", user->nick.c_str(), command.c_str(), url.c_str());
+			user->WriteNotice("/" + command + " has been disabled; visit " + url);
 			return MOD_RES_DENY;
 		}
 		else
 			return MOD_RES_PASSTHRU;
 	}
-
-	virtual ~ModuleMapHide()
-	{
-	}
-
-	virtual Version GetVersion()
-	{
-		return Version("Hide /MAP and /LINKS in the same form as ircu (mostly useless)", VF_VENDOR);
-	}
 };
 
 MODULE_INIT(ModuleMapHide)
-

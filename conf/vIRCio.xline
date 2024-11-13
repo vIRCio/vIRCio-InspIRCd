@@ -1,8 +1,0 @@
-VERSION 1
-LINE Q BotServ irc.vircio.net 1519953900 0 :Reserved For Services
-LINE Q ChanServ irc.vircio.net 1519953900 0 :Reserved For Services
-LINE Q HostServ irc.vircio.net 1519953900 0 :Reserved For Services
-LINE Q MemoServ irc.vircio.net 1519953900 0 :Reserved For Services
-LINE Q NickServ irc.vircio.net 1519953900 0 :Reserved For Services
-LINE Q OperServ irc.vircio.net 1519953900 0 :Reserved For Services
-LINE Q StatServ irc.vircio.net 1519953900 0 :Reserved For Services

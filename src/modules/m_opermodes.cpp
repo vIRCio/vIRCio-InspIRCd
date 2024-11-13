@@ -1,10 +1,11 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
- *   Copyright (C) 2009 Daniel De Graaf <danieldg@inspircd.org>
- *   Copyright (C) 2007-2008 Robin Burchell <robin+git@viroteck.net>
+ *   Copyright (C) 2020-2022 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
+ *   Copyright (C) 2012 Attila Molnar <attilamolnar@hush.com>
  *   Copyright (C) 2007 Dennis Friis <peavey@inspircd.org>
- *   Copyright (C) 2005-2007 Craig Edwards <craigedwards@brainbox.cc>
+ *   Copyright (C) 2005 Craig Edwards <brain@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -22,57 +23,34 @@
 
 #include "inspircd.h"
 
-/* $ModDesc: Sets (and unsets) modes on opers when they oper up */
-
-class ModuleModesOnOper : public Module
+class ModuleOperModes final
+	: public Module
 {
- public:
-	void init()
-	{
-		ServerInstance->Modules->Attach(I_OnPostOper, this);
-	}
-
-	virtual ~ModuleModesOnOper()
+public:
+	ModuleOperModes()
+		: Module(VF_VENDOR, "Allows the server administrator to set user modes on server operators when they log into their server operator account.")
 	{
 	}
 
-	virtual Version GetVersion()
-	{
-		return Version("Sets (and unsets) modes on opers when they oper up", VF_VENDOR);
-	}
-
-	virtual void OnPostOper(User* user, const std::string &opertype, const std::string &opername)
+	void OnPostOperLogin(User* user, bool automatic) override
 	{
 		if (!IS_LOCAL(user))
-			return;
+			return; // We don't handle remote users.
 
-		// whenever a user opers, go through the oper types, find their <type:modes>,
-		// and if they have one apply their modes. The mode string can contain +modes
-		// to add modes to the user or -modes to take modes from the user.
-		std::string ThisOpersModes = user->oper->getConfig("modes");
-		if (!ThisOpersModes.empty())
-		{
-			ApplyModes(user, ThisOpersModes);
-		}
-	}
+		const std::string opermodes = user->oper->GetConfig()->getString("modes");
+		if (opermodes.empty())
+			return; // We don't have any modes to set.
 
-	void ApplyModes(User *u, std::string &smodes)
-	{
-		char first = *(smodes.c_str());
-		if ((first != '+') && (first != '-'))
-			smodes = "+" + smodes;
+		CommandBase::Params modeparams;
+		modeparams.push_back(user->nick);
 
-		std::string buf;
-		std::stringstream ss(smodes);
-		std::vector<std::string> modes;
+		irc::spacesepstream modestream(opermodes);
+		for (std::string modeparam; modestream.GetToken(modeparam); )
+			modeparams.push_back(modeparam);
 
-		modes.push_back(u->nick);
-		// split into modes and mode params
-		while (ss >> buf)
-			modes.push_back(buf);
-
-		ServerInstance->SendMode(modes, u);
+		if (modeparams.size() > 1)
+			ServerInstance->Parser.CallHandler("MODE", modeparams, user);
 	}
 };
 
-MODULE_INIT(ModuleModesOnOper)
+MODULE_INIT(ModuleOperModes)

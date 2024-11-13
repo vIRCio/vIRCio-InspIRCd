@@ -1,12 +1,15 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
+ *   Copyright (C) 2019 Matt Schatz <genius3000@g3k.solutions>
+ *   Copyright (C) 2018 linuxdaemon <linuxdaemon.irc@gmail.com>
+ *   Copyright (C) 2012-2013 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2012, 2014, 2017-2018, 2020-2024 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
+ *   Copyright (C) 2012 ChrisTX <xpipe@hotmail.de>
  *   Copyright (C) 2009-2010 Daniel De Graaf <danieldg@inspircd.org>
- *   Copyright (C) 2006-2008 Robin Burchell <robin+git@viroteck.net>
- *   Copyright (C) 2005-2008 Craig Edwards <craigedwards@brainbox.cc>
- *   Copyright (C) 2008 Thomas Stagner <aquanight@inspircd.org>
- *   Copyright (C) 2006-2007 Oliver Lupton <oliverlupton@gmail.com>
  *   Copyright (C) 2007 Dennis Friis <peavey@inspircd.org>
+ *   Copyright (C) 2006-2008 Robin Burchell <robin+git@viroteck.net>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -22,146 +25,38 @@
  */
 
 
-/* $Core */
+#include <random>
 
-#ifdef _WIN32
-#define _CRT_RAND_S
-#include <stdlib.h>
+#ifndef _WIN32
+# include <unistd.h>
 #endif
 
 #include "inspircd.h"
+#include "timeutils.h"
+#include "utility/string.h"
 #include "xline.h"
-#include "exitcodes.h"
-#include <iostream>
 
-std::string InspIRCd::GetServerDescription(const std::string& servername)
+bool InspIRCd::CheckPassword(const std::string& password, const std::string& passwordhash, const std::string& value)
 {
-	std::string description;
+	ModResult res;
+	FIRST_MOD_RESULT(OnCheckPassword, res, (password, passwordhash, value));
 
-	FOREACH_MOD(I_OnGetServerDescription,OnGetServerDescription(servername,description));
+	if (res == MOD_RES_ALLOW)
+		return true; // Password explicitly valid.
 
-	if (!description.empty())
-	{
-		return description;
-	}
-	else
-	{
-		// not a remote server that can be found, it must be me.
-		return Config->ServerDesc;
-	}
+	if (res == MOD_RES_DENY)
+		return false; // Password explicitly invalid.
+
+	// The hash algorithm wasn't recognised by any modules. If its plain
+	// text then we can check it internally.
+	if (passwordhash.empty() || insp::equalsci(passwordhash, "plaintext"))
+		return TimingSafeCompare(password, value);
+
+	// The password was invalid.
+	return false;
 }
 
-/* Find a user record by nickname and return a pointer to it */
-User* InspIRCd::FindNick(const std::string &nick)
-{
-	if (!nick.empty() && isdigit(*nick.begin()))
-		return FindUUID(nick);
-
-	user_hash::iterator iter = this->Users->clientlist->find(nick);
-
-	if (iter == this->Users->clientlist->end())
-		/* Couldn't find it */
-		return NULL;
-
-	return iter->second;
-}
-
-User* InspIRCd::FindNick(const char* nick)
-{
-	if (isdigit(*nick))
-		return FindUUID(nick);
-
-	user_hash::iterator iter = this->Users->clientlist->find(nick);
-
-	if (iter == this->Users->clientlist->end())
-		return NULL;
-
-	return iter->second;
-}
-
-User* InspIRCd::FindNickOnly(const std::string &nick)
-{
-	user_hash::iterator iter = this->Users->clientlist->find(nick);
-
-	if (iter == this->Users->clientlist->end())
-		return NULL;
-
-	return iter->second;
-}
-
-User* InspIRCd::FindNickOnly(const char* nick)
-{
-	user_hash::iterator iter = this->Users->clientlist->find(nick);
-
-	if (iter == this->Users->clientlist->end())
-		return NULL;
-
-	return iter->second;
-}
-
-User *InspIRCd::FindUUID(const std::string &uid)
-{
-	user_hash::iterator finduuid = this->Users->uuidlist->find(uid);
-
-	if (finduuid == this->Users->uuidlist->end())
-		return NULL;
-
-	return finduuid->second;
-}
-
-User *InspIRCd::FindUUID(const char *uid)
-{
-	return FindUUID(std::string(uid));
-}
-
-/* find a channel record by channel name and return a pointer to it */
-Channel* InspIRCd::FindChan(const char* chan)
-{
-	chan_hash::iterator iter = chanlist->find(chan);
-
-	if (iter == chanlist->end())
-		/* Couldn't find it */
-		return NULL;
-
-	return iter->second;
-}
-
-Channel* InspIRCd::FindChan(const std::string &chan)
-{
-	chan_hash::iterator iter = chanlist->find(chan);
-
-	if (iter == chanlist->end())
-		/* Couldn't find it */
-		return NULL;
-
-	return iter->second;
-}
-
-/* Send an error notice to all users, registered or not */
-void InspIRCd::SendError(const std::string &s)
-{
-	for (LocalUserList::const_iterator i = this->Users->local_users.begin(); i != this->Users->local_users.end(); i++)
-	{
-		User* u = *i;
-		if (u->registered == REG_ALL)
-		{
-		   	u->WriteServ("NOTICE %s :%s",u->nick.c_str(),s.c_str());
-	   	}
-		else
-		{
-			/* Unregistered connections receive ERROR, not a NOTICE */
-			u->Write("ERROR :" + s);
-		}
-	}
-}
-
-/* return channel count */
-long InspIRCd::ChannelCount()
-{
-	return chanlist->size();
-}
-
-bool InspIRCd::IsValidMask(const std::string &mask)
+bool InspIRCd::IsValidMask(const std::string& mask)
 {
 	const char* dest = mask.c_str();
 	int exclamation = 0;
@@ -190,138 +85,173 @@ bool InspIRCd::IsValidMask(const std::string &mask)
 	if (exclamation != 1 || atsign != 1)
 		return false;
 
-	if (mask.length() > 250)
+	if (mask.length() > ServerInstance->Config->Limits.GetMaxMask())
 		return false;
 
 	return true;
 }
 
-void InspIRCd::StripColor(std::string &sentence)
+void InspIRCd::StripColor(std::string& line)
 {
-	/* refactor this completely due to SQUIT bug since the old code would strip last char and replace with \0 --peavey */
-	int seq = 0;
-
-	for (std::string::iterator i = sentence.begin(); i != sentence.end();)
+	for (size_t idx = 0; idx < line.length(); )
 	{
-		if (*i == 3)
-			seq = 1;
-		else if (seq && (( ((*i >= '0') && (*i <= '9')) || (*i == ',') ) ))
+		switch (line[idx])
 		{
-			seq++;
-			if ( (seq <= 4) && (*i == ',') )
-				seq = 1;
-			else if (seq > 3)
-				seq = 0;
-		}
-		else
-			seq = 0;
+			case '\x02': // Bold
+			case '\x1D': // Italic
+			case '\x11': // Monospace
+			case '\x16': // Reverse
+			case '\x1E': // Strikethrough
+			case '\x1F': // Underline
+			case '\x0F': // Reset
+				line.erase(idx, 1);
+				break;
 
-		if (seq || ((*i == 2) || (*i == 15) || (*i == 22) || (*i == 21) || (*i == 31)))
-			i = sentence.erase(i);
-		else
-			++i;
+			case '\x03': // Color
+			{
+				auto start = idx;
+				while (++idx < line.length() && idx - start < 6)
+				{
+					const auto chr = line[idx];
+					if (chr != ',' && (chr < '0' || chr > '9'))
+						break;
+				}
+				line.erase(start, idx - start);
+				break;
+			}
+			case '\x04': // Hex Color
+			{
+				auto start = idx;
+				while (++idx < line.length() && idx - start < 14)
+				{
+					const auto chr = line[idx];
+					if (chr != ',' && (chr < '0' || chr > '9') && (chr < 'A' || chr > 'F') && (chr < 'a' || chr > 'f'))
+						break;
+				}
+				line.erase(start, idx - start);
+				break;
+			}
+
+			default: // Non-formatting character.
+				idx++;
+				break;
+		}
 	}
 }
 
-void InspIRCd::ProcessColors(file_cache& input)
+void InspIRCd::ProcessColors(std::vector<std::string>& input)
 {
-	/*
-	 * Replace all color codes from the special[] array to actual
-	 * color code chars using C++ style escape sequences. You
-	 * can append other chars to replace if you like -- Justasic
-	 */
-	static struct special_chars
-	{
-		std::string character;
-		std::string replace;
-		special_chars(const std::string &c, const std::string &r) : character(c), replace(r) { }
-	}
+	for (auto& line : input)
+		ProcessColors(line);
+}
 
-	special[] = {
-		special_chars("\\002", "\002"),  // Bold
-		special_chars("\\037", "\037"),  // underline
-		special_chars("\\003", "\003"),  // Color
-		special_chars("\\017", "\017"), // Stop colors
-		special_chars("\\u", "\037"),    // Alias for underline
-		special_chars("\\b", "\002"),    // Alias for Bold
-		special_chars("\\x", "\017"),    // Alias for stop
-		special_chars("\\c", "\003"),    // Alias for color
-		special_chars("", "")
+void InspIRCd::ProcessColors(std::string& line)
+{
+	static const insp::flat_map<std::string::value_type, std::string> formats = {
+		{ '\\', "\\"   }, // Escape
+		{ '{',  "{"    }, // Escape
+		{ '}',  "}"    }, // Escape
+		{ 'b',  "\x02" }, // Bold
+		{ 'c',  "\x03" }, // Color
+		{ 'h',  "\x04" }, // Hex Color
+		{ 'i',  "\x1D" }, // Italic
+		{ 'm',  "\x11" }, // Monospace
+		{ 'r',  "\x16" }, // Reverse
+		{ 's',  "\x1E" }, // Strikethrough
+		{ 'u',  "\x1F" }, // Underline
+		{ 'x',  "\x0F" }, // Reset
+	};
+	static const insp::flat_map<std::string, uint8_t, irc::insensitive_swo> colors = {
+		{ "white",       0  },
+		{ "black",       1  },
+		{ "blue",        2  },
+		{ "green",       3  },
+		{ "red",         4  },
+		{ "brown",       5  },
+		{ "magenta",     6  },
+		{ "orange",      7  },
+		{ "yellow",      8  },
+		{ "light green", 9  },
+		{ "cyan",        10 },
+		{ "light cyan",  11 },
+		{ "light blue",  12 },
+		{ "pink",        13 },
+		{ "gray",        14 },
+		{ "grey",        14 },
+		{ "light gray",  15 },
+		{ "light grey",  15 },
+		{ "default",     99 },
 	};
 
-	for(file_cache::iterator it = input.begin(), it_end = input.end(); it != it_end; it++)
+	for (size_t idx = 0; idx < line.length(); )
 	{
-		std::string ret = *it;
-		for(int i = 0; special[i].character.empty() == false; ++i)
+		if (line[idx] != '\\')
 		{
-			std::string::size_type pos = ret.find(special[i].character);
-			if(pos == std::string::npos) // Couldn't find the character, skip this line
-				continue;
+			// Regular character.
+			idx++;
+			continue;
+		}
 
-			if((pos > 0) && (ret[pos-1] == '\\') && (ret[pos] == '\\'))
-				continue; // Skip double slashes.
+		auto start = idx;
+		if (++idx >= line.length())
+			continue; // Stray \ at the end of the string; skip.
 
-			// Replace all our characters in the array
-			while(pos != std::string::npos)
+		const auto chr = line[idx];
+		const auto it = formats.find(chr);
+		if (it == formats.end())
+			continue; // Unknown escape, skip.
+
+		line.replace(start, 2, it->second);
+		idx = start + it->second.length();
+
+		if (chr != 'c')
+			continue; // Only colors can have values.
+
+		start = idx;
+		if (idx >= line.length() || line[idx] != '{')
+			continue; // No color value.
+
+		const auto fgend = line.find_first_of(",}", idx + 1);
+		if (fgend == std::string::npos)
+		{
+			// Malformed color value, strip.
+			line.erase(start);
+			break;
+		}
+
+		size_t bgend = std::string::npos;
+		if (line[fgend] == ',')
+		{
+			bgend = line.find_first_of('}', fgend + 1);
+			if (bgend == std::string::npos)
 			{
-				ret = ret.substr(0, pos) + special[i].replace + ret.substr(pos + special[i].character.size());
-				pos = ret.find(special[i].character, pos + special[i].replace.size());
+				// Malformed color value, strip.
+				line.erase(start);
+				break;
 			}
 		}
 
-		// Replace double slashes with a single slash before we return
-		std::string::size_type pos = ret.find("\\\\");
-		while(pos != std::string::npos)
+		const auto fg = colors.find(line.substr(start + 1, fgend - start - 1));
+		auto tmp = ConvToStr(fg == colors.end() ? 99 : fg->second);
+		if (bgend != std::string::npos)
 		{
-			ret = ret.substr(0, pos) + "\\" + ret.substr(pos + 2);
-			pos = ret.find("\\\\", pos + 1);
-		}
-		*it = ret;
-	}
-}
-
-/* true for valid channel name, false else */
-bool IsChannelHandler::Call(const char *chname, size_t max)
-{
-	const char *c = chname + 1;
-
-	/* check for no name - don't check for !*chname, as if it is empty, it won't be '#'! */
-	if (!chname || *chname != '#')
-	{
-		return false;
-	}
-
-	while (*c)
-	{
-		switch (*c)
-		{
-			case ' ':
-			case ',':
-			case 7:
-				return false;
+			const auto bg = colors.find(line.substr(fgend + 1, bgend - fgend - 1));
+			tmp.push_back(',');
+			tmp.append(ConvToStr(bg == colors.end() ? 99 : bg->second));
 		}
 
-		c++;
+		const auto end = bgend == std::string::npos ? fgend : bgend;
+		line.replace(start, end - start + 1, tmp);
 	}
-
-	size_t len = c - chname;
-	/* too long a name - note funky pointer arithmetic here. */
-	if (len > max)
-	{
-			return false;
-	}
-
-	return true;
 }
 
 /* true for valid nickname, false else */
-bool IsNickHandler::Call(const char* n, size_t max)
+bool InspIRCd::DefaultIsNick(const std::string_view& n)
 {
-	if (!n || !*n)
+	if (n.empty() || n.length() > ServerInstance->Config->Limits.MaxNick)
 		return false;
 
-	unsigned int p = 0;
-	for (const char* i = n; *i; i++, p++)
+	for (std::string_view::const_iterator i = n.begin(); i != n.end(); ++i)
 	{
 		if ((*i >= 'A') && (*i <= '}'))
 		{
@@ -329,7 +259,7 @@ bool IsNickHandler::Call(const char* n, size_t max)
 			continue;
 		}
 
-		if ((((*i >= '0') && (*i <= '9')) || (*i == '-')) && (i > n))
+		if ((((*i >= '0') && (*i <= '9')) || (*i == '-')) && (i != n.begin()))
 		{
 			/* "0"-"9", "-" can occur anywhere BUT the first char of a nickname */
 			continue;
@@ -339,27 +269,22 @@ bool IsNickHandler::Call(const char* n, size_t max)
 		return false;
 	}
 
-	/* too long? or not */
-	return (p <= max);
+	return true;
 }
 
-/* return true for good ident, false else */
-bool IsIdentHandler::Call(const char* n)
+/* return true for good username, false else */
+bool InspIRCd::DefaultIsUser(const std::string_view& n)
 {
-	if (!n || !*n)
+	if (n.empty())
 		return false;
 
-	for (const char* i = n; *i; i++)
+	for (const auto chr : n)
 	{
-		if ((*i >= 'A') && (*i <= '}'))
-		{
+		if (chr >= 'A' && chr <= '}')
 			continue;
-		}
 
-		if (((*i >= '0') && (*i <= '9')) || (*i == '-') || (*i == '.'))
-		{
+		if ((chr >= '0' && chr <= '9') || chr == '-' || chr == '.')
 			continue;
-		}
 
 		return false;
 	}
@@ -367,140 +292,196 @@ bool IsIdentHandler::Call(const char* n)
 	return true;
 }
 
-bool IsSIDHandler::Call(const std::string &str)
+bool InspIRCd::IsHost(const std::string_view& host, bool allowsimple)
+{
+	// Hostnames must be non-empty and shorter than the maximum hostname length.
+	if (host.empty() || host.length() > ServerInstance->Config->Limits.MaxHost)
+		return false;
+
+	unsigned int numdashes = 0;
+	unsigned int numdots = 0;
+	bool seendot = false;
+	const auto hostend = host.end() - 1;
+	for (auto iter = host.begin(); iter != host.end(); ++iter)
+	{
+		const auto chr = static_cast<unsigned char>(*iter);
+
+		// If the current character is a label separator.
+		if (chr == '.')
+		{
+			numdots++;
+
+			// Consecutive separators are not allowed and dashes can not exist at the start or end
+			// of labels and separators must only exist between labels.
+			if (seendot || numdashes || iter == host.begin() || iter == hostend)
+				return false;
+
+			seendot = true;
+			continue;
+		}
+
+		// If this point is reached then the character is not a dot.
+		seendot = false;
+
+		// If the current character is a dash.
+		if (chr == '-')
+		{
+			// Consecutive separators are not allowed and dashes can not exist at the start or end
+			// of labels and separators must only exist between labels.
+			if (seendot || numdashes >= 2 || iter == host.begin() || iter == hostend)
+				return false;
+
+			numdashes += 1;
+			continue;
+		}
+
+		// If this point is reached then the character is not a dash.
+		numdashes = 0;
+
+		// Alphanumeric characters are allowed at any position.
+		if ((chr >= '0' && chr <= '9') || (chr >= 'A' && chr <= 'Z') || (chr >= 'a' && chr <= 'z'))
+			continue;
+
+		return false;
+	}
+
+	// Whilst simple hostnames (e.g. localhost) are valid we do not allow the server to use
+	// them to prevent issues with clients that differentiate between short client and server
+	// prefixes by checking whether the nickname contains a dot.
+	return numdots || allowsimple;
+}
+
+bool InspIRCd::IsSID(const std::string_view& str)
 {
 	/* Returns true if the string given is exactly 3 characters long,
 	 * starts with a digit, and the other two characters are A-Z or digits
 	 */
 	return ((str.length() == 3) && isdigit(str[0]) &&
 			((str[1] >= 'A' && str[1] <= 'Z') || isdigit(str[1])) &&
-			 ((str[2] >= 'A' && str[2] <= 'Z') || isdigit(str[2])));
+			((str[2] >= 'A' && str[2] <= 'Z') || isdigit(str[2])));
 }
 
-/* open the proper logfile */
-bool InspIRCd::OpenLog(char**, int)
-{
-	if (!Config->cmdline.writelog) return true; // Skip opening default log if -nolog
-
-	if (Config->cmdline.startup_log.empty())
-		Config->cmdline.startup_log = LOG_PATH "/startup.log";
-	FILE* startup = fopen(Config->cmdline.startup_log.c_str(), "a+");
-
-	if (!startup)
-	{
-		return false;
-	}
-
-	FileWriter* fw = new FileWriter(startup);
-	FileLogStream *f = new FileLogStream((Config->cmdline.forcedebug ? DEBUG : DEFAULT), fw);
-
-	this->Logs->AddLogType("*", f, true);
-
-	return true;
-}
-
-void InspIRCd::CheckRoot()
-{
-#ifndef _WIN32
-	if (geteuid() == 0)
-	{
-		std::cout << "ERROR: You are running an irc server as root! DO NOT DO THIS!" << std::endl << std::endl;
-		this->Logs->Log("STARTUP",DEFAULT,"Can't start as root");
-		Exit(EXIT_STATUS_ROOT);
-	}
-#endif
-}
-
-void InspIRCd::SendWhoisLine(User* user, User* dest, int numeric, const std::string &text)
-{
-	std::string copy_text = text;
-
-	ModResult MOD_RESULT;
-	FIRST_MOD_RESULT(OnWhoisLine, MOD_RESULT, (user, dest, numeric, copy_text));
-
-	if (MOD_RESULT != MOD_RES_DENY)
-		user->WriteServ("%d %s", numeric, copy_text.c_str());
-}
-
-void InspIRCd::SendWhoisLine(User* user, User* dest, int numeric, const char* format, ...)
-{
-	char textbuffer[MAXBUF];
-	va_list argsPtr;
-	va_start (argsPtr, format);
-	vsnprintf(textbuffer, MAXBUF, format, argsPtr);
-	va_end(argsPtr);
-
-	this->SendWhoisLine(user, dest, numeric, std::string(textbuffer));
-}
-
-/** Refactored by Brain, Jun 2009. Much faster with some clever O(1) array
- * lookups and pointer maths.
+/** A lookup table of values for multiplier characters used by
+ * Duration::{Try,}From(). In this lookup table, the indexes for
+ * the ascii values 'm' and 'M' have the value '60', the indexes
+ * for the ascii values 'D' and 'd' have a value of '86400', etc.
  */
-long InspIRCd::Duration(const std::string &str)
+static constexpr unsigned int duration_multi[] =
 {
-	unsigned char multiplier = 0;
-	long total = 0;
-	long times = 1;
-	long subtotal = 0;
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+	0, 0, 0, 0, 86400, 0, 0, 0, 3600, 0, 0, 0, 0, 60, 0, 0,
+	0, 0, 0, 1, 0, 0, 0, 604800, 0, 31557600, 0, 0, 0, 0, 0, 0,
+	0, 0, 0, 0, 86400, 0, 0, 0, 3600, 0, 0, 0, 0, 60, 0, 0,
+	0, 0, 0, 1, 0, 0, 0, 604800, 0, 31557600, 0, 0, 0, 0, 0, 0,
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+};
+
+bool Duration::TryFrom(const std::string& str, unsigned long& duration)
+{
+	unsigned long total = 0;
+	unsigned long subtotal = 0;
 
 	/* Iterate each item in the string, looking for number or multiplier */
-	for (std::string::const_reverse_iterator i = str.rbegin(); i != str.rend(); ++i)
+	for (const auto chr : str)
 	{
 		/* Found a number, queue it onto the current number */
-		if ((*i >= '0') && (*i <= '9'))
+		if (chr >= '0' && chr <= '9')
 		{
-			subtotal = subtotal + ((*i - '0') * times);
-			times = times * 10;
+			subtotal = (subtotal * 10) + (chr - '0');
 		}
 		else
 		{
-			/* Found something thats not a number, find out how much
+			/* Found something that's not a number, find out how much
 			 * it multiplies the built up number by, multiply the total
 			 * and reset the built up number.
 			 */
-			if (subtotal)
-				total += subtotal * duration_multi[multiplier];
+			unsigned int multiplier = duration_multi[static_cast<unsigned char>(chr)];
+			if (multiplier == 0)
+				return false;
+
+			total += subtotal * multiplier;
 
 			/* Next subtotal please */
 			subtotal = 0;
-			multiplier = *i;
-			times = 1;
 		}
 	}
-	if (multiplier)
-	{
-		total += subtotal * duration_multi[multiplier];
-		subtotal = 0;
-	}
 	/* Any trailing values built up are treated as raw seconds */
-	return total + subtotal;
+	duration = total + subtotal;
+	return true;
 }
 
-bool InspIRCd::ULine(const std::string& sserver)
+unsigned long Duration::From(const std::string& str)
 {
-	if (sserver.empty())
-		return true;
-
-	return (Config->ulines.find(sserver.c_str()) != Config->ulines.end());
+	unsigned long out = 0;
+	Duration::TryFrom(str, out);
+	return out;
 }
 
-bool InspIRCd::SilentULine(const std::string& sserver)
+bool Duration::IsValid(const std::string& duration)
 {
-	std::map<irc::string,bool>::iterator n = Config->ulines.find(sserver.c_str());
-	if (n != Config->ulines.end())
-		return n->second;
-	else
-		return false;
+	for (const auto c : duration)
+	{
+		if (((c >= '0') && (c <= '9')))
+			continue;
+
+		if (!duration_multi[static_cast<unsigned char>(c)])
+			return false;
+	}
+	return true;
 }
 
-std::string InspIRCd::TimeString(time_t curtime)
+std::string Duration::ToString(unsigned long duration)
+{
+	if (duration == 0)
+		return "0s";
+
+	std::string ret;
+
+	unsigned long years = duration / 31449600;
+	if (years)
+		ret += ConvToStr(years) + "y";
+
+	unsigned long weeks = (duration / 604800) % 52;
+	if (weeks)
+		ret += ConvToStr(weeks) + "w";
+
+	unsigned long days = (duration / 86400) % 7;
+	if (days)
+		ret += ConvToStr(days) + "d";
+
+	unsigned long hours = (duration / 3600) % 24;
+	if (hours)
+		ret += ConvToStr(hours) + "h";
+
+	unsigned long minutes = (duration / 60) % 60;
+	if (minutes)
+		ret += ConvToStr(minutes) + "m";
+
+	unsigned long seconds = duration % 60;
+	if (seconds)
+		ret += ConvToStr(seconds) + "s";
+
+	return ret;
+}
+
+std::string Time::ToString(time_t curtime, const char* format, bool utc)
 {
 #ifdef _WIN32
 	if (curtime < 0)
 		curtime = 0;
 #endif
 
-	struct tm* timeinfo = localtime(&curtime);
+	struct tm* timeinfo = utc ? gmtime(&curtime) : localtime(&curtime);
 	if (!timeinfo)
 	{
 		curtime = 0;
@@ -514,88 +495,68 @@ std::string InspIRCd::TimeString(time_t curtime)
 	else if (timeinfo->tm_year + 1900 < 1000)
 		timeinfo->tm_year = 0;
 
-	return std::string(asctime(timeinfo),24);
+	// This is the default format used by asctime without the terminating new line.
+	if (!format)
+		format = "%a %b %d %Y %H:%M:%S";
+
+	char buffer[512];
+	if (!strftime(buffer, sizeof(buffer), format, timeinfo))
+		buffer[0] = '\0';
+
+	return buffer;
 }
 
-// You should only pass a single character to this.
-void InspIRCd::AddExtBanChar(char c)
+std::string InspIRCd::GenRandomStr(size_t length) const
 {
-	std::string &tok = Config->data005;
-	std::string::size_type ebpos = tok.find(" EXTBAN=,");
+	static const char chars[] = {
+		'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm',
+		'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z',
+		'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M',
+		'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z',
+		'0', '1', '2', '3', '4', '5', '6', '7', '8', '9',
+	};
 
-	if (ebpos == std::string::npos)
-	{
-		tok.append(" EXTBAN=,");
-		tok.push_back(c);
-	}
-	else
-	{
-		ebpos += 9;
-		while (isalpha(tok[ebpos]) && tok[ebpos] < c)
-			ebpos++;
-		tok.insert(ebpos, 1, c);
-	}
+	std::string buf;
+	buf.reserve(length);
+	for (size_t idx = 0; idx < length; ++idx)
+		buf.push_back(chars[GenRandomInt(std::size(chars))]);
+	return buf;
 }
 
-std::string InspIRCd::GenRandomStr(int length, bool printable)
+std::string InspIRCd::GenRandomStr(size_t length, bool printable) const
 {
-	char* buf = new char[length];
-	GenRandom(buf, length);
-	std::string rv;
-	rv.resize(length);
-	for(int i=0; i < length; i++)
-		rv[i] = printable ? 0x3F + (buf[i] & 0x3F) : buf[i];
-	delete[] buf;
-	return rv;
+	if (printable)
+		return GenRandomStr(length);
+
+	// DEPRECATED
+	std::vector<char> str(length);
+	GenRandom(str.data(), length);
+	return std::string(str.data(), str.size());
 }
 
 // NOTE: this has a slight bias for lower values if max is not a power of 2.
 // Don't use it if that matters.
-unsigned long InspIRCd::GenRandomInt(unsigned long max)
+unsigned long InspIRCd::GenRandomInt(unsigned long max) const
 {
 	unsigned long rv;
-	GenRandom((char*)&rv, sizeof(rv));
+	GenRandom(reinterpret_cast<char*>(&rv), sizeof(rv));
 	return rv % max;
 }
 
-// This is overridden by a higher-quality algorithm when SSL support is loaded
-void GenRandomHandler::Call(char *output, size_t max)
+// This is overridden by a higher-quality algorithm when TLS support is loaded
+void InspIRCd::DefaultGenRandom(char* output, size_t max)
 {
-	for(unsigned int i=0; i < max; i++)
-#ifdef _WIN32
-	{
-		unsigned int uTemp;
-		if(rand_s(&uTemp) != 0)
-			output[i] = rand();
-		else
-			output[i] = uTemp;
-	}
-#else
-		output[i] = random();
+#ifdef HAS_GETENTROPY
+	if (getentropy(output, max) == 0)
+		return;
 #endif
-}
-
-ModResult OnCheckExemptionHandler::Call(User* user, Channel* chan, const std::string& restriction)
-{
-	unsigned int mypfx = chan->GetPrefixValue(user);
-	char minmode = 0;
-	std::string current;
-
-	irc::spacesepstream defaultstream(ServerInstance->Config->ConfValue("options")->getString("exemptchanops"));
-
-	while (defaultstream.GetToken(current))
-	{
-		std::string::size_type pos = current.find(':');
-		if (pos == std::string::npos)
-			continue;
-		if (current.substr(0,pos) == restriction)
-			minmode = current[pos+1];
-	}
-
-	ModeHandler* mh = ServerInstance->Modes->FindMode(minmode, MODETYPE_CHANNEL);
-	if (mh && mypfx >= mh->GetPrefixRank())
-		return MOD_RES_ALLOW;
-	if (mh || minmode == '*')
-		return MOD_RES_DENY;
-	return MOD_RES_PASSTHRU;
+#ifdef HAS_ARC4RANDOM_BUF
+	arc4random_buf(output, max);
+#else
+	static std::random_device device;
+	static std::mt19937 engine(device());
+	static std::uniform_int_distribution<short> dist(CHAR_MIN, CHAR_MAX);
+	for (size_t i = 0; i < max; ++i)
+		output[i] = static_cast<char>(dist(engine));
+#endif
 }

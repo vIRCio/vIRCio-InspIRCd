@@ -1,11 +1,17 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
+ *   Copyright (C) 2021 Dominic Hamon
+ *   Copyright (C) 2020 Matt Schatz <genius3000@g3k.solutions>
+ *   Copyright (C) 2018-2019 linuxdaemon <linuxdaemon.irc@gmail.com>
+ *   Copyright (C) 2017-2024 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2013, 2016 Adam <Adam@anope.org>
+ *   Copyright (C) 2013, 2015-2016 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
  *   Copyright (C) 2009-2010 Daniel De Graaf <danieldg@inspircd.org>
- *   Copyright (C) 2006-2008 Robin Burchell <robin+git@viroteck.net>
- *   Copyright (C) 2007 Craig Edwards <craigedwards@brainbox.cc>
- *   Copyright (C) 2006-2007 Dennis Friis <peavey@inspircd.org>
- *   Copyright (C) 2007 John Brooks <john.brooks@dereferenced.net>
+ *   Copyright (C) 2007 Dennis Friis <peavey@inspircd.org>
+ *   Copyright (C) 2007 Craig Edwards <brain@inspircd.org>
+ *   Copyright (C) 2006-2007, 2009 Robin Burchell <robin+git@viroteck.net>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -21,414 +27,687 @@
  */
 
 
+#ifndef _WIN32
+# include <arpa/inet.h>
+#endif
+
 #include "inspircd.h"
+#include "extension.h"
+#include "modules/dns.h"
+#include "modules/shun.h"
+#include "modules/stats.h"
+#include "numerichelper.h"
+#include "timeutils.h"
 #include "xline.h"
 
-/* $ModDesc: Provides handling of DNS blacklists */
-
-/* Class holding data for a single entry */
-class DNSBLConfEntry : public refcountbase
+class DNSBLEntry final
 {
-	public:
-		enum EnumBanaction { I_UNKNOWN, I_KILL, I_ZLINE, I_KLINE, I_GLINE, I_MARK };
-		enum EnumType { A_RECORD, A_BITMASK };
-		std::string name, ident, host, domain, reason;
-		EnumBanaction banaction;
-		EnumType type;
-		long duration;
-		int bitmask;
-		unsigned char records[256];
-		unsigned long stats_hits, stats_misses;
-		DNSBLConfEntry(): type(A_BITMASK),duration(86400),bitmask(0),stats_hits(0), stats_misses(0) {}
-		~DNSBLConfEntry() { }
+public:
+	enum class Action
+		: uint8_t
+	{
+		// G-line users who's IP address is in the DNSBL.
+		GLINE,
+
+		// Kill users who's IP address is in the DNSBL.
+		KILL,
+
+		// K-line users who's IP address is in the DNSBL.
+		KLINE,
+
+		// Mark users who's IP address is in the DNSBL.
+		MARK,
+
+		// Shun users who's IP address is in the DNSBL.
+		SHUN,
+
+		// Z-line users who's IP address is in the DNSBL.
+		ZLINE,
+	};
+
+	enum class Type
+		: uint8_t
+	{
+		// DNSBL results will be compared against the specified bit mask.
+		BITMASK,
+
+		// DNSBL results will be compared against a numeric range of values.
+		RECORD,
+	};
+
+	// The action to take against users who's IP address is in this DNSBL.
+	Action action;
+
+	// A bitmask of DNSBL result types to match against.
+	unsigned int bitmask;
+
+	// The domain name of this DNSBL.
+	std::string domain;
+
+	// If action is set to mark then a new hostname to set on users who's IP address is in this DNSBL.
+	std::string markhost;
+
+	// If action is set to mark then a new username to set on users who's IP address is in this DNSBL.
+	std::string markuser;
+
+	// The human readable name of this DNSBL.
+	std::string name;
+
+	// A range of DNSBL result types to match against.
+	CharState records;
+
+	// A map of DNSBL replies to their descriptions.
+	insp::flat_map<uint32_t, std::string> replies;
+
+	// The message to send to users who's IP address is in a DNSBL.
+	std::string reason;
+
+	// The number of seconds to wait for a DNSBL request before assuming it has failed.
+	unsigned int timeout;
+
+	// The type of result that this DNSBL will provide.
+	Type type;
+
+	// The number of errors which have occurred when querying this DNSBL.
+	unsigned long stats_errors = 0;
+
+	// The number of hits which have occurred when querying this DNSBL.
+	unsigned long stats_hits = 0;
+
+	// The number of misses which have occurred when querying this DNSBL.
+	unsigned long stats_misses = 0;
+
+	// If action is set to gline, kline, or zline then the duration for an X-line to last for.
+	unsigned long xlineduration;
+
+	DNSBLEntry(const Module* mod, const std::shared_ptr<ConfigTag>& tag)
+	{
+		name = tag->getString("name");
+		if (name.empty())
+			throw ModuleException(mod, "<dnsbl:name> can not be empty at " + tag->source.str());
+
+		domain = tag->getString("domain");
+		if (domain.empty())
+			throw ModuleException(mod, "<dnsbl:domain> can not be empty at " + tag->source.str());
+
+		action = tag->getEnum("action", Action::KILL, {
+			{ "gline", Action::GLINE },
+			{ "kill",  Action::KILL  },
+			{ "kline", Action::KLINE },
+			{ "mark",  Action::MARK  },
+			{ "shun",  Action::SHUN  },
+			{ "zline", Action::ZLINE },
+		});
+
+		const std::string typestr = tag->getString("type");
+		if (insp::equalsci(typestr, "bitmask"))
+		{
+			type = Type::BITMASK;
+
+			bitmask = tag->getNum<unsigned int>("bitmask", 0);
+			records = 0;
+		}
+		else if (insp::equalsci(typestr, "record"))
+		{
+			type = Type::RECORD;
+
+			irc::portparser recordrange(tag->getString("records"), false);
+			for (long record = 0; (record = recordrange.GetToken()); )
+			{
+				if (record < 0 || record > UCHAR_MAX)
+					throw ModuleException(mod, "<dnsbl:records> can only hold records between 0 and 255 at " + tag->source.str());
+
+				records.set(record);
+			}
+		}
+		else
+		{
+			throw ModuleException(mod, typestr + " is an invalid value for <dnsbl:type>; acceptable values are 'bitmask' or 'records' at "
+				+ tag->source.str());
+		}
+
+		reason = tag->getString("reason", "Your IP (%ip%) has been blacklisted by the %dnsbl% DNSBL.", 1, ServerInstance->Config->Limits.MaxLine);
+		timeout = static_cast<unsigned int>(tag->getDuration("timeout", 0, 1, 60));
+		markuser = tag->getString("user", tag->getString("ident"));
+		markhost = tag->getString("host");
+		xlineduration = tag->getDuration("duration", 60*60, 1);
+	}
 };
 
-
-/** Resolver for CGI:IRC hostnames encoded in ident/GECOS
- */
-class DNSBLResolver : public Resolver
+class DNSBLMask final
 {
-	std::string theiruid;
-	LocalStringExt& nameExt;
-	LocalIntExt& countExt;
-	reference<DNSBLConfEntry> ConfEntry;
+public:
+	// The username to give a user because they were in a DNSBL (<dnsbl:user>).
+	std::string user;
 
- public:
+	// The hostname to give a user because they were in a DNSBL (<dnsbl:host>).
+	std::string host;
 
-	DNSBLResolver(Module *me, LocalStringExt& match, LocalIntExt& ctr, const std::string &hostname, LocalUser* u, reference<DNSBLConfEntry> conf, bool &cached)
-		: Resolver(hostname, DNS_QUERY_A, cached, me), theiruid(u->uuid), nameExt(match), countExt(ctr), ConfEntry(conf)
+	// The reason why the user was given this user@host (<dnsbl:reason>).
+	std::string reason;
+
+	DNSBLMask(const std::shared_ptr<DNSBLEntry>& cfg, const std::string& msg)
+		: user(cfg->markuser)
+		, host(cfg->markhost)
+		, reason(msg)
+	{
+	}
+};
+
+typedef std::vector<std::shared_ptr<DNSBLEntry>> DNSBLEntries;
+typedef SimpleExtItem<DNSBLMask> MaskExtItem;
+typedef ListExtItem<std::vector<std::string>> MarkExtItem;
+
+// Data which is shared with DNS lookup classes.
+class SharedData final
+{
+private:
+	std::string ReverseIP(const irc::sockets::sockaddrs& sa)
+	{
+		switch (sa.family())
+		{
+			case AF_INET:
+			{
+				auto a = (unsigned int) sa.in4.sin_addr.s_addr & 0xFF;
+				auto b = (unsigned int) (sa.in4.sin_addr.s_addr >> 8) & 0xFF;
+				auto c = (unsigned int) (sa.in4.sin_addr.s_addr >> 16) & 0xFF;
+				auto d = (unsigned int) (sa.in4.sin_addr.s_addr >> 24) & 0xFF;
+				return INSP_FORMAT("{}.{}.{}.{}", d, c, b, a);
+			}
+
+			case AF_INET6:
+			{
+				const std::string hexaddr = Hex::Encode(sa.in6.sin6_addr.s6_addr, 16);
+				std::string reversedip;
+				reversedip.reserve(hexaddr.length() * 2);
+				for (const auto hexchr : insp::reverse_range(hexaddr))
+				{
+					reversedip.push_back(hexchr);
+					reversedip.push_back('.');
+				}
+				reversedip.pop_back();
+				return reversedip;
+			}
+
+			default:
+				break;
+		}
+
+		// Clients can't be in a DNSBL if they aren't connected via IPv4 or IPv6.
+		return {};
+	}
+
+public:
+	// Counts the number of DNSBL lookups waiting for this user.
+	IntExtItem countext;
+
+	// Reference to the DNS manager.
+	DNS::ManagerRef dns;
+
+	// The DNSBL entries from the config.
+	DNSBLEntries dnsbls;
+
+	// The DNSBL marks which are set on a user.
+	MarkExtItem markext;
+
+	// The user@host to set on a marked user when they are connected.
+	MaskExtItem maskext;
+
+	SharedData(Module* mod)
+		: countext(mod, "dnsbl-pending", ExtensionType::USER)
+		, dns(mod)
+		, markext(mod, "dnsbl-match", ExtensionType::USER)
+		, maskext(mod, "dnsbl-mask", ExtensionType::USER)
+	{
+	}
+
+	// Performs one or more DNSBL lookups on the specified user.
+	void Lookup(LocalUser* user);
+};
+
+class DNSBLResolver final
+	: public DNS::Request
+{
+private:
+	std::shared_ptr<DNSBLEntry> config;
+	SharedData& data;
+	const irc::sockets::sockaddrs sa;
+	const std::string uuid;
+
+	template <typename Line, typename... Extra>
+	void AddLine(const char* type, const std::string& reason, unsigned long duration, LocalUser* user, Extra&&... extra)
+	{
+		if (user->exempt)
+			return; // This user shouldn't be banned.
+
+		auto line = new Line(ServerInstance->Time(), duration, MODNAME "@" + ServerInstance->Config->ServerName, reason, std::forward<Extra>(extra)...);
+		if (!ServerInstance->XLines->AddLine(line, nullptr))
+		{
+			ServerInstance->Users.QuitUser(user, "Killed (" + reason + ")");
+			delete line;
+			return;
+		}
+
+		ServerInstance->SNO.WriteToSnoMask('x', "{} added a timed {} on {}, expires in {} (on {}): {}",
+			line->source, type, line->Displayable(), Duration::ToString(line->duration),
+			Time::ToString(line->expiry), line->reason);
+		ServerInstance->XLines->ApplyLines();
+	}
+
+public:
+	DNSBLResolver(Module* mod, SharedData& sd, const std::string& hostname, LocalUser* u, const std::shared_ptr<DNSBLEntry>& cfg)
+		: DNS::Request(*sd.dns, mod, hostname, DNS::QUERY_A, true, cfg->timeout)
+		, config(cfg)
+		, data(sd)
+		, sa(u->client_sa)
+		, uuid(u->uuid)
 	{
 	}
 
 	/* Note: This may be called multiple times for multiple A record results */
-	virtual void OnLookupComplete(const std::string &result, unsigned int ttl, bool cached)
+	void OnLookupComplete(const DNS::Query* r) override
 	{
 		/* Check the user still exists */
-		LocalUser* them = (LocalUser*)ServerInstance->FindUUID(theiruid);
-		if (them)
+		LocalUser* them = ServerInstance->Users.FindUUID<LocalUser>(uuid);
+		if (!them || them->client_sa != sa)
 		{
-			int i = countExt.get(them);
-			if (i)
-				countExt.set(them, i - 1);
-			// All replies should be in 127.0.0.0/8
-			if (result.compare(0, 4, "127.") == 0)
+			config->stats_misses++;
+			return;
+		}
+
+		intptr_t i = data.countext.Get(them);
+		if (i)
+			data.countext.Set(them, i - 1);
+
+		// The DNSBL reply must contain an A result.
+		const DNS::ResourceRecord* const ans_record = r->FindAnswerOfType(DNS::QUERY_A);
+		if (!ans_record)
+		{
+			config->stats_errors++;
+			ServerInstance->SNO.WriteGlobalSno('d', "{} returned an result with no IPv4 address.",
+				config->name);
+			return;
+		}
+
+		// The DNSBL reply must be a valid IPv4 address.
+		in_addr resultip;
+		if (inet_pton(AF_INET, ans_record->rdata.c_str(), &resultip) != 1)
+		{
+			config->stats_errors++;
+			ServerInstance->SNO.WriteGlobalSno('d', "{} returned an invalid IPv4 address: {}",
+				config->name, ans_record->rdata);
+			return;
+		}
+
+		// The DNSBL reply should be in the 127.0.0.0/8 range.
+		if ((resultip.s_addr & 0xFF) != 127)
+		{
+			config->stats_errors++;
+			ServerInstance->SNO.WriteGlobalSno('d', "{} returned an IPv4 address which is outside of the 127.0.0.0/8 subnet: {}",
+				config->name, ans_record->rdata);
+			return;
+		}
+
+		bool match = false;
+		unsigned int result = 0;
+		switch (config->type)
+		{
+			case DNSBLEntry::Type::BITMASK:
 			{
-				unsigned int bitmask = 0, record = 0;
-				bool match = false;
-				in_addr resultip;
-
-				inet_aton(result.c_str(), &resultip);
-
-				switch (ConfEntry->type)
-				{
-					case DNSBLConfEntry::A_BITMASK:
-						// Now we calculate the bitmask: 256*(256*(256*a+b)+c)+d
-						bitmask = resultip.s_addr >> 24; /* Last octet (network byte order) */
-						bitmask &= ConfEntry->bitmask;
-						match = (bitmask != 0);
-					break;
-					case DNSBLConfEntry::A_RECORD:
-						record = resultip.s_addr >> 24; /* Last octet */
-						match = (ConfEntry->records[record] == 1);
-					break;
-				}
-
-				if (match)
-				{
-					std::string reason = ConfEntry->reason;
-					std::string::size_type x = reason.find("%ip%");
-					while (x != std::string::npos)
-					{
-						reason.erase(x, 4);
-						reason.insert(x, them->GetIPString());
-						x = reason.find("%ip%");
-					}
-
-					ConfEntry->stats_hits++;
-
-					switch (ConfEntry->banaction)
-					{
-						case DNSBLConfEntry::I_KILL:
-						{
-							ServerInstance->Users->QuitUser(them, "Killed (" + reason + ")");
-							break;
-						}
-						case DNSBLConfEntry::I_MARK:
-						{
-							if (!ConfEntry->ident.empty())
-							{
-								them->WriteServ("304 " + them->nick + " :Your ident has been set to " + ConfEntry->ident + " because you matched " + reason);
-								them->ChangeIdent(ConfEntry->ident.c_str());
-							}
-
-							if (!ConfEntry->host.empty())
-							{
-								them->WriteServ("304 " + them->nick + " :Your host has been set to " + ConfEntry->host + " because you matched " + reason);
-								them->ChangeDisplayedHost(ConfEntry->host.c_str());
-							}
-
-							nameExt.set(them, ConfEntry->name);
-							break;
-						}
-						case DNSBLConfEntry::I_KLINE:
-						{
-							KLine* kl = new KLine(ServerInstance->Time(), ConfEntry->duration, ServerInstance->Config->ServerName.c_str(), reason.c_str(),
-									"*", them->GetIPString());
-							if (ServerInstance->XLines->AddLine(kl,NULL))
-							{
-								std::string timestr = ServerInstance->TimeString(kl->expiry);
-								ServerInstance->SNO->WriteGlobalSno('x',"K:line added due to DNSBL match on *@%s to expire on %s: %s",
-									them->GetIPString(), timestr.c_str(), reason.c_str());
-								ServerInstance->XLines->ApplyLines();
-							}
-							else
-							{
-								delete kl;
-								return;
-							}
-							break;
-						}
-						case DNSBLConfEntry::I_GLINE:
-						{
-							GLine* gl = new GLine(ServerInstance->Time(), ConfEntry->duration, ServerInstance->Config->ServerName.c_str(), reason.c_str(),
-									"*", them->GetIPString());
-							if (ServerInstance->XLines->AddLine(gl,NULL))
-							{
-								std::string timestr = ServerInstance->TimeString(gl->expiry);
-								ServerInstance->SNO->WriteGlobalSno('x',"G:line added due to DNSBL match on *@%s to expire on %s: %s",
-									them->GetIPString(), timestr.c_str(), reason.c_str());
-								ServerInstance->XLines->ApplyLines();
-							}
-							else
-							{
-								delete gl;
-								return;
-							}
-							break;
-						}
-						case DNSBLConfEntry::I_ZLINE:
-						{
-							ZLine* zl = new ZLine(ServerInstance->Time(), ConfEntry->duration, ServerInstance->Config->ServerName.c_str(), reason.c_str(),
-									them->GetIPString());
-							if (ServerInstance->XLines->AddLine(zl,NULL))
-							{
-								std::string timestr = ServerInstance->TimeString(zl->expiry);
-								ServerInstance->SNO->WriteGlobalSno('x',"Z:line added due to DNSBL match on *@%s to expire on %s: %s",
-									them->GetIPString(), timestr.c_str(), reason.c_str());
-								ServerInstance->XLines->ApplyLines();
-							}
-							else
-							{
-								delete zl;
-								return;
-							}
-							break;
-						}
-						case DNSBLConfEntry::I_UNKNOWN:
-						{
-							break;
-						}
-						break;
-					}
-
-					ServerInstance->SNO->WriteGlobalSno('a', "Connecting user %s%s detected as being on a DNS blacklist (%s) with result %d", them->nick.empty() ? "<unknown>" : "", them->GetFullRealHost().c_str(), ConfEntry->domain.c_str(), (ConfEntry->type==DNSBLConfEntry::A_BITMASK) ? bitmask : record);
-				}
-				else
-					ConfEntry->stats_misses++;
+				result = (resultip.s_addr >> 24) & config->bitmask;
+				match = (result != 0);
+				break;
 			}
-			else
+			case DNSBLEntry::Type::RECORD:
 			{
-				if (!result.empty())
-					ServerInstance->SNO->WriteGlobalSno('a', "DNSBL: %s returned address outside of acceptable subnet 127.0.0.0/8: %s", ConfEntry->domain.c_str(), result.c_str());
-				ConfEntry->stats_misses++;
+				result = resultip.s_addr >> 24;
+				match = (config->records[result] == 1);
+				break;
 			}
 		}
-	}
 
-	virtual void OnError(ResolverError e, const std::string &errormessage)
-	{
-		LocalUser* them = (LocalUser*)ServerInstance->FindUUID(theiruid);
-		if (them)
+		if (match)
 		{
-			int i = countExt.get(them);
-			if (i)
-				countExt.set(them, i - 1);
+			const auto it = config->replies.find(result);
+			const auto reasonstr = it == config->replies.end() ? INSP_FORMAT("Result {}", result) : it->second;
+
+			const std::string reason = Template::Replace(config->reason, {
+				{ "dnsbl",       config->name                                     },
+				{ "dnsbl.url",   Percent::Encode(config->name)                    },
+				{ "ip",          them->GetAddress()                               },
+				{ "network",     ServerInstance->Config->Network                  },
+				{ "network.url", Percent::Encode(ServerInstance->Config->Network) },
+				{ "reason",      reasonstr                                        },
+				{ "result",      ConvToStr(result)                                },
+			});
+
+			config->stats_hits++;
+
+			switch (config->action)
+			{
+				case DNSBLEntry::Action::KILL:
+				{
+					if (!them->exempt)
+						ServerInstance->Users.QuitUser(them, "Killed (" + reason + ")");
+					break;
+				}
+				case DNSBLEntry::Action::MARK:
+				{
+					if (!config->markuser.empty() || !config->markhost.empty())
+					{
+						// Store the u@h mask for later to avoid being overwritten by username/hostname lookups.
+						data.maskext.SetFwd(them, config, reason);
+
+						// If the user is already connected we should just do this now.
+						if (them->IsFullyConnected())
+							creator->OnUserConnect(them);
+					}
+
+					data.markext.GetRef(them).push_back(config->name);
+					break;
+				}
+				case DNSBLEntry::Action::KLINE:
+				{
+					AddLine<KLine>("K-line", reason, config->xlineduration, them, them->GetBanUser(true), them->GetAddress());
+					break;
+				}
+				case DNSBLEntry::Action::GLINE:
+				{
+					AddLine<GLine>("G-line", reason, config->xlineduration, them, them->GetBanUser(true), them->GetAddress());
+					break;
+				}
+				case DNSBLEntry::Action::ZLINE:
+				{
+					AddLine<ZLine>("Z-line", reason, config->xlineduration, them, them->GetAddress());
+					break;
+				}
+				case DNSBLEntry::Action::SHUN:
+				{
+					AddLine<Shun>("Shun", reason, config->xlineduration, them, them->GetAddress());
+					break;
+				}
+			}
+
+			ServerInstance->SNO.WriteGlobalSno('d', "{} {} ({}) detected as being on the '{}' DNSBL: {}{}",
+				them->IsFullyConnected() ? "User" : "Connecting user", them->GetRealMask(), them->GetAddress(),
+				config->name, reasonstr, them->exempt ? " -- exempt" : "");
 		}
+		else
+			config->stats_misses++;
 	}
 
-	virtual ~DNSBLResolver()
+	void OnError(const DNS::Query* q) override
 	{
+		bool is_miss = true;
+		switch (q->error)
+		{
+			case DNS::ERROR_NO_RECORDS:
+			case DNS::ERROR_DOMAIN_NOT_FOUND:
+				config->stats_misses++;
+				break;
+
+			default:
+				config->stats_errors++;
+				is_miss = false;
+				break;
+		}
+
+		LocalUser* them = ServerInstance->Users.FindUUID<LocalUser>(uuid);
+		if (!them || them->client_sa != sa)
+			return;
+
+		intptr_t i = data.countext.Get(them);
+		if (i)
+			data.countext.Set(them, i - 1);
+
+		if (is_miss)
+			return;
+
+		ServerInstance->SNO.WriteGlobalSno('d', "An error occurred whilst checking whether {} ({}) is on the '{}' DNSBL: {}",
+			them->GetRealMask(), them->GetAddress(), config->name, data.dns->GetErrorStr(q->error));
 	}
 };
 
-class ModuleDNSBL : public Module
+class CommandDNSBL final
+	: public Command
 {
-	std::vector<reference<DNSBLConfEntry> > DNSBLConfEntries;
-	LocalStringExt nameExt;
-	LocalIntExt countExt;
+private:
+	SharedData& data;
 
-	/*
-	 *	Convert a string to EnumBanaction
-	 */
-	DNSBLConfEntry::EnumBanaction str2banaction(const std::string &action)
+public:
+	CommandDNSBL(Module* mod, SharedData& sd)
+		: Command(mod, "DNSBL", 1, 2)
+		, data(sd)
 	{
-		if(action.compare("KILL")==0)
-			return DNSBLConfEntry::I_KILL;
-		if(action.compare("KLINE")==0)
-			return DNSBLConfEntry::I_KLINE;
-		if(action.compare("ZLINE")==0)
-			return DNSBLConfEntry::I_ZLINE;
-		if(action.compare("GLINE")==0)
-			return DNSBLConfEntry::I_GLINE;
-		if(action.compare("MARK")==0)
-			return DNSBLConfEntry::I_MARK;
-
-		return DNSBLConfEntry::I_UNKNOWN;
-	}
- public:
-	ModuleDNSBL() : nameExt("dnsbl_match", this), countExt("dnsbl_pending", this) { }
-
-	void init()
-	{
-		ReadConf();
-		ServerInstance->Modules->AddService(nameExt);
-		ServerInstance->Modules->AddService(countExt);
-		Implementation eventlist[] = { I_OnRehash, I_OnSetUserIP, I_OnStats, I_OnSetConnectClass, I_OnCheckReady };
-		ServerInstance->Modules->Attach(eventlist, this, sizeof(eventlist)/sizeof(Implementation));
+		access_needed = CmdAccess::OPERATOR;
+		syntax = { "[<nick> [<reason>]]" };
+		translation = { TR_NICK, TR_TEXT };
 	}
 
-	Version GetVersion()
+	CmdResult Handle(User* user, const Params& parameters) override
 	{
-		return Version("Provides handling of DNS blacklists", VF_VENDOR);
-	}
-
-	/** Fill our conf vector with data
-	 */
-	void ReadConf()
-	{
-		DNSBLConfEntries.clear();
-
-		ConfigTagList dnsbls = ServerInstance->Config->ConfTags("dnsbl");
-		for(ConfigIter i = dnsbls.first; i != dnsbls.second; ++i)
-		{
-			ConfigTag* tag = i->second;
-			reference<DNSBLConfEntry> e = new DNSBLConfEntry();
-
-			e->name = tag->getString("name");
-			e->ident = tag->getString("ident");
-			e->host = tag->getString("host");
-			e->reason = tag->getString("reason");
-			e->domain = tag->getString("domain");
-
-			if (tag->getString("type") == "bitmask")
-			{
-				e->type = DNSBLConfEntry::A_BITMASK;
-				e->bitmask = tag->getInt("bitmask");
-			}
-			else
-			{
-				memset(e->records, 0, sizeof(e->records));
-				e->type = DNSBLConfEntry::A_RECORD;
-				irc::portparser portrange(tag->getString("records"), false);
-				long item = -1;
-				while ((item = portrange.GetToken()))
-					e->records[item] = 1;
-			}
-
-			e->banaction = str2banaction(tag->getString("action"));
-			e->duration = ServerInstance->Duration(tag->getString("duration", "60"));
-
-			/* Use portparser for record replies */
-
-			/* yeah, logic here is a little messy */
-			if ((e->bitmask <= 0) && (DNSBLConfEntry::A_BITMASK == e->type))
-			{
-				std::string location = tag->getTagLocation();
-				ServerInstance->SNO->WriteGlobalSno('a', "DNSBL(%s): invalid bitmask", location.c_str());
-			}
-			else if (e->name.empty())
-			{
-				std::string location = tag->getTagLocation();
-				ServerInstance->SNO->WriteGlobalSno('a', "DNSBL(%s): Invalid name", location.c_str());
-			}
-			else if (e->domain.empty())
-			{
-				std::string location = tag->getTagLocation();
-				ServerInstance->SNO->WriteGlobalSno('a', "DNSBL(%s): Invalid domain", location.c_str());
-			}
-			else if (e->banaction == DNSBLConfEntry::I_UNKNOWN)
-			{
-				std::string location = tag->getTagLocation();
-				ServerInstance->SNO->WriteGlobalSno('a', "DNSBL(%s): Invalid banaction", location.c_str());
-			}
-			else if (e->duration <= 0)
-			{
-				std::string location = tag->getTagLocation();
-				ServerInstance->SNO->WriteGlobalSno('a', "DNSBL(%s): Invalid duration", location.c_str());
-			}
-			else
-			{
-				if (e->reason.empty())
-				{
-					std::string location = tag->getTagLocation();
-					ServerInstance->SNO->WriteGlobalSno('a', "DNSBL(%s): empty reason, using defaults", location.c_str());
-					e->reason = "Your IP has been blacklisted.";
-				}
-
-				/* add it, all is ok */
-				DNSBLConfEntries.push_back(e);
-			}
-		}
-	}
-
-	void OnRehash(User* user)
-	{
-		ReadConf();
-	}
-
-	void OnSetUserIP(LocalUser* user)
-	{
-		if ((user->exempt) || (user->client_sa.sa.sa_family != AF_INET))
-			return;
-
-		if (user->MyClass)
-		{
-			if (!user->MyClass->config->getBool("usednsbl", true))
-				return;
-		}
+		User* target;
+		if (IS_LOCAL(user))
+			target = ServerInstance->Users.FindNick(parameters[0], true);
 		else
-			ServerInstance->Logs->Log("m_dnsbl", DEBUG, "User has no connect class in OnSetUserIP");
+			target = ServerInstance->Users.FindUUID(parameters[0], true);
 
-		unsigned char a, b, c, d;
-		char reversedipbuf[128];
-		std::string reversedip;
-
-		d = (unsigned char) (user->client_sa.in4.sin_addr.s_addr >> 24) & 0xFF;
-		c = (unsigned char) (user->client_sa.in4.sin_addr.s_addr >> 16) & 0xFF;
-		b = (unsigned char) (user->client_sa.in4.sin_addr.s_addr >> 8) & 0xFF;
-		a = (unsigned char) user->client_sa.in4.sin_addr.s_addr & 0xFF;
-
-		snprintf(reversedipbuf, 128, "%d.%d.%d.%d", d, c, b, a);
-		reversedip = std::string(reversedipbuf);
-
-		countExt.set(user, DNSBLConfEntries.size());
-
-		// For each DNSBL, we will run through this lookup
-		unsigned int i = 0;
-		while (i < DNSBLConfEntries.size())
+		// We couldn't find the user so just give up.
+		if (!target)
 		{
-			// Fill hostname with a dnsbl style host (d.c.b.a.domain.tld)
-			std::string hostname = reversedip + "." + DNSBLConfEntries[i]->domain;
-
-			/* now we'd need to fire off lookups for `hostname'. */
-			bool cached;
-			DNSBLResolver *r = new DNSBLResolver(this, nameExt, countExt, hostname, user, DNSBLConfEntries[i], cached);
-			ServerInstance->AddResolver(r, cached);
-			if (user->quitting)
-				break;
-			i++;
+			user->WriteNumeric(Numerics::NoSuchNick(parameters[0]));
+			return CmdResult::FAILURE;
 		}
+
+		auto* ltarget = IS_LOCAL(target);
+		if (!ltarget)
+			return CmdResult::SUCCESS; // The user is on another server so just let it forward.
+
+		intptr_t count = data.countext.Get(ltarget);
+		if (count)
+		{
+			// TODO: replace this with a FAIL stdrpl when we can network those.
+			user->WriteRemoteNotice("*** DNSBL: Unable to recheck {}: still waiting on {} DNSBLs from the previous check.",
+				ltarget->nick, count);
+			return CmdResult::FAILURE;
+		}
+
+		// TODO: replace this with a NOTE stdrpl when we can network those.
+		user->WriteRemoteNotice("*** DNSBL: Rechecking {} against {} DNSBLs.", ltarget->nick, data.dnsbls.size());
+
+		const bool has_reason = parameters.size() > 1;
+		ServerInstance->SNO.WriteGlobalSno('d', "{} is rechecking whether {} ({}) is in a DNSBL{}{}", user->nick,
+			ltarget->nick, ltarget->GetAddress(),  has_reason ? ": " : "", has_reason ? parameters[1] : ".");
+
+		data.Lookup(ltarget);
+		return CmdResult::SUCCESS;
 	}
 
-	ModResult OnSetConnectClass(LocalUser* user, ConnectClass* myclass)
+	RouteDescriptor GetRouting(User* user, const Params& parameters) override
 	{
-		std::string dnsbl;
-		if (!myclass->config->readString("dnsbl", dnsbl))
+		return ROUTE_OPT_UCAST(parameters[0]);
+	}
+};
+
+void SharedData::Lookup(LocalUser* user)
+{
+	if (!dns)
+		return; // The core_dns module is not loaded.
+
+	if (!user->GetClass()->config->getBool("usednsbl", true))
+		return; // The user's class is exempt from DNSBL lookups.
+
+	const std::string reversedip = ReverseIP(user->client_sa);
+	ServerInstance->Logs.Debug(MODNAME, "Reversed IP {} => {}", user->GetAddress(), reversedip);
+
+	countext.Set(user, dnsbls.size());
+
+	// For each DNSBL, we will run through this lookup
+	for (const auto& dnsbl : dnsbls)
+	{
+		// Fill hostname with a dnsbl style host (d.c.b.a.domain.tld)
+		const std::string hostname = reversedip + "." + dnsbl->domain;
+
+		// Try to do the DNSBL lookup.
+		auto* r = new DNSBLResolver(dns->creator, *this, hostname, user, dnsbl);
+		try
+		{
+			dns->Process(r);
+		}
+		catch (const DNS::Exception& ex)
+		{
+			delete r;
+			ServerInstance->Logs.Debug(MODNAME, "DNSBL lookup error: {}", ex.GetReason());
+		}
+
+		if (user->quitting)
+			break; // DNS resolver found a cached hit.
+	}
+}
+
+class ModuleDNSBL final
+	: public Module
+	, public Stats::EventListener
+{
+private:
+	SharedData data;
+	CommandDNSBL cmd;
+
+public:
+	ModuleDNSBL()
+		: Module(VF_VENDOR, "Allows the server administrator to check the IP address of connecting users against a DNSBL.")
+		, Stats::EventListener(this)
+		, data(this)
+		, cmd(this, data)
+	{
+	}
+
+	void init() override
+	{
+		ServerInstance->SNO.EnableSnomask('d', "DNSBL");
+	}
+
+	void Prioritize() override
+	{
+		Module* corexline = ServerInstance->Modules.Find("core_xline");
+		ServerInstance->Modules.SetPriority(this, I_OnChangeRemoteAddress, PRIORITY_AFTER, corexline);
+	}
+
+	void ReadConfig(ConfigStatus& status) override
+	{
+		DNSBLEntries newdnsbls;
+		for (const auto& [_, tag] : ServerInstance->Config->ConfTags("dnsbl"))
+		{
+			auto entry = std::make_shared<DNSBLEntry>(this, tag);
+			newdnsbls.push_back(entry);
+		}
+		for (const auto& [_, tag] : ServerInstance->Config->ConfTags("dnsblreply"))
+		{
+			const auto dnsblname = tag->getString("name");
+			auto dnsbl = std::find_if(newdnsbls.begin(), newdnsbls.end(), [&dnsblname](const auto& d)
+			{
+				return insp::equalsci(d->name, dnsblname);
+			});
+			if (dnsbl == newdnsbls.end())
+				throw ModuleException(this, "<dnsblreply:name> must be set to the name of a DNSBL at " + tag->source.str());
+
+			const auto dnsbldesc = tag->getString("description");
+			if (dnsbldesc.empty())
+				throw ModuleException(this, "<dnsblreply:description> must not be empty at " + tag->source.str());
+
+			const auto dnsblreply = tag->getNum<uint32_t>("reply", std::numeric_limits<uint32_t>::max());
+			if (dnsblreply > 16'777'215)
+			{
+				throw ModuleException(this, INSP_FORMAT("<dnsblreply:reply> ({}) is not a valid DNSBL reply at {}",
+					dnsblreply, tag->source.str()));
+			}
+
+			(*dnsbl)->replies[dnsblreply] = dnsbldesc;
+		}
+
+		data.dnsbls.swap(newdnsbls);
+	}
+
+	void OnChangeRemoteAddress(LocalUser* user) override
+	{
+		if (!user->quitting && user->GetClass())
+			data.Lookup(user);
+	}
+
+	ModResult OnPreChangeConnectClass(LocalUser* user, const std::shared_ptr<ConnectClass>& klass, std::optional<Numeric::Numeric>& errnum) override
+	{
+		const std::string dnsbl = klass->config->getString("dnsbl");
+		if (dnsbl.empty())
 			return MOD_RES_PASSTHRU;
-		std::string* match = nameExt.get(user);
-		std::string myname = match ? *match : "";
-		if (dnsbl == myname)
-			return MOD_RES_PASSTHRU;
+
+		MarkExtItem::List* match = data.markext.Get(user);
+		if (!match)
+		{
+			ServerInstance->Logs.Debug("CONNECTCLASS", "The {} connect class is not suitable as it requires a DNSBL mark.",
+				klass->GetName());
+			return MOD_RES_DENY;
+		}
+
+		for (const auto& mark : *match)
+		{
+			if (InspIRCd::Match(mark, dnsbl))
+				return MOD_RES_PASSTHRU;
+		}
+
+		ServerInstance->Logs.Debug("CONNECTCLASS", "The {} connect class is not suitable as the DNSBL marks ({}) do not match {}.",
+			klass->GetName(), insp::join(*match, ", "), dnsbl);
 		return MOD_RES_DENY;
 	}
-	
-	ModResult OnCheckReady(LocalUser *user)
+
+	ModResult OnCheckReady(LocalUser* user) override
 	{
-		if (countExt.get(user))
-			return MOD_RES_DENY;
-		return MOD_RES_PASSTHRU;
+		// Block until all of the DNSBL lookups are complete.
+		return data.countext.Get(user) ? MOD_RES_DENY : MOD_RES_PASSTHRU;
 	}
 
-	ModResult OnStats(char symbol, User* user, string_list &results)
+	void OnUserConnect(LocalUser* user) override
 	{
-		if (symbol != 'd')
+		DNSBLMask* ih = data.maskext.Get(user);
+		if (ih)
+		{
+			if (!ih->user.empty())
+			{
+				user->ChangeDisplayedUser(ih->user);
+				user->WriteNotice("Your username has been set to " + ih->user + ": " + ih->reason);
+			}
+
+			if (!ih->host.empty())
+			{
+				user->ChangeDisplayedHost(ih->host);
+				user->WriteNotice("Your hostname has been set to " + ih->host + ": " + ih->reason);
+			}
+
+			data.maskext.Unset(user);
+		}
+	}
+
+	ModResult OnStats(Stats::Context& stats) override
+	{
+		if (stats.GetSymbol() != 'd')
 			return MOD_RES_PASSTHRU;
 
-		unsigned long total_hits = 0, total_misses = 0;
-
-		for (std::vector<reference<DNSBLConfEntry> >::const_iterator i = DNSBLConfEntries.begin(); i != DNSBLConfEntries.end(); ++i)
+		unsigned long total_hits = 0;
+		unsigned long total_misses = 0;
+		unsigned long total_errors = 0;
+		for (const auto& dnsbl : data.dnsbls)
 		{
-			total_hits += (*i)->stats_hits;
-			total_misses += (*i)->stats_misses;
+			total_hits += dnsbl->stats_hits;
+			total_misses += dnsbl->stats_misses;
+			total_errors += dnsbl->stats_errors;
 
-			results.push_back(ServerInstance->Config->ServerName + " 304 " + user->nick + " :DNSBLSTATS DNSbl \"" + (*i)->name + "\" had " +
-					ConvToStr((*i)->stats_hits) + " hits and " + ConvToStr((*i)->stats_misses) + " misses");
+			stats.AddGenericRow(INSP_FORMAT("The \"{}\" DNSBL had {} hits, {} misses, and {} errors",
+				dnsbl->name, dnsbl->stats_hits, dnsbl->stats_misses, dnsbl->stats_errors));
 		}
 
-		results.push_back(ServerInstance->Config->ServerName + " 304 " + user->nick + " :DNSBLSTATS Total hits: " + ConvToStr(total_hits));
-		results.push_back(ServerInstance->Config->ServerName + " 304 " + user->nick + " :DNSBLSTATS Total misses: " + ConvToStr(total_misses));
-
-		return MOD_RES_PASSTHRU;
+		stats.AddGenericRow("Total DNSBL hits: " + ConvToStr(total_hits));
+		stats.AddGenericRow("Total DNSBL misses: " + ConvToStr(total_misses));
+		stats.AddGenericRow("Total DNSBL errors: " + ConvToStr(total_errors));
+		return MOD_RES_DENY;
 	}
 };
 

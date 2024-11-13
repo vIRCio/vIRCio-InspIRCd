@@ -1,11 +1,16 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
- *   Copyright (C) 2009 Daniel De Graaf <danieldg@inspircd.org>
- *   Copyright (C) 2008 Thomas Stagner <aquanight@inspircd.org>
- *   Copyright (C) 2007-2008 Craig Edwards <craigedwards@brainbox.cc>
+ *   Copyright (C) 2019 linuxdaemon <linuxdaemon.irc@gmail.com>
+ *   Copyright (C) 2013-2015 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2013, 2018-2024 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2013 Adam <Adam@anope.org>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
+ *   Copyright (C) 2009-2010 Daniel De Graaf <danieldg@inspircd.org>
+ *   Copyright (C) 2009 Uli Schlachter <psychon@znc.in>
+ *   Copyright (C) 2007-2008 Dennis Friis <peavey@inspircd.org>
+ *   Copyright (C) 2007, 2009 Craig Edwards <brain@inspircd.org>
  *   Copyright (C) 2007 Robin Burchell <robin+git@viroteck.net>
- *   Copyright (C) 2007 Dennis Friis <peavey@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -21,27 +26,22 @@
  */
 
 
-#ifndef M_SPANNINGTREE_MAIN_H
-#define M_SPANNINGTREE_MAIN_H
+#pragma once
 
 #include "inspircd.h"
-#include <stdarg.h>
-
-/** If you make a change which breaks the protocol, increment this.
- * If you  completely change the protocol, completely change the number.
- *
- * IMPORTANT: If you make changes, document your changes here, without fail:
- * https://wiki.inspircd.org/List_of_protocol_changes_between_versions
- *
- * Failure to document your protocol changes will result in a painfully
- * painful death by pain. You have been warned.
- */
-const long ProtocolVersion = 1202;
-const long MinCompatProtocol = 1201;
+#include "event.h"
+#include "modules/dns.h"
+#include "modules/ssl.h"
+#include "modules/stats.h"
+#include "modules/ctctags.h"
+#include "modules/server.h"
+#include "servercommand.h"
+#include "commands.h"
+#include "protocolinterface.h"
+#include "tags.h"
 
 /** Forward declarations
  */
-class SpanningTreeCommands;
 class SpanningTreeUtilities;
 class CacheRefreshTimer;
 class TreeServer;
@@ -50,68 +50,91 @@ class Autoconnect;
 
 /** This is the main class for the spanningtree module
  */
-class ModuleSpanningTree : public Module
+class ModuleSpanningTree final
+	: public Module
+	, public Away::EventListener
+	, public Stats::EventListener
+	, public CTCTags::EventListener
 {
-	SpanningTreeCommands* commands;
+	/** Client to server commands, registered in the core
+	 */
+	CommandRConnect rconnect;
+	CommandRSQuit rsquit;
+	CommandMap map;
 
- public:
-	SpanningTreeUtilities* Utils;
+	/** Server to server only commands, not registered in the core
+	 */
+	SpanningTreeCommands commands;
 
-	CacheRefreshTimer *RefreshTimer;
+	/** Next membership id assigned when a local user joins a channel
+	 */
+	Membership::Id currmembid = 1;
+
+public:
+	/** The specialized ProtocolInterface that is assigned to ServerInstance->PI on load
+	 */
+	SpanningTreeProtocolInterface protocolinterface;
+
+	/** Event provider for our routing event. */
+	Events::ModuleEventProvider routeeventprov;
+
+	/** Event provider for our link events. */
+	Events::ModuleEventProvider linkeventprov;
+
+	/** Event provider for our message events. */
+	Events::ModuleEventProvider messageeventprov;
+
+	/** Event provider for our sync events. */
+	Events::ModuleEventProvider synceventprov;
+
+	/** API for accessing user client certificates. */
+	UserCertificateAPI sslapi;
+
+	/** Tags for server to server messages. */
+	ServerTags servertags;
+
+	/** The DNS manager service provided by core_dns. */
+	DNS::ManagerRef DNS;
+
+	/** Event provider for message tags. */
+	ClientProtocol::MessageTagEvent tagevprov;
+
+	/** Manager for server commands. */
+	ServerCommandManager CmdManager;
+
 	/** Set to true if inside a spanningtree call, to prevent sending
 	 * xlines and other things back to their source
 	 */
-	bool loopCall;
-
-	/** If true OnUserPostNick() won't update the nick TS before sending the NICK,
-	 * used when handling SVSNICK.
-	 */
-	bool KeepNickTS;
+	bool loopCall = false;
 
 	/** Constructor
 	 */
 	ModuleSpanningTree();
-	void init();
+	void init() override;
 
 	/** Shows /LINKS
 	 */
 	void ShowLinks(TreeServer* Current, User* user, int hops);
 
-	/** Counts local and remote servers
-	 */
-	int CountServs();
-
 	/** Handle LINKS command
 	 */
-	void HandleLinks(const std::vector<std::string>& parameters, User* user);
-
-	/** Show MAP output to a user (recursive)
-	 */
-	void ShowMap(TreeServer* Current, User* user, int depth, int &line, char* names, int &maxnamew, char* stats);
-
-	/** Handle MAP command
-	 */
-	bool HandleMap(const std::vector<std::string>& parameters, User* user);
+	void HandleLinks(const CommandBase::Params& parameters, User* user);
 
 	/** Handle SQUIT
 	 */
-	ModResult HandleSquit(const std::vector<std::string>& parameters, User* user);
+	static ModResult HandleSquit(const CommandBase::Params& parameters, User* user);
 
 	/** Handle remote WHOIS
 	 */
-	ModResult HandleRemoteWhois(const std::vector<std::string>& parameters, User* user);
-
-	/** Ping all local servers
-	 */
-	void DoPingChecks(time_t curtime);
+	static ModResult HandleRemoteWhois(const CommandBase::Params& parameters, User* user);
 
 	/** Connect a server locally
 	 */
-	void ConnectServer(Link* x, Autoconnect* y = NULL);
+	void ConnectServer(const std::shared_ptr<Link>& x, const std::shared_ptr<Autoconnect>& y = nullptr);
 
 	/** Connect the next autoconnect server
 	 */
-	void ConnectServer(Autoconnect* y, bool on_timer);
+	void ConnectServer(const std::shared_ptr<Autoconnect>& y, bool on_timer);
 
 	/** Check if any servers are due to be autoconnected
 	 */
@@ -119,70 +142,50 @@ class ModuleSpanningTree : public Module
 
 	/** Check if any connecting servers should timeout
 	 */
-	void DoConnectTimeout(time_t curtime);
+	static void DoConnectTimeout(time_t curtime);
 
-	/** Handle remote VERSON
+	/** Handle remote VERSION
 	 */
-	ModResult HandleVersion(const std::vector<std::string>& parameters, User* user);
+	static ModResult HandleVersion(const CommandBase::Params& parameters, User* user);
 
 	/** Handle CONNECT
 	 */
-	ModResult HandleConnect(const std::vector<std::string>& parameters, User* user);
+	ModResult HandleConnect(const CommandBase::Params& parameters, User* user);
 
-	/** Attempt to send a message to a user
-	 */
-	void RemoteMessage(User* user, const char* format, ...) CUSTOM_PRINTF(3, 4);
-
-	/** Returns oper-specific MAP information
-	 */
-	const std::string MapOperInfo(TreeServer* Current);
-
-	/** Display a time as a human readable string
-	 */
-	std::string TimeToStr(time_t secs);
-
-	/**
-	 ** *** MODULE EVENTS ***
-	 **/
-
-	ModResult OnPreCommand(std::string &command, std::vector<std::string>& parameters, LocalUser *user, bool validated, const std::string &original_line);
-	void OnPostCommand(const std::string &command, const std::vector<std::string>& parameters, LocalUser *user, CmdResult result, const std::string &original_line);
-	void OnGetServerDescription(const std::string &servername,std::string &description);
-	void OnUserConnect(LocalUser* source);
-	void OnUserInvite(User* source,User* dest,Channel* channel, time_t);
-	void OnPostTopicChange(User* user, Channel* chan, const std::string &topic);
-	void OnWallops(User* user, const std::string &text);
-	void OnUserNotice(User* user, void* dest, int target_type, const std::string &text, char status, const CUList &exempt_list);
-	void OnUserMessage(User* user, void* dest, int target_type, const std::string &text, char status, const CUList &exempt_list);
-	void OnBackgroundTimer(time_t curtime);
-	void OnUserJoin(Membership* memb, bool sync, bool created, CUList& excepts);
-	void OnChangeHost(User* user, const std::string &newhost);
-	void OnChangeName(User* user, const std::string &gecos);
-	void OnChangeIdent(User* user, const std::string &ident);
-	void OnUserPart(Membership* memb, std::string &partmessage, CUList& excepts);
-	void OnUserQuit(User* user, const std::string &reason, const std::string &oper_message);
-	void OnUserPostNick(User* user, const std::string &oldnick);
-	void OnUserKick(User* source, Membership* memb, const std::string &reason, CUList& excepts);
-	void OnRemoteKill(User* source, User* dest, const std::string &reason, const std::string &operreason);
-	void OnPreRehash(User* user, const std::string &parameter);
-	void OnRehash(User* user);
-	void OnOper(User* user, const std::string &opertype);
-	void OnLine(User* source, const std::string &host, bool adding, char linetype, long duration, const std::string &reason);
-	void OnAddLine(User *u, XLine *x);
-	void OnDelLine(User *u, XLine *x);
-	void OnMode(User* user, void* dest, int target_type, const std::vector<std::string> &text, const std::vector<TranslateType> &translate);
-	ModResult OnStats(char statschar, User* user, string_list &results);
-	ModResult OnSetAway(User* user, const std::string &awaymsg);
-	void ProtoSendMode(void* opaque, TargetTypeFlags target_type, void* target, const std::vector<std::string> &modeline, const std::vector<TranslateType> &translate);
-	void ProtoSendMetaData(void* opaque, Extensible* target, const std::string &extname, const std::string &extdata);
-	void OnLoadModule(Module* mod);
-	void OnUnloadModule(Module* mod);
-	ModResult OnAcceptConnection(int newsock, ListenSocket* from, irc::sockets::sockaddrs* client, irc::sockets::sockaddrs* server);
-	void OnRequest(Request& request);
-	CullResult cull();
-	~ModuleSpanningTree();
-	Version GetVersion();
-	void Prioritize();
+	ModResult OnPreCommand(std::string& command, CommandBase::Params& parameters, LocalUser* user, bool validated) override;
+	void OnPostCommand(Command*, const CommandBase::Params& parameters, LocalUser* user, CmdResult result, bool loop) override;
+	void OnUserConnect(LocalUser* source) override;
+	void OnUserInvite(User* source, User* dest, Channel* channel, time_t timeout, ModeHandler::Rank notifyrank, CUList& notifyexcepts) override;
+	ModResult OnPreTopicChange(User* user, Channel* chan, const std::string& topic) override;
+	void OnPostTopicChange(User* user, Channel* chan, const std::string& topic) override;
+	void OnUserPostMessage(User* user, const MessageTarget& target, const MessageDetails& details) override;
+	void OnUserPostTagMessage(User* user, const MessageTarget& target, const CTCTags::TagMessageDetails& details) override;
+	void OnBackgroundTimer(time_t curtime) override;
+	void OnUserJoin(Membership* memb, bool sync, bool created, CUList& excepts) override;
+	void OnChangeHost(User* user, const std::string& newhost) override;
+	void OnChangeRealHost(User* user, const std::string& newhost) override;
+	void OnChangeRealName(User* user, const std::string& real) override;
+	void OnChangeUser(User* user, const std::string& newuser) override;
+	void OnChangeRealUser(User* user, const std::string& newuser) override;
+	void OnUserPart(Membership* memb, std::string& partmessage, CUList& excepts) override;
+	void OnUserQuit(User* user, const std::string& reason, const std::string& oper_message) override;
+	void OnUserPostNick(User* user, const std::string& oldnick) override;
+	void OnUserKick(User* source, Membership* memb, const std::string& reason, CUList& excepts) override;
+	void OnPreRehash(User* user, const std::string& parameter) override;
+	void ReadConfig(ConfigStatus& status) override;
+	void OnOperLogin(User* user, const std::shared_ptr<OperAccount>& oper, bool automatic) override;
+	void OnAddLine(User* u, XLine* x) override;
+	void OnDelLine(User* u, XLine* x) override;
+	ModResult OnStats(Stats::Context& stats) override;
+	void OnUserAway(User* user, const std::optional<AwayState>& prevstate) override;
+	void OnUserBack(User* user, const std::optional<AwayState>& prevstate) override;
+	void OnLoadModule(Module* mod) override;
+	void OnUnloadModule(Module* mod) override;
+	ModResult OnAcceptConnection(int newsock, ListenSocket* from, const irc::sockets::sockaddrs& client, const irc::sockets::sockaddrs& server) override;
+	void OnMode(User* source, User* u, Channel* c, const Modes::ChangeList& modes, ModeParser::ModeProcessFlag processflags) override;
+	void OnShutdown(const std::string& reason) override;
+	void OnDecodeMetadata(Extensible* target, const std::string& extname, const std::string& extdata) override;
+	Cullable::Result Cull() override;
+	~ModuleSpanningTree() override;
+	void Prioritize() override;
 };
-
-#endif

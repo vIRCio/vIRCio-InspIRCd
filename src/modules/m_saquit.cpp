@@ -1,9 +1,15 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
+ *   Copyright (C) 2019-2023 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2016 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2012, 2019 Robby <robby@chatbelgie.be>
+ *   Copyright (C) 2009 Thomas Stagner <aquanight@gmail.com>
+ *   Copyright (C) 2009 Daniel De Graaf <danieldg@inspircd.org>
+ *   Copyright (C) 2008 Robin Burchell <robin+git@viroteck.net>
+ *   Copyright (C) 2007 John Brooks <john@jbrooks.io>
  *   Copyright (C) 2007 Dennis Friis <peavey@inspircd.org>
- *   Copyright (C) 2006-2007 Robin Burchell <robin+git@viroteck.net>
- *   Copyright (C) 2004-2005 Craig Edwards <craigedwards@brainbox.cc>
+ *   Copyright (C) 2007 Craig Edwards <brain@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -21,78 +27,67 @@
 
 #include "inspircd.h"
 
-/* $ModDesc: Provides support for an SAQUIT command, exits user with a reason */
-
-/** Handle /SAQUIT
- */
-class CommandSaquit : public Command
+class CommandSaquit final
+	: public Command
 {
- public:
-	CommandSaquit(Module* Creator) : Command(Creator, "SAQUIT", 2, 2)
+private:
+	UserModeReference servprotectmode;
+
+public:
+	CommandSaquit(Module* Creator)
+		: Command(Creator, "SAQUIT", 2, 2)
+		, servprotectmode(Creator, "servprotect")
 	{
-		flags_needed = 'o'; Penalty = 0; syntax = "<nick> <reason>";
-		TRANSLATE3(TR_NICK, TR_TEXT, TR_END);
+		access_needed = CmdAccess::OPERATOR;
+		syntax = { "<nick> :<reason>" };
+		translation = { TR_NICK, TR_TEXT };
 	}
 
-	CmdResult Handle (const std::vector<std::string>& parameters, User *user)
+	CmdResult Handle(User* user, const Params& parameters) override
 	{
-		User* dest = ServerInstance->FindNick(parameters[0]);
-		if ((dest) && (!IS_SERVER(dest)) && (dest->registered == REG_ALL))
+		auto* dest = ServerInstance->Users.Find(parameters[0], true);
+		if (dest)
 		{
-			if (ServerInstance->ULine(dest->server))
+			if (dest->IsModeSet(servprotectmode))
 			{
-				user->WriteNumeric(ERR_NOPRIVILEGES, "%s :Cannot use an SA command on a u-lined client",user->nick.c_str());
-				return CMD_FAILURE;
+				user->WriteNumeric(ERR_NOPRIVILEGES, "Cannot use an SA command on a service");
+				return CmdResult::FAILURE;
 			}
 
 			// Pass the command on, so the client's server can quit it properly.
 			if (!IS_LOCAL(dest))
-				return CMD_SUCCESS;
-			
-			ServerInstance->SNO->WriteGlobalSno('a', user->nick+" used SAQUIT to make "+dest->nick+" quit with a reason of "+parameters[1]);
+				return CmdResult::SUCCESS;
 
-			ServerInstance->Users->QuitUser(dest, parameters[1]);
-			return CMD_SUCCESS;
+			ServerInstance->SNO.WriteGlobalSno('a', user->nick+" used SAQUIT to make "+dest->nick+" quit with a reason of "+parameters[1]);
+
+			ServerInstance->Users.QuitUser(dest, parameters[1]);
+			return CmdResult::SUCCESS;
 		}
 		else
 		{
-			user->WriteServ("NOTICE %s :*** Invalid nickname '%s'", user->nick.c_str(), parameters[0].c_str());
-			return CMD_FAILURE;
+			user->WriteNotice("*** Invalid nickname: '" + parameters[0] + "'");
+			return CmdResult::FAILURE;
 		}
 	}
 
-	RouteDescriptor GetRouting(User* user, const std::vector<std::string>& parameters)
+	RouteDescriptor GetRouting(User* user, const Params& parameters) override
 	{
-		User* dest = ServerInstance->FindNick(parameters[0]);
-		if (dest)
-			return ROUTE_OPT_UCAST(dest->server);
-		return ROUTE_LOCALONLY;
+		return ROUTE_OPT_UCAST(parameters[0]);
 	}
 };
 
-class ModuleSaquit : public Module
+class ModuleSaquit final
+	: public Module
 {
+private:
 	CommandSaquit cmd;
- public:
+
+public:
 	ModuleSaquit()
-		: cmd(this)
+		: Module(VF_VENDOR | VF_OPTCOMMON, "Adds the /SAQUIT command which allows server operators to disconnect users from the server.")
+		, cmd(this)
 	{
 	}
-
-	void init()
-	{
-		ServerInstance->Modules->AddService(cmd);
-	}
-
-	virtual ~ModuleSaquit()
-	{
-	}
-
-	virtual Version GetVersion()
-	{
-		return Version("Provides support for an SAQUIT command, exits user with a reason", VF_OPTCOMMON | VF_VENDOR);
-	}
-
 };
 
 MODULE_INIT(ModuleSaquit)

@@ -1,9 +1,15 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
- *   Copyright (C) 2007 Dennis Friis <peavey@inspircd.org>
+ *   Copyright (C) 2021 Dominic Hamon
+ *   Copyright (C) 2018-2024 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2018 linuxdaemon <linuxdaemon.irc@gmail.com>
+ *   Copyright (C) 2013, 2016 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
+ *   Copyright (C) 2009 Daniel De Graaf <danieldg@inspircd.org>
+ *   Copyright (C) 2007-2008 Craig Edwards <brain@inspircd.org>
  *   Copyright (C) 2007 Robin Burchell <robin+git@viroteck.net>
- *   Copyright (C) 2006-2007 Craig Edwards <craigedwards@brainbox.cc>
+ *   Copyright (C) 2007 Dennis Friis <peavey@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -20,75 +26,155 @@
 
 
 #include "inspircd.h"
+#include "modules/account.h"
+#include "modules/isupport.h"
+#include "timeutils.h"
 
-/* $ModDesc: Disallows /LIST for recently connected clients to hinder spam bots */
+typedef std::vector<std::string> AllowList;
 
-class ModuleSecureList : public Module
+class ModuleSecureList final
+	: public Module
+	, public ISupport::EventListener
 {
- private:
-	std::vector<std::string> allowlist;
-	time_t WaitTime;
- public:
-	void init()
+private:
+	Account::API accountapi;
+	AllowList allowlist;
+	bool exemptregistered;
+	unsigned long fakechans;
+	std::string fakechanprefix;
+	std::string fakechantopic;
+	size_t hidesmallchans;
+	bool sendingfakelist = false;
+	bool showmsg;
+	unsigned long waittime;
+
+	bool IsExempt(User* user)
 	{
-		OnRehash(NULL);
-		Implementation eventlist[] = { I_OnRehash, I_OnPreCommand, I_On005Numeric };
-		ServerInstance->Modules->Attach(eventlist, this, sizeof(eventlist)/sizeof(Implementation));
+		// Allow if the source is a privileged server operator.
+		if (user->HasPrivPermission("servers/ignore-securelist"))
+			return true;
+
+		// Allow if the source is logged in and <securelist:exemptregistered> is set.
+		if (exemptregistered && accountapi && accountapi->GetAccountName(user))
+			return true;
+
+		// Allow if the source matches an <securehost> entry.
+		for (const auto& allowhost : allowlist)
+		{
+			if (InspIRCd::Match(user->GetRealUserHost(), allowhost, ascii_case_insensitive_map))
+				return true;
+
+			if (InspIRCd::Match(user->GetUserAddress(), allowhost, ascii_case_insensitive_map))
+				return true;
+		}
+
+		// The user does not appear to be exempt.
+		return false;
 	}
 
-	virtual ~ModuleSecureList()
+public:
+	ModuleSecureList()
+		: Module(VF_VENDOR, "Prevents users from using the /LIST command until a predefined period has passed.")
+		, ISupport::EventListener(this)
+		, accountapi(this)
 	{
 	}
 
-	virtual Version GetVersion()
+	void ReadConfig(ConfigStatus& status) override
 	{
-		return Version("Disallows /LIST for recently connected clients to hinder spam bots", VF_VENDOR);
+		AllowList newallows;
+		for (const auto& [_, tag] : ServerInstance->Config->ConfTags("securehost"))
+		{
+			const std::string host = tag->getString("exception");
+			if (host.empty())
+				throw ModuleException(this, "<securehost:exception> is a required field at " + tag->source.str());
+
+			newallows.push_back(host);
+		}
+
+		const auto& tag = ServerInstance->Config->ConfValue("securelist");
+		exemptregistered = tag->getBool("exemptregistered", true);
+		fakechans = tag->getNum<unsigned long>("fakechans", 5, 0);
+		fakechanprefix = tag->getString("fakechanprefix", "#", 1, ServerInstance->Config->Limits.MaxChannel - 1);
+		fakechantopic = tag->getString("fakechantopic", "Fake channel for confusing spambots", 1, ServerInstance->Config->Limits.MaxTopic - 1);
+		hidesmallchans = tag->getNum<size_t>("hidesmallchans", 0);
+		showmsg = tag->getBool("showmsg", true);
+		waittime = tag->getDuration("waittime", 60, !exemptregistered, 60*60*24);
+
+		allowlist.swap(newallows);
 	}
 
-	void OnRehash(User* user)
+	ModResult OnPreCommand(std::string& command, CommandBase::Params& parameters, LocalUser* user, bool validated) override
 	{
-		allowlist.clear();
-
-		ConfigTagList tags = ServerInstance->Config->ConfTags("securehost");
-		for (ConfigIter i = tags.first; i != tags.second; ++i)
-			allowlist.push_back(i->second->getString("exception"));
-
-		WaitTime = ServerInstance->Config->ConfValue("securelist")->getInt("waittime", 60);
-	}
-
-
-	/*
-	 * OnPreCommand()
-	 *   Intercept the LIST command.
-	 */
-	virtual ModResult OnPreCommand(std::string &command, std::vector<std::string> &parameters, LocalUser *user, bool validated, const std::string &original_line)
-	{
-		/* If the command doesnt appear to be valid, we dont want to mess with it. */
-		if (!validated)
+		// Ignore unless the command is a validated LIST command from a non-exempt user.
+		if (!validated || command != "LIST" || IsExempt(user))
 			return MOD_RES_PASSTHRU;
 
-		if ((command == "LIST") && (ServerInstance->Time() < (user->signon+WaitTime)) && (!IS_OPER(user)))
-		{
-			/* Normally wouldnt be allowed here, are they exempt? */
-			for (std::vector<std::string>::iterator x = allowlist.begin(); x != allowlist.end(); x++)
-				if (InspIRCd::Match(user->MakeHost(), *x, ascii_case_insensitive_map))
-					return MOD_RES_PASSTHRU;
+		// Allow if the wait time has passed.
+		time_t maxwaittime = user->signon + waittime;
+		if (waittime && ServerInstance->Time() > maxwaittime)
+			return MOD_RES_PASSTHRU;
 
-			/* Not exempt, BOOK EM DANNO! */
-			user->WriteServ("NOTICE %s :*** You cannot list within the first %lu seconds of connecting. Please try again later.",user->nick.c_str(), (unsigned long) WaitTime);
-			/* Some clients (e.g. mIRC, various java chat applets) muck up if they don't
-			 * receive these numerics whenever they send LIST, so give them an empty LIST to mull over.
-			 */
-			user->WriteNumeric(321, "%s Channel :Users Name",user->nick.c_str());
-			user->WriteNumeric(323, "%s :End of channel list.",user->nick.c_str());
-			return MOD_RES_DENY;
+		// If <securehost:showmsg> is set then tell the user that they need to wait.
+		if (showmsg)
+		{
+			if (waittime)
+			{
+				user->WriteNotice("*** You cannot view the channel list right now. Please {}try again in {}.",
+					exemptregistered ? "log in to an account or " : "",
+					Duration::ToString(maxwaittime - ServerInstance->Time()));
+			}
+			else
+			{
+				user->WriteNotice("*** You must be logged into an account to view the channel list.");
+			}
 		}
-		return MOD_RES_PASSTHRU;
+
+		// The client might be waiting on a response to do something so send them an
+		// fake list response to satisfy that.
+		size_t maxfakesuffix = ServerInstance->Config->Limits.MaxChannel - fakechanprefix.size();
+		sendingfakelist = true;
+
+		user->WriteNumeric(RPL_LISTSTART, "Channel", "Users Name");
+		for (unsigned long fakechan = 0; fakechan < fakechans; ++fakechan)
+		{
+			// Generate the fake channel name.
+			unsigned long chansuffixsize = ServerInstance->GenRandomInt(maxfakesuffix) + 1;
+			const std::string chansuffix = ServerInstance->GenRandomStr(chansuffixsize);
+
+			// Generate the fake channel size.
+			unsigned long chanusers = ServerInstance->GenRandomInt(ServerInstance->Users.GetUsers().size()) + 1;
+
+			// Generate the fake channel topic.
+			std::string chantopic(fakechantopic);
+			chantopic.insert(ServerInstance->GenRandomInt(chantopic.size()), 1, "\x02\x1D\x11\x1E\x1F"[fakechan % 5]);
+
+			// Send the fake channel list entry.
+			user->WriteNumeric(RPL_LIST, fakechanprefix + chansuffix, chanusers, chantopic);
+		}
+		user->WriteNumeric(RPL_LISTEND, "End of channel list.");
+
+		sendingfakelist = false;
+		return MOD_RES_DENY;
 	}
 
-	virtual void On005Numeric(std::string &output)
+	ModResult OnNumeric(User* user, const Numeric::Numeric& numeric) override
 	{
-		output.append(" SECURELIST");
+		if (numeric.GetNumeric() != RPL_LIST || numeric.GetParams().size() < 2)
+			return MOD_RES_PASSTHRU; // The numeric isn't the one we care about.
+
+		if (sendingfakelist || IsExempt(user))
+			return MOD_RES_PASSTHRU; // This numeric should be shown even if too small.
+
+		// If the channel has less than the minimum amount of users then hide it from /LIST.
+		auto usercount = ConvToNum<size_t>(numeric.GetParams()[1]);
+		return usercount < hidesmallchans ? MOD_RES_DENY : MOD_RES_PASSTHRU;
+	}
+
+	void OnBuildISupport(ISupport::TokenMap& tokens) override
+	{
+		if (showmsg)
+			tokens["SECURELIST"] = ConvToStr(waittime);
 	}
 };
 

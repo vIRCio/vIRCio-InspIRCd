@@ -1,6 +1,9 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
+ *   Copyright (C) 2017-2023 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2013-2014 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
  *   Copyright (C) 2009-2010 Daniel De Graaf <danieldg@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
@@ -18,133 +21,161 @@
 
 
 #include "inspircd.h"
-#include "u_listmode.h"
+#include "listmode.h"
+#include "modules/exemption.h"
+#include "numerichelper.h"
 
-/* $ModDesc: Provides the ability to allow channel operators to be exempt from certain modes. */
-
-/** Handles channel mode +X
- */
-class ExemptChanOps : public ListModeBase
+enum
 {
- public:
-	ExemptChanOps(Module* Creator) : ListModeBase(Creator, "exemptchanops", 'X', "End of channel exemptchanops list", 954, 953, false, "exemptchanops") { }
+	RPL_ENDOFEXEMPTIONLIST = 953,
+	RPL_EXEMPTIONLIST = 954
+};
 
-	bool ValidateParam(User* user, Channel* chan, std::string &word)
+class ExemptChanOps final
+	: public ListModeBase
+{
+public:
+	ExemptChanOps(Module* Creator)
+		: ListModeBase(Creator, "exemptchanops", 'X', RPL_EXEMPTIONLIST, RPL_ENDOFEXEMPTIONLIST)
 	{
-		// TODO actually make sure there's a prop for this
-		if ((word.length() > 35) || (word.empty()))
+		syntax = "<restriction>:<prefix>";
+	}
+
+	static PrefixMode* FindMode(const std::string& pmode)
+	{
+		if (pmode.length() == 1)
 		{
-			user->WriteNumeric(955, "%s %s %s :word is too %s for exemptchanops list",user->nick.c_str(), chan->name.c_str(), word.c_str(), (word.empty() ? "short" : "long"));
+			PrefixMode* pm = ServerInstance->Modes.FindPrefixMode(pmode[0]);
+			if (!pm)
+				pm = ServerInstance->Modes.FindPrefix(pmode[0]);
+			return pm;
+		}
+
+		ModeHandler* mh = ServerInstance->Modes.FindMode(pmode, MODETYPE_CHANNEL);
+		return mh ? mh->IsPrefixMode() : nullptr;
+	}
+
+	static bool ParseEntry(const std::string& entry, std::string& restriction, std::string& prefix)
+	{
+		// The entry must be in the format <restriction>:<prefix>.
+		std::string::size_type colon = entry.find(':');
+		if (colon == std::string::npos || colon == entry.length()-1)
+			return false;
+
+		restriction.assign(entry, 0, colon);
+		prefix.assign(entry, colon + 1, std::string::npos);
+		return true;
+	}
+
+	ModResult AccessCheck(User* source, Channel* channel, Modes::Change& change) override
+	{
+		std::string restriction;
+		std::string prefix;
+		if (!ParseEntry(change.param, restriction, prefix))
+			return MOD_RES_PASSTHRU;
+
+		PrefixMode* pm = FindMode(prefix);
+		if (!pm)
+			return MOD_RES_PASSTHRU;
+
+		if (channel->GetPrefixValue(source) >= pm->GetLevelRequired(change.adding))
+			return MOD_RES_PASSTHRU;
+
+		source->WriteNumeric(ERR_CHANOPRIVSNEEDED, channel->name, INSP_FORMAT("You must be able to {} mode {} ({}) to {} a restriction containing it",
+			change.adding ? "set" : "unset", pm->GetModeChar(), pm->name, change.adding ? "add" : "remove"));
+		return MOD_RES_DENY;
+	}
+
+	bool ValidateParam(LocalUser* user, Channel* chan, std::string& parameter) override
+	{
+		// We only enforce the format restriction against local users to avoid causing a desync.
+		std::string restriction;
+		std::string prefix;
+		if (!ParseEntry(parameter, restriction, prefix))
+		{
+			user->WriteNumeric(Numerics::InvalidModeParameter(chan, this, parameter));
+			return false;
+		}
+
+		// If there is a '-' in the restriction string ignore it and everything after it
+		// to support "auditorium-vis" and "auditorium-see" in m_auditorium
+		std::string::size_type dash = restriction.find('-');
+		if (dash != std::string::npos)
+			restriction.erase(dash);
+
+		if (!ServerInstance->Modes.FindMode(restriction, MODETYPE_CHANNEL))
+		{
+			user->WriteNumeric(Numerics::InvalidModeParameter(chan, this, parameter, "Unknown restriction."));
+			return false;
+		}
+
+		if (prefix != "*" && !FindMode(prefix))
+		{
+			user->WriteNumeric(Numerics::InvalidModeParameter(chan, this, parameter, "Unknown prefix mode."));
 			return false;
 		}
 
 		return true;
 	}
-
-	bool TellListTooLong(User* user, Channel* chan, std::string &word)
-	{
-		user->WriteNumeric(959, "%s %s %s :Channel exemptchanops list is full", user->nick.c_str(), chan->name.c_str(), word.c_str());
-		return true;
-	}
-
-	void TellAlreadyOnList(User* user, Channel* chan, std::string &word)
-	{
-		user->WriteNumeric(957, "%s %s :The word %s is already on the exemptchanops list",user->nick.c_str(), chan->name.c_str(), word.c_str());
-	}
-
-	void TellNotSet(User* user, Channel* chan, std::string &word)
-	{
-		user->WriteNumeric(958, "%s %s :No such exemptchanops word is set",user->nick.c_str(), chan->name.c_str());
-	}
 };
 
-class ExemptHandler : public HandlerBase3<ModResult, User*, Channel*, const std::string&>
+class ExemptHandler final
+	: public CheckExemption::EventListener
 {
- public:
+public:
 	ExemptChanOps ec;
-	ExemptHandler(Module* me) : ec(me) {}
-	
-	ModeHandler* FindMode(const std::string& mid)
+	ExemptHandler(Module* me)
+		: CheckExemption::EventListener(me)
+		, ec(me)
 	{
-		if (mid.length() == 1)
-			return ServerInstance->Modes->FindMode(mid[0], MODETYPE_CHANNEL);
-		for(char c='A'; c <= 'z'; c++)
-		{
-			ModeHandler* mh = ServerInstance->Modes->FindMode(c, MODETYPE_CHANNEL);
-			if (mh && mh->name == mid)
-				return mh;
-		}
-		return NULL;
 	}
 
-	ModResult Call(User* user, Channel* chan, const std::string& restriction)
+	ModResult OnCheckExemption(User* user, Channel* chan, const std::string& restriction) override
 	{
-		unsigned int mypfx = chan->GetPrefixValue(user);
+		ModeHandler::Rank mypfx = chan->GetPrefixValue(user);
 		std::string minmode;
 
-		modelist* list = ec.extItem.get(chan);
+		ListModeBase::ModeList* list = ec.GetList(chan);
 
 		if (list)
 		{
-			for (modelist::iterator i = list->begin(); i != list->end(); ++i)
+			for (const auto& entry : *list)
 			{
-				std::string::size_type pos = (*i).mask.find(':');
+				std::string::size_type pos = entry.mask.find(':');
 				if (pos == std::string::npos)
 					continue;
-				if ((*i).mask.substr(0,pos) == restriction)
-					minmode = (*i).mask.substr(pos + 1);
+
+				if (!entry.mask.compare(0, pos, restriction))
+					minmode.assign(entry.mask, pos + 1, std::string::npos);
 			}
 		}
 
-		ModeHandler* mh = FindMode(minmode);
+		PrefixMode* mh = ExemptChanOps::FindMode(minmode);
 		if (mh && mypfx >= mh->GetPrefixRank())
 			return MOD_RES_ALLOW;
 		if (mh || minmode == "*")
 			return MOD_RES_DENY;
 
-		return ServerInstance->HandleOnCheckExemption.Call(user, chan, restriction);
+		return MOD_RES_PASSTHRU;
 	}
 };
 
-class ModuleExemptChanOps : public Module
+class ModuleExemptChanOps final
+	: public Module
 {
-	std::string defaults;
+private:
 	ExemptHandler eh;
 
- public:
-
-	ModuleExemptChanOps() : eh(this)
+public:
+	ModuleExemptChanOps()
+		: Module(VF_VENDOR, "Adds channel mode X (exemptchanops) which allows channel operators to grant exemptions to various channel-level restrictions.")
+		, eh(this)
 	{
 	}
 
-	void init()
-	{
-		ServerInstance->Modules->AddService(eh.ec);
-		Implementation eventlist[] = { I_OnRehash, I_OnSyncChannel };
-		ServerInstance->Modules->Attach(eventlist, this, sizeof(eventlist)/sizeof(Implementation));
-		ServerInstance->OnCheckExemption = &eh;
-
-		OnRehash(NULL);
-	}
-
-	~ModuleExemptChanOps()
-	{
-		ServerInstance->OnCheckExemption = &ServerInstance->HandleOnCheckExemption;
-	}
-
-	Version GetVersion()
-	{
-		return Version("Provides the ability to allow channel operators to be exempt from certain modes.",VF_VENDOR);
-	}
-
-	void OnRehash(User* user)
+	void ReadConfig(ConfigStatus& status) override
 	{
 		eh.ec.DoRehash();
-	}
-
-	void OnSyncChannel(Channel* chan, Module* proto, void* opaque)
-	{
-		eh.ec.DoSyncChannel(chan, proto, opaque);
 	}
 };
 

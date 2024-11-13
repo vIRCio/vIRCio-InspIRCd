@@ -1,13 +1,14 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
+ *   Copyright (C) 2017-2024 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2012-2014 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
  *   Copyright (C) 2009 Daniel De Graaf <danieldg@inspircd.org>
- *   Copyright (C) 2008 Pippijn van Steenhoven <pip88nl@gmail.com>
- *   Copyright (C) 2007 Robin Burchell <robin+git@viroteck.net>
- *   Copyright (C) 2007 John Brooks <john.brooks@dereferenced.net>
+ *   Copyright (C) 2008 Robin Burchell <robin+git@viroteck.net>
+ *   Copyright (C) 2007 John Brooks <john@jbrooks.io>
  *   Copyright (C) 2007 Dennis Friis <peavey@inspircd.org>
- *   Copyright (C) 2006 Craig Edwards <craigedwards@brainbox.cc>
- *   Copyright (C) 2006 Oliver Lupton <oliverlupton@gmail.com>
+ *   Copyright (C) 2006, 2008 Craig Edwards <brain@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -24,146 +25,309 @@
 
 
 #include "inspircd.h"
+#include "modules/ctctags.h"
+#include "modules/exemption.h"
+#include "numerichelper.h"
+#include "timeutils.h"
 
-/* $ModDesc: Provides channel mode +f (message flood protection) */
-
-/** Holds flood settings and state for mode +f
- */
-class floodsettings
+enum class MsgFloodAction
+	: uint8_t
 {
- public:
-	bool ban;
-	unsigned int secs;
-	unsigned int lines;
-	time_t reset;
-	std::map<User*, unsigned int> counters;
+	BAN,
+	BLOCK,
+	MUTE,
+	KICK,
+	KICK_BAN,
+};
 
-	floodsettings(bool a, int b, int c) : ban(a), secs(b), lines(c)
+class MsgFloodSettings final
+{
+private:
+	insp::flat_map<User*, double> counters;
+	time_t reset;
+
+public:
+	MsgFloodAction action;
+	unsigned int messages;
+	unsigned long period;
+
+
+	MsgFloodSettings(MsgFloodAction a, unsigned int m, unsigned long p)
+		: reset(ServerInstance->Time() + p)
+		, action(a)
+		, messages(m)
+		, period(p)
 	{
-		reset = ServerInstance->Time() + secs;
 	}
 
-	bool addmessage(User* who)
+	bool Add(User* who, double weight)
 	{
 		if (ServerInstance->Time() > reset)
 		{
 			counters.clear();
-			reset = ServerInstance->Time() + secs;
+			reset = ServerInstance->Time() + period;
 		}
 
-		return (++counters[who] >= this->lines);
+		counters[who] += weight;
+		return (counters[who] >= this->messages);
 	}
 
-	void clear(User* who)
+	void Clear(User* who)
 	{
-		std::map<User*, unsigned int>::iterator iter = counters.find(who);
-		if (iter != counters.end())
-		{
-			counters.erase(iter);
-		}
+		counters.erase(who);
 	}
 };
 
-/** Handles channel mode +f
- */
-class MsgFlood : public ModeHandler
+class MsgFlood final
+	: public ParamMode<MsgFlood, SimpleExtItem<MsgFloodSettings>>
 {
- public:
-	SimpleExtItem<floodsettings> ext;
-	MsgFlood(Module* Creator) : ModeHandler(Creator, "flood", 'f', PARAM_SETONLY, MODETYPE_CHANNEL),
-		ext("messageflood", Creator) { }
-
-	ModeAction OnModeChange(User* source, User* dest, Channel* channel, std::string &parameter, bool adding)
+private:
+	static bool ParseAction(irc::sepstream& stream, MsgFloodAction& action)
 	{
-		if (adding)
+		std::string actionstr;
+		if (!stream.GetToken(actionstr))
+			return false;
+
+		if (irc::equals(actionstr, "ban"))
+			action = MsgFloodAction::BAN;
+		else if (irc::equals(actionstr, "block"))
+			action = MsgFloodAction::BLOCK;
+		else if (irc::equals(actionstr, "mute"))
+			action = MsgFloodAction::MUTE;
+		else if (irc::equals(actionstr, "kick"))
+			action = MsgFloodAction::KICK;
+		else if (irc::equals(actionstr, "kickban"))
+			action = MsgFloodAction::KICK_BAN;
+		else
+			return false;
+
+		return true;
+	}
+
+	static bool ParseMessages(irc::sepstream& stream, unsigned int& messages)
+	{
+		std::string messagestr;
+		if (!stream.GetToken(messagestr))
+			return false;
+
+		messages = ConvToNum<unsigned int>(messagestr);
+		return true;
+	}
+
+	static bool ParsePeriod(irc::sepstream& stream, unsigned long& period)
+	{
+		std::string periodstr;
+		if (!stream.GetToken(periodstr))
+			return false;
+
+		return Duration::TryFrom(periodstr, period);
+	}
+
+public:
+	bool extended;
+
+	MsgFlood(Module* Creator)
+		: ParamMode<MsgFlood, SimpleExtItem<MsgFloodSettings>>(Creator, "flood", 'f')
+	{
+	}
+
+	bool OnSet(User* source, Channel* channel, std::string& parameter) override
+	{
+		MsgFloodAction action;
+		unsigned int messages;
+		unsigned long period;
+		if (extended)
 		{
-			std::string::size_type colon = parameter.find(':');
-			if ((colon == std::string::npos) || (parameter.find('-') != std::string::npos))
+			irc::sepstream stream(parameter, ':');
+			if (!ParseAction(stream, action) || !ParseMessages(stream, messages) || !ParsePeriod(stream, period))
 			{
-				source->WriteNumeric(608, "%s %s :Invalid flood parameter",source->nick.c_str(),channel->name.c_str());
-				return MODEACTION_DENY;
+				source->WriteNumeric(Numerics::InvalidModeParameter(channel, this, parameter));
+				return false;
 			}
-
-			/* Set up the flood parameters for this channel */
-			bool ban = (parameter[0] == '*');
-			unsigned int nlines = ConvToInt(parameter.substr(ban ? 1 : 0, ban ? colon-1 : colon));
-			unsigned int nsecs = ConvToInt(parameter.substr(colon+1));
-
-			if ((nlines<2) || (nsecs<1))
-			{
-				source->WriteNumeric(608, "%s %s :Invalid flood parameter",source->nick.c_str(),channel->name.c_str());
-				return MODEACTION_DENY;
-			}
-
-			floodsettings* f = ext.get(channel);
-			if ((f) && (nlines == f->lines) && (nsecs == f->secs) && (ban == f->ban))
-				// mode params match
-				return MODEACTION_DENY;
-
-			ext.set(channel, new floodsettings(ban, nsecs, nlines));
-			parameter = std::string(ban ? "*" : "") + ConvToStr(nlines) + ":" + ConvToStr(nsecs);
-			channel->SetModeParam('f', parameter);
-			return MODEACTION_ALLOW;
 		}
 		else
 		{
-			if (!channel->IsModeSet('f'))
-				return MODEACTION_DENY;
+			std::string::size_type colon = parameter.find(':');
+			if (colon == std::string::npos || parameter.find('-') != std::string::npos)
+			{
+				source->WriteNumeric(Numerics::InvalidModeParameter(channel, this, parameter));
+				return false;
+			}
 
-			ext.unset(channel);
-			channel->SetModeParam('f', "");
-			return MODEACTION_ALLOW;
+			bool kickban = parameter[0] == '*';
+			action = kickban ? MsgFloodAction::KICK_BAN : MsgFloodAction::BLOCK;
+			messages = ConvToNum<unsigned int>(parameter.substr(kickban ? 1 : 0, kickban ? colon - 1 : colon));
+			period = ConvToNum<unsigned int>(parameter.substr(colon + 1));
 		}
+
+		if (messages < 2 || period < 1)
+		{
+			source->WriteNumeric(Numerics::InvalidModeParameter(channel, this, parameter));
+			return false;
+		}
+
+		ext.SetFwd(channel, action, messages, period);
+		return true;
+	}
+
+	void SerializeParam(Channel* chan, const MsgFloodSettings* fs, std::string& out)
+	{
+		if (extended)
+		{
+			switch (fs->action)
+			{
+				case MsgFloodAction::BAN:
+					out.append("ban");
+					break;
+				case MsgFloodAction::BLOCK:
+					out.append("block");
+					break;
+				case MsgFloodAction::MUTE:
+					out.append("mute");
+					break;
+				case MsgFloodAction::KICK:
+					out.append("kick");
+					break;
+				case MsgFloodAction::KICK_BAN:
+					out.append("kickban");
+					break;
+			}
+			out.push_back(':');
+			out.append(ConvToStr(fs->messages));
+			out.push_back(':');
+			out.append(Duration::ToString(fs->period));
+		}
+		else
+		{
+			if (fs->action == MsgFloodAction::KICK_BAN)
+				out.push_back('*');
+			out.append(ConvToStr(fs->messages)).push_back(':');
+			out.append(ConvToStr(fs->period));
+		}
+	}
+
+	void SetSyntax()
+	{
+		if (extended)
+			syntax = "{ban|block|mute|kick|kickban}:<messages>:<period>";
+		else
+			syntax = "[*]<messages>:<period>";
 	}
 };
 
-class ModuleMsgFlood : public Module
+class ModuleMsgFlood final
+	: public Module
+	, public CTCTags::EventListener
 {
+private:
+	ChanModeReference banmode;
+	CheckExemption::EventProvider exemptionprov;
 	MsgFlood mf;
+	double notice;
+	double privmsg;
+	double tagmsg;
+	std::string message;
 
- public:
+	void CreateBan(Channel* channel, User* user, bool mute)
+	{
+		std::string banmask(mute ? "m:*!" : "*!");
+		banmask.append(user->GetBanUser(false));
+		banmask.append("@");
+		banmask.append(user->GetDisplayedHost());
 
+		Modes::ChangeList changelist;
+		changelist.push_add(*banmode, banmask);
+		ServerInstance->Modes.Process(ServerInstance->FakeClient, channel, nullptr, changelist);
+	}
+
+	static void InformUser(Channel* chan, User* user, const std::string& message)
+	{
+		Membership* memb = chan->GetUser(user);
+		if (memb)
+			memb->WriteNotice(message);
+		else
+			user->WriteNotice("[{}] {}", chan->name, message);
+	}
+
+public:
 	ModuleMsgFlood()
-		: mf(this)
+		: Module(VF_VENDOR, "Adds channel mode f (flood) which helps protect against spammers which mass-message channels.")
+		, CTCTags::EventListener(this)
+		, banmode(this, "ban")
+		, exemptionprov(this)
+		, mf(this)
 	{
 	}
 
-	void init()
+	void ReadConfig(ConfigStatus&) override
 	{
-		ServerInstance->Modules->AddService(mf);
-		ServerInstance->Modules->AddService(mf.ext);
-		Implementation eventlist[] = { I_OnUserPreNotice, I_OnUserPreMessage };
-		ServerInstance->Modules->Attach(eventlist, this, sizeof(eventlist)/sizeof(Implementation));
+		const auto& tag = ServerInstance->Config->ConfValue("messageflood");
+		notice = tag->getNum<double>("notice", 1.0);
+		privmsg = tag->getNum<double>("privmsg", 1.0);
+		tagmsg = tag->getNum<double>("tagmsg", 0.2);
+		message = tag->getString("message", "Message flood detected (trigger is %messages% messages in %duration%)", 1);
+		mf.extended = tag->getBool("extended");
+		mf.SetSyntax();
 	}
 
-	ModResult ProcessMessages(User* user,Channel* dest, const std::string &text)
+	void GetLinkData(LinkData& data, std::string& compatdata) override
 	{
-		if ((!IS_LOCAL(user)) || !dest->IsModeSet('f'))
+		data["actions"] = mf.extended ? "ban block kick kickban mute" : "block kickban";
+		compatdata = mf.extended ? "extended" : "";
+	}
+
+	ModResult HandleMessage(User* user, const MessageTarget& target, double weight)
+	{
+		if (target.type != MessageTarget::TYPE_CHANNEL)
 			return MOD_RES_PASSTHRU;
 
-		if (ServerInstance->OnCheckExemption(user,dest,"flood") == MOD_RES_ALLOW)
+		auto* dest = target.Get<Channel>();
+		if ((!IS_LOCAL(user)) || !dest->IsModeSet(mf))
 			return MOD_RES_PASSTHRU;
 
-		floodsettings *f = mf.ext.get(dest);
+		ModResult res = exemptionprov.Check(user, dest, "flood");
+		if (res == MOD_RES_ALLOW)
+			return MOD_RES_PASSTHRU;
+
+		auto* f = mf.ext.Get(dest);
 		if (f)
 		{
-			if (f->addmessage(user))
+			if (f->Add(user, weight))
 			{
-				/* Youre outttta here! */
-				f->clear(user);
-				if (f->ban)
+				/* You're outttta here! */
+				f->Clear(user);
+
+				const std::string msg = Template::Replace(message, {
+					{ "channel",  dest->name                    },
+					{ "duration", Duration::ToString(f->period) },
+					{ "messages", ConvToStr(f->messages)        },
+					{ "seconds",  ConvToStr(f->period)          },
+				});
+				switch (f->action)
 				{
-					std::vector<std::string> parameters;
-					parameters.push_back(dest->name);
-					parameters.push_back("+b");
-					parameters.push_back(user->MakeWildHost());
-					ServerInstance->SendGlobalMode(parameters, ServerInstance->FakeClient);
+					case MsgFloodAction::BAN:
+						InformUser(dest, user, msg);
+						CreateBan(dest, user, false);
+						break;
+
+					case MsgFloodAction::BLOCK:
+						InformUser(dest, user, msg);
+						break;
+
+					case MsgFloodAction::KICK:
+						dest->KickUser(ServerInstance->FakeClient, user, msg);
+						break;
+
+					case MsgFloodAction::KICK_BAN:
+						CreateBan(dest, user, false);
+						dest->KickUser(ServerInstance->FakeClient, user, msg);
+						break;
+
+					case MsgFloodAction::MUTE:
+						InformUser(dest, user, msg);
+						CreateBan(dest, user, true);
+						break;
 				}
-
-				char kickmessage[MAXBUF];
-				snprintf(kickmessage, MAXBUF, "Channel flood triggered (limit is %u lines in %u secs)", f->lines, f->secs);
-
-				dest->KickUser(ServerInstance->FakeClient, user, kickmessage);
 
 				return MOD_RES_DENY;
 			}
@@ -172,32 +336,20 @@ class ModuleMsgFlood : public Module
 		return MOD_RES_PASSTHRU;
 	}
 
-	ModResult OnUserPreMessage(User *user, void *dest, int target_type, std::string &text, char status, CUList &exempt_list)
+	ModResult OnUserPreMessage(User* user, MessageTarget& target, MessageDetails& details) override
 	{
-		if (target_type == TYPE_CHANNEL)
-			return ProcessMessages(user,(Channel*)dest,text);
-
-		return MOD_RES_PASSTHRU;
+		return HandleMessage(user, target, (details.type == MessageType::PRIVMSG ? privmsg : notice));
 	}
 
-	ModResult OnUserPreNotice(User *user, void *dest, int target_type, std::string &text, char status, CUList &exempt_list)
+	ModResult OnUserPreTagMessage(User* user, MessageTarget& target, CTCTags::TagMessageDetails& details) override
 	{
-		if (target_type == TYPE_CHANNEL)
-			return ProcessMessages(user,(Channel*)dest,text);
-
-		return MOD_RES_PASSTHRU;
+		return HandleMessage(user, target, tagmsg);
 	}
 
-	void Prioritize()
+	void Prioritize() override
 	{
 		// we want to be after all modules that might deny the message (e.g. m_muteban, m_noctcp, m_blockcolor, etc.)
-		ServerInstance->Modules->SetPriority(this, I_OnUserPreMessage, PRIORITY_LAST);
-		ServerInstance->Modules->SetPriority(this, I_OnUserPreNotice, PRIORITY_LAST);
-	}
-
-	Version GetVersion()
-	{
-		return Version("Provides channel mode +f (message flood protection)", VF_VENDOR);
+		ServerInstance->Modules.SetPriority(this, I_OnUserPreMessage, PRIORITY_LAST);
 	}
 };
 

@@ -1,12 +1,16 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
+ *   Copyright (C) 2015 Daniel Vassdal <shutter@canternet.org>
+ *   Copyright (C) 2013, 2016-2017, 2019-2024 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2012-2015 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
  *   Copyright (C) 2009-2010 Daniel De Graaf <danieldg@inspircd.org>
- *   Copyright (C) 2006-2007, 2009 Dennis Friis <peavey@inspircd.org>
- *   Copyright (C) 2006-2007, 2009 Craig Edwards <craigedwards@brainbox.cc>
- *   Copyright (C) 2008 Robin Burchell <robin+git@viroteck.net>
- *   Copyright (C) 2008 Thomas Stagner <aquanight@inspircd.org>
- *   Copyright (C) 2006 Oliver Lupton <oliverlupton@gmail.com>
+ *   Copyright (C) 2008 Thomas Stagner <aquanight@gmail.com>
+ *   Copyright (C) 2007, 2009 Dennis Friis <peavey@inspircd.org>
+ *   Copyright (C) 2007, 2009 Craig Edwards <brain@inspircd.org>
+ *   Copyright (C) 2007 Robin Burchell <robin+git@viroteck.net>
+ *   Copyright (C) 2006 Oliver Lupton <om@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -21,16 +25,22 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+/// $CompilerFlags: find_compiler_flags("libpq")
+/// $LinkerFlags: find_linker_flags("libpq")
+
+/// $PackageInfo: require_system("alpine") pcre2-dev pkgconf
+/// $PackageInfo: require_system("arch") pkgconf postgresql-libs
+/// $PackageInfo: require_system("darwin") libpq pkg-config
+/// $PackageInfo: require_system("debian~") libpq-dev pkg-config
+/// $PackageInfo: require_system("rhel~") pkg-config postgresql-devel
+
+
+#include <libpq-fe.h>
+#include <pg_config.h>
 
 #include "inspircd.h"
-#include <cstdlib>
-#include <sstream>
-#include <libpq-fe.h>
-#include "sql.h"
-
-/* $ModDesc: PostgreSQL Service Provider module for all other m_sql* modules, uses v2 of the SQL API */
-/* $CompileFlags: -Iexec("pg_config --includedir") eval("my $s = `pg_config --version`;$s =~ /^.*?(\d+)\.(\d+)\.(\d+).*?$/;my $v = hex(sprintf("0x%02x%02x%02x", $1, $2, $3));print "-DPGSQL_HAS_ESCAPECONN" if(($v >= 0x080104) || ($v >= 0x07030F && $v < 0x070400) || ($v >= 0x07040D && $v < 0x080000) || ($v >= 0x080008 && $v < 0x080100));") */
-/* $LinkerFlags: -Lexec("pg_config --libdir") -lpq */
+#include "modules/sql.h"
+#include "utility/string.h"
 
 /* SQLConn rewritten by peavey to
  * use EventHandler instead of
@@ -43,85 +53,126 @@
 class SQLConn;
 class ModulePgSQL;
 
-typedef std::map<std::string, SQLConn*> ConnMap;
+typedef insp::flat_map<std::string, SQLConn*> ConnMap;
 
-/* CREAD,	Connecting and wants read event
- * CWRITE,	Connecting and wants write event
- * WREAD,	Connected/Working and wants read event
- * WWRITE,	Connected/Working and wants write event
- * RREAD,	Resetting and wants read event
- * RWRITE,	Resetting and wants write event
- * DEAD,	The connection has died
- */
-enum SQLstatus { CREAD, CWRITE, WREAD, WWRITE, RREAD, RWRITE, DEAD };
-
-class ReconnectTimer : public Timer
+enum SQLstatus
 {
- private:
-	ModulePgSQL* mod;
- public:
-	ReconnectTimer(ModulePgSQL* m) : Timer(5, ServerInstance->Time(), false), mod(m)
-	{
-	}
-	virtual void Tick(time_t TIME);
+	// The connection has died.
+	DEAD,
+
+	// Connecting and wants read event.
+	CREAD,
+
+	// Connecting and wants write event.
+	CWRITE,
+
+	// Connected/working and wants read event.
+	WREAD,
+
+	// Connected/working and wants write event.
+	WWRITE
 };
 
-struct QueueItem
+class ReconnectTimer final
+	: public Timer
 {
-	SQLQuery* c;
+private:
+	ModulePgSQL* mod;
+public:
+	ReconnectTimer(ModulePgSQL* m)
+		: Timer(5, false)
+		, mod(m)
+	{
+	}
+	bool Tick() override;
+};
+
+struct QueueItem final
+{
+	SQL::Query* c;
 	std::string q;
-	QueueItem(SQLQuery* C, const std::string& Q) : c(C), q(Q) {}
+	QueueItem(SQL::Query* C, const std::string& Q)
+		: c(C)
+		, q(Q)
+	{
+	}
 };
 
 /** PgSQLresult is a subclass of the mostly-pure-virtual class SQLresult.
  * All SQL providers must create their own subclass and define it's methods using that
- * database library's data retriveal functions. The aim is to avoid a slow and inefficient process
+ * database library's data retrieval functions. The aim is to avoid a slow and inefficient process
  * of converting all data to a common format before it reaches the result structure. This way
  * data is passes to the module nearly as directly as if it was using the API directly itself.
  */
 
-class PgSQLresult : public SQLResult
+class PgSQLresult final
+	: public SQL::Result
 {
 	PGresult* res;
-	int currentrow;
-	int rows;
- public:
-	PgSQLresult(PGresult* result) : res(result), currentrow(0)
+	int currentrow = 0;
+	int rows = 0;
+	std::vector<std::string> colnames;
+
+	void getColNames()
+	{
+		colnames.resize(PQnfields(res));
+		for(unsigned int i=0; i < colnames.size(); i++)
+		{
+			colnames[i] = PQfname(res, i);
+		}
+	}
+public:
+	PgSQLresult(PGresult* result)
+		: res(result)
 	{
 		rows = PQntuples(res);
 		if (!rows)
-			rows = atoi(PQcmdTuples(res));
+			rows = ConvToNum<int>(PQcmdTuples(res));
 	}
 
-	~PgSQLresult()
+	~PgSQLresult() override
 	{
 		PQclear(res);
 	}
 
-	virtual int Rows()
+	int Rows() override
 	{
 		return rows;
 	}
 
-	virtual void GetCols(std::vector<std::string>& result)
+	void GetCols(std::vector<std::string>& result) override
 	{
-		result.resize(PQnfields(res));
-		for(unsigned int i=0; i < result.size(); i++)
-		{
-			result[i] = PQfname(res, i);
-		}
+		if (colnames.empty())
+			getColNames();
+		result = colnames;
 	}
 
-	virtual SQLEntry GetValue(int row, int column)
+	bool HasColumn(const std::string& column, size_t& index) override
+	{
+		if (colnames.empty())
+			getColNames();
+
+		for (size_t i = 0; i < colnames.size(); ++i)
+		{
+			if (colnames[i] == column)
+			{
+				index = i;
+				return true;
+			}
+		}
+		return false;
+	}
+
+	SQL::Field GetValue(int row, int column)
 	{
 		char* v = PQgetvalue(res, row, column);
 		if (!v || PQgetisnull(res, row, column))
-			return SQLEntry();
+			return std::nullopt;
 
-		return SQLEntry(std::string(v, PQgetlength(res, row, column)));
+		return std::string(v, PQgetlength(res, row, column));
 	}
 
-	virtual bool GetRow(SQLEntries& result)
+	bool GetRow(SQL::Row& result) override
 	{
 		if (currentrow >= PQntuples(res))
 			return false;
@@ -139,61 +190,90 @@ class PgSQLresult : public SQLResult
 
 /** SQLConn represents one SQL session.
  */
-class SQLConn : public SQLProvider, public EventHandler
+class SQLConn final
+	: public SQL::Provider
+	, public EventHandler
 {
- public:
-	reference<ConfigTag> conf;	/* The <database> entry */
+public:
+	std::shared_ptr<ConfigTag> conf; /* The <database> entry */
 	std::deque<QueueItem> queue;
-	PGconn* 		sql;		/* PgSQL database connection handle */
-	SQLstatus		status;		/* PgSQL database connection status */
-	QueueItem		qinprog;	/* If there is currently a query in progress */
+	PGconn* sql = nullptr; /* PgSQL database connection handle */
+	SQLstatus status = CWRITE; /* PgSQL database connection status */
+	QueueItem qinprog; /* If there is currently a query in progress */
 
-	SQLConn(Module* Creator, ConfigTag* tag)
-	: SQLProvider(Creator, "SQL/" + tag->getString("id")), conf(tag), sql(NULL), status(CWRITE), qinprog(NULL, "")
+	SQLConn(Module* Creator, const std::shared_ptr<ConfigTag>& tag)
+		: SQL::Provider(Creator, tag->getString("id"))
+		, conf(tag)
+		, qinprog(nullptr, "")
 	{
 		if (!DoConnect())
-		{
-			ServerInstance->Logs->Log("m_pgsql",DEFAULT, "WARNING: Could not connect to database " + tag->getString("id"));
 			DelayReconnect();
-		}
 	}
 
-	CullResult cull()
+	Cullable::Result Cull() override
 	{
-		this->SQLProvider::cull();
-		ServerInstance->Modules->DelService(*this);
-		return this->EventHandler::cull();
+		this->SQL::Provider::Cull();
+		ServerInstance->Modules.DelService(*this);
+		return this->EventHandler::Cull();
 	}
 
-	~SQLConn()
+	~SQLConn() override
 	{
-		SQLerror err(SQL_BAD_DBID);
+		SQL::Error err(SQL::BAD_DBID);
 		if (qinprog.c)
 		{
 			qinprog.c->OnError(err);
 			delete qinprog.c;
 		}
-		for(std::deque<QueueItem>::iterator i = queue.begin(); i != queue.end(); i++)
+		for (const auto& item : queue)
 		{
-			SQLQuery* q = i->c;
+			SQL::Query* q = item.c;
 			q->OnError(err);
 			delete q;
 		}
 		Close();
 	}
 
-	virtual void HandleEvent(EventType et, int errornum)
+	void OnEventHandlerRead() override
 	{
-		switch (et)
-		{
-			case EVENT_READ:
-			case EVENT_WRITE:
-				DoEvent();
-			break;
+		DoEvent();
+	}
 
-			case EVENT_ERROR:
-				DelayReconnect();
+	void OnEventHandlerWrite() override
+	{
+		DoEvent();
+	}
+
+	void OnEventHandlerError(int errornum) override
+	{
+		DelayReconnect();
+	}
+
+	std::string EscapeDSN(const std::string& str)
+	{
+		std::string out;
+		out.reserve(str.size());
+
+		for (std::string::const_iterator it = str.begin(); it != str.end(); ++it)
+		{
+			char chr = *it;
+			switch (chr)
+			{
+				case '\\':
+					out.append("\\\\");
+					break;
+
+				case '\'':
+					out.append("\\'");
+					break;
+
+				default:
+					out.push_back(chr);
+					break;
+			}
 		}
+
+		return out;
 	}
 
 	std::string GetDSN()
@@ -202,21 +282,21 @@ class SQLConn : public SQLProvider, public EventHandler
 		std::string item;
 
 		if (conf->readString("host", item))
-			conninfo << " host = '" << item << "'";
+			conninfo << " host = '" << EscapeDSN(item) << "'";
 
 		if (conf->readString("port", item))
-			conninfo << " port = '" << item << "'";
+			conninfo << " port = '" << EscapeDSN(item) << "'";
 
 		if (conf->readString("name", item))
-			conninfo << " dbname = '" << item << "'";
+			conninfo << " dbname = '" << EscapeDSN(item) << "'";
 
 		if (conf->readString("user", item))
-			conninfo << " user = '" << item << "'";
+			conninfo << " user = '" << EscapeDSN(item) << "'";
 
 		if (conf->readString("pass", item))
-			conninfo << " password = '" << item << "'";
+			conninfo << " password = '" << EscapeDSN(item) << "'";
 
-		if (conf->getBool("ssl"))
+		if (conf->getBool("tls", conf->getBool("ssl", true)))
 			conninfo << " sslmode = 'require'";
 		else
 			conninfo << " sslmode = 'disable'";
@@ -224,34 +304,40 @@ class SQLConn : public SQLProvider, public EventHandler
 		return conninfo.str();
 	}
 
+	bool HandleConnectError(const char* reason)
+	{
+		ServerInstance->Logs.Critical(MODNAME, "Could not connect to the \"{}\" database: {}",
+			GetId(), reason);
+		return false;
+	}
+
 	bool DoConnect()
 	{
 		sql = PQconnectStart(GetDSN().c_str());
 		if (!sql)
-			return false;
+			return HandleConnectError("PQconnectStart returned NULL");
 
 		if(PQstatus(sql) == CONNECTION_BAD)
-			return false;
+			return HandleConnectError("connection status is bad");
 
 		if(PQsetnonblocking(sql, 1) == -1)
-			return false;
+			return HandleConnectError("unable to mark fd as non-blocking");
 
-		/* OK, we've initalised the connection, now to get it hooked into the socket engine
+		/* OK, we've initialised the connection, now to get it hooked into the socket engine
 		* and then start polling it.
 		*/
-		this->fd = PQsocket(sql);
+		SetFd(PQsocket(sql));
+		if(!HasFd())
+			return HandleConnectError("PQsocket returned an invalid fd");
 
-		if(this->fd <= -1)
-			return false;
-
-		if (!ServerInstance->SE->AddFd(this, FD_WANT_NO_WRITE | FD_WANT_NO_READ))
-		{
-			ServerInstance->Logs->Log("m_pgsql",DEBUG, "BUG: Couldn't add pgsql socket to socket engine");
-			return false;
-		}
+		if (!SocketEngine::AddFd(this, FD_WANT_NO_WRITE | FD_WANT_NO_READ))
+			return HandleConnectError("could not add the pgsql socket to the socket engine");
 
 		/* Socket all hooked into the engine, now to tell PgSQL to start connecting */
-		return DoPoll();
+		if (!DoPoll())
+			return HandleConnectError("could not poll the connection state");
+
+		return true;
 	}
 
 	bool DoPoll()
@@ -259,21 +345,22 @@ class SQLConn : public SQLProvider, public EventHandler
 		switch(PQconnectPoll(sql))
 		{
 			case PGRES_POLLING_WRITING:
-				ServerInstance->SE->ChangeEventMask(this, FD_WANT_POLL_WRITE | FD_WANT_NO_READ);
+				SocketEngine::ChangeEventMask(this, FD_WANT_POLL_WRITE | FD_WANT_NO_READ);
 				status = CWRITE;
 				return true;
 			case PGRES_POLLING_READING:
-				ServerInstance->SE->ChangeEventMask(this, FD_WANT_POLL_READ | FD_WANT_NO_WRITE);
+				SocketEngine::ChangeEventMask(this, FD_WANT_POLL_READ | FD_WANT_NO_WRITE);
 				status = CREAD;
 				return true;
 			case PGRES_POLLING_FAILED:
-				ServerInstance->SE->ChangeEventMask(this, FD_WANT_NO_READ | FD_WANT_NO_WRITE);
+				SocketEngine::ChangeEventMask(this, FD_WANT_NO_READ | FD_WANT_NO_WRITE);
 				status = DEAD;
 				return false;
 			case PGRES_POLLING_OK:
-				ServerInstance->SE->ChangeEventMask(this, FD_WANT_POLL_READ | FD_WANT_NO_WRITE);
+				SocketEngine::ChangeEventMask(this, FD_WANT_POLL_READ | FD_WANT_NO_WRITE);
 				status = WWRITE;
 				DoConnectedPoll();
+				return true;
 			default:
 				return true;
 		}
@@ -320,7 +407,7 @@ restart:
 					case PGRES_BAD_RESPONSE:
 					case PGRES_FATAL_ERROR:
 					{
-						SQLerror err(SQL_QREPLY_FAIL, PQresultErrorMessage(result));
+						SQL::Error err(SQL::QREPLY_FAIL, PQresultErrorMessage(result));
 						qinprog.c->OnError(err);
 						break;
 					}
@@ -330,7 +417,7 @@ restart:
 				}
 
 				delete qinprog.c;
-				qinprog = QueueItem(NULL, "");
+				qinprog = QueueItem(nullptr, "");
 				goto restart;
 			}
 			else
@@ -349,29 +436,6 @@ restart:
 		}
 	}
 
-	bool DoResetPoll()
-	{
-		switch(PQresetPoll(sql))
-		{
-			case PGRES_POLLING_WRITING:
-				ServerInstance->SE->ChangeEventMask(this, FD_WANT_POLL_WRITE | FD_WANT_NO_READ);
-				status = CWRITE;
-				return DoPoll();
-			case PGRES_POLLING_READING:
-				ServerInstance->SE->ChangeEventMask(this, FD_WANT_POLL_READ | FD_WANT_NO_WRITE);
-				status = CREAD;
-				return true;
-			case PGRES_POLLING_FAILED:
-				return false;
-			case PGRES_POLLING_OK:
-				ServerInstance->SE->ChangeEventMask(this, FD_WANT_POLL_READ | FD_WANT_NO_WRITE);
-				status = WWRITE;
-				DoConnectedPoll();
-			default:
-				return true;
-		}
-	}
-
 	void DelayReconnect();
 
 	void DoEvent()
@@ -380,59 +444,52 @@ restart:
 		{
 			DoPoll();
 		}
-		else if((status == RREAD) || (status == RWRITE))
-		{
-			DoResetPoll();
-		}
 		else if (status == WREAD || status == WWRITE)
 		{
 			DoConnectedPoll();
 		}
 	}
 
-	void submit(SQLQuery *req, const std::string& q)
+	void Submit(SQL::Query* req, const std::string& q) override
 	{
+		ServerInstance->Logs.Debug(MODNAME, "Executing PostgreSQL query: " + q);
 		if (qinprog.q.empty())
 		{
-			DoQuery(QueueItem(req,q));
+			DoQuery(QueueItem(req, q));
 		}
 		else
 		{
 			// wait your turn.
-			queue.push_back(QueueItem(req,q));
+			queue.emplace_back(req, q);
 		}
 	}
 
-	void submit(SQLQuery *req, const std::string& q, const ParamL& p)
+	void Submit(SQL::Query* req, const std::string& q, const SQL::ParamList& p) override
 	{
 		std::string res;
 		unsigned int param = 0;
-		for(std::string::size_type i = 0; i < q.length(); i++)
+		for (const auto chr : q)
 		{
-			if (q[i] != '?')
-				res.push_back(q[i]);
+			if (chr != '?')
+				res.push_back(chr);
 			else
 			{
 				if (param < p.size())
 				{
 					std::string parm = p[param++];
 					std::vector<char> buffer(parm.length() * 2 + 1);
-#ifdef PGSQL_HAS_ESCAPECONN
 					int error;
-					size_t escapedsize = PQescapeStringConn(sql, &buffer[0], parm.data(), parm.length(), &error);
+					size_t escapedsize = PQescapeStringConn(sql, buffer.data(), parm.data(), parm.length(), &error);
 					if (error)
-						ServerInstance->Logs->Log("m_pgsql", DEBUG, "BUG: Apparently PQescapeStringConn() failed");
-#else
-					size_t escapedsize = PQescapeString(&buffer[0], parm.data(), parm.length());
-#endif
-					res.append(&buffer[0], escapedsize);
+						ServerInstance->Logs.Debug(MODNAME, "BUG: Apparently PQescapeStringConn() failed");
+					res.append(buffer.data(), escapedsize);
 				}
 			}
 		}
-		submit(req, res);
+		Submit(req, res);
 	}
 
-	void submit(SQLQuery *req, const std::string& q, const ParamM& p)
+	void Submit(SQL::Query* req, const std::string& q, const SQL::ParamMap& p) override
 	{
 		std::string res;
 		for(std::string::size_type i = 0; i < q.length(); i++)
@@ -447,24 +504,20 @@ restart:
 					field.push_back(q[i++]);
 				i--;
 
-				ParamM::const_iterator it = p.find(field);
+				SQL::ParamMap::const_iterator it = p.find(field);
 				if (it != p.end())
 				{
 					std::string parm = it->second;
 					std::vector<char> buffer(parm.length() * 2 + 1);
-#ifdef PGSQL_HAS_ESCAPECONN
 					int error;
-					size_t escapedsize = PQescapeStringConn(sql, &buffer[0], parm.data(), parm.length(), &error);
+					size_t escapedsize = PQescapeStringConn(sql, buffer.data(), parm.data(), parm.length(), &error);
 					if (error)
-						ServerInstance->Logs->Log("m_pgsql", DEBUG, "BUG: Apparently PQescapeStringConn() failed");
-#else
-					size_t escapedsize = PQescapeString(&buffer[0], parm.data(), parm.length());
-#endif
-					res.append(&buffer[0], escapedsize);
+						ServerInstance->Logs.Debug(MODNAME, "BUG: Apparently PQescapeStringConn() failed");
+					res.append(buffer.data(), escapedsize);
 				}
 			}
 		}
-		submit(req, res);
+		Submit(req, res);
 	}
 
 	void DoQuery(const QueueItem& req)
@@ -472,7 +525,7 @@ restart:
 		if (status != WREAD && status != WWRITE)
 		{
 			// whoops, not connected...
-			SQLerror err(SQL_BAD_CONN);
+			SQL::Error err(SQL::BAD_CONN);
 			req.c->OnError(err);
 			delete req.c;
 			return;
@@ -484,7 +537,7 @@ restart:
 		}
 		else
 		{
-			SQLerror err(SQL_QSEND_FAIL, PQerrorMessage(sql));
+			SQL::Error err(SQL::QSEND_FAIL, PQerrorMessage(sql));
 			req.c->OnError(err);
 			delete req.c;
 		}
@@ -493,45 +546,52 @@ restart:
 	void Close()
 	{
 		status = DEAD;
-		ServerInstance->SE->DelFd(this);
 
-		if (GetFd() != -1 && ServerInstance->SE->HasFd(GetFd()))
-			ServerInstance->SE->DelFd(this);
+		if (HasFd() && SocketEngine::HasFd(GetFd()))
+			SocketEngine::DelFd(this);
 
 		if(sql)
 		{
 			PQfinish(sql);
-			sql = NULL;
+			sql = nullptr;
 		}
 	}
 };
 
-class ModulePgSQL : public Module
+class ModulePgSQL final
+	: public Module
 {
- public:
+public:
 	ConnMap connections;
-	ReconnectTimer* retimer;
+	ReconnectTimer* retimer = nullptr;
 
 	ModulePgSQL()
+		: Module(VF_VENDOR, "Provides the ability for SQL modules to query a PostgreSQL database.")
 	{
 	}
 
-	void init()
+	~ModulePgSQL() override
 	{
-		ReadConf();
-
-		Implementation eventlist[] = { I_OnUnloadModule, I_OnRehash };
-		ServerInstance->Modules->Attach(eventlist, this, sizeof(eventlist)/sizeof(Implementation));
-	}
-
-	virtual ~ModulePgSQL()
-	{
-		if (retimer)
-			ServerInstance->Timers->DelTimer(retimer);
+		delete retimer;
 		ClearAllConnections();
 	}
 
-	virtual void OnRehash(User* user)
+	void init() override
+	{
+		int pqversion = PQlibVersion();
+		int minor = pqversion / 100 % 100;
+		int revision = pqversion % 100;
+		if (pqversion >= 10'00'00)
+		{
+			// Ref: https://www.postgresql.org/docs/current/libpq-misc.html#LIBPQ-PQLIBVERSION
+			minor = revision;
+			revision = 0;
+		}
+		ServerInstance->Logs.Normal(MODNAME, "Module was compiled against libpq version {} and is running against version {}.{}.{}",
+			PG_VERSION, pqversion / 10000, minor, revision);
+	}
+
+	void ReadConfig(ConfigStatus& status) override
 	{
 		ReadConf();
 	}
@@ -539,20 +599,21 @@ class ModulePgSQL : public Module
 	void ReadConf()
 	{
 		ConnMap conns;
-		ConfigTagList tags = ServerInstance->Config->ConfTags("database");
-		for(ConfigIter i = tags.first; i != tags.second; i++)
+
+		for (const auto& [_, tag] : ServerInstance->Config->ConfTags("database"))
 		{
-			if (i->second->getString("module", "pgsql") != "pgsql")
+			if (!insp::equalsci(tag->getString("module"), "pgsql"))
 				continue;
-			std::string id = i->second->getString("id");
+
+			std::string id = tag->getString("id");
 			ConnMap::iterator curr = connections.find(id);
 			if (curr == connections.end())
 			{
-				SQLConn* conn = new SQLConn(this, i->second);
+				auto* conn = new SQLConn(this, tag);
 				if (conn->status != DEAD)
 				{
-					conns.insert(std::make_pair(id, conn));
-					ServerInstance->Modules->AddService(*conn);
+					conns.emplace(id, conn);
+					ServerInstance->Modules.AddService(*conn);
 				}
 				// If the connection is dead it has already been queued for culling
 				// at the end of the main loop so we don't need to delete it here.
@@ -569,30 +630,29 @@ class ModulePgSQL : public Module
 
 	void ClearAllConnections()
 	{
-		for(ConnMap::iterator i = connections.begin(); i != connections.end(); i++)
+		for (const auto& [_, conn] : connections)
 		{
-			i->second->cull();
-			delete i->second;
+			conn->Cull();
+			delete conn;
 		}
 		connections.clear();
 	}
 
-	void OnUnloadModule(Module* mod)
+	void OnUnloadModule(Module* mod) override
 	{
-		SQLerror err(SQL_BAD_DBID);
-		for(ConnMap::iterator i = connections.begin(); i != connections.end(); i++)
+		SQL::Error err(SQL::BAD_DBID);
+		for (const auto& [_, conn] : connections)
 		{
-			SQLConn* conn = i->second;
 			if (conn->qinprog.c && conn->qinprog.c->creator == mod)
 			{
 				conn->qinprog.c->OnError(err);
 				delete conn->qinprog.c;
-				conn->qinprog.c = NULL;
+				conn->qinprog.c = nullptr;
 			}
 			std::deque<QueueItem>::iterator j = conn->queue.begin();
 			while (j != conn->queue.end())
 			{
-				SQLQuery* q = j->c;
+				SQL::Query* q = j->c;
 				if (q->creator == mod)
 				{
 					q->OnError(err);
@@ -604,33 +664,29 @@ class ModulePgSQL : public Module
 			}
 		}
 	}
-
-	Version GetVersion()
-	{
-		return Version("PostgreSQL Service Provider module for all other m_sql* modules, uses v2 of the SQL API", VF_VENDOR);
-	}
 };
 
-void ReconnectTimer::Tick(time_t time)
+bool ReconnectTimer::Tick()
 {
-	mod->retimer = NULL;
+	mod->retimer = nullptr;
 	mod->ReadConf();
+	delete this;
+	return false;
 }
 
 void SQLConn::DelayReconnect()
 {
 	status = DEAD;
-	ModulePgSQL* mod = (ModulePgSQL*)(Module*)creator;
+	auto* mod = static_cast<ModulePgSQL*>(creator.ptr());
 
 	ConnMap::iterator it = mod->connections.find(conf->getString("id"));
 	if (it != mod->connections.end())
 		mod->connections.erase(it);
-
 	ServerInstance->GlobalCulls.AddItem((EventHandler*)this);
 	if (!mod->retimer)
 	{
 		mod->retimer = new ReconnectTimer(mod);
-		ServerInstance->Timers->AddTimer(mod->retimer);
+		ServerInstance->Timers.AddTimer(mod->retimer);
 	}
 }
 

@@ -1,10 +1,15 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
+ *   Copyright (C) 2019 Matt Schatz <genius3000@g3k.solutions>
+ *   Copyright (C) 2013, 2018-2024 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2012-2015 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2012, 2019 Robby <robby@chatbelgie.be>
  *   Copyright (C) 2009-2010 Daniel De Graaf <danieldg@inspircd.org>
- *   Copyright (C) 2008 Robin Burchell <robin+git@viroteck.net>
+ *   Copyright (C) 2009 Uli Schlachter <psychon@znc.in>
+ *   Copyright (C) 2007-2008 Robin Burchell <robin+git@viroteck.net>
+ *   Copyright (C) 2007, 2010 Craig Edwards <brain@inspircd.org>
  *   Copyright (C) 2007 Dennis Friis <peavey@inspircd.org>
- *   Copyright (C) 2007 Craig Edwards <craigedwards@brainbox.cc>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -20,19 +25,37 @@
  */
 
 
-#ifndef M_SPANNINGTREE_TREESOCKET_H
-#define M_SPANNINGTREE_TREESOCKET_H
+#pragma once
 
-#include "socket.h"
 #include "inspircd.h"
-#include "xline.h"
 
 #include "utils.h"
+
+/** An enumeration of all known protocol versions.
+ *
+ * If you introduce new protocol versions please document them here:
+ * https://docs.inspircd.org/server/change-log/
+ */
+enum ProtocolVersion
+	: uint16_t
+{
+	/** The linking protocol version introduced in InspIRCd v3.0. */
+	PROTO_INSPIRCD_3 = 1205,
+
+	/** The linking protocol version introduced in InspIRCd v4.0. */
+	PROTO_INSPIRCD_4 = 1206,
+
+	/** The oldest version of the protocol that we support. */
+	PROTO_OLDEST = PROTO_INSPIRCD_3,
+
+	/** The newest version of the protocol that we support. */
+	PROTO_NEWEST = PROTO_INSPIRCD_4
+};
 
 /*
  * The server list in InspIRCd is maintained as two structures
  * which hold the data in different ways. Most of the time, we
- * want to very quicky obtain three pieces of information:
+ * want to very quickly obtain three pieces of information:
  *
  * (1) The information on a server
  * (2) The information on the server we must send data through
@@ -53,10 +76,10 @@
  * CONNECTING:	indicates an outbound socket which is
  *							waiting to be writeable.
  * WAIT_AUTH_1:	indicates the socket is outbound and
- * 							has successfully connected, but has not
+ *							has successfully connected, but has not
  *							yet sent and received SERVER strings.
  * WAIT_AUTH_2:	indicates that the socket is inbound
- * 							but has not yet sent and received
+ *							but has not yet sent and received
  *							SERVER strings.
  * CONNECTED:   represents a fully authorized, fully
  *							connected server.
@@ -64,67 +87,135 @@
  */
 enum ServerState { CONNECTING, WAIT_AUTH_1, WAIT_AUTH_2, CONNECTED, DYING };
 
-struct CapabData
+struct CapabData final
 {
-	reference<Link> link;			/* Link block used for this connection */
-	reference<Autoconnect> ac;		/* Autoconnect used to cause this connection, if any */
-	std::string ModuleList;			/* Required module list of other server from CAPAB */
-	std::string OptModuleList;		/* Optional module list of other server from CAPAB */
+	// A map of module names to their link data.
+	typedef std::map<std::string, std::string, irc::insensitive_swo> ModuleMap;
+
+	// The optional modules sent by the remote server.
+	std::optional<ModuleMap> optionalmodules;
+
+	// The required modules sent by the remote server.
+	std::optional<ModuleMap> requiredmodules;
+
+	std::shared_ptr<Link> link;			/* Link block used for this connection */
+	std::shared_ptr<Autoconnect> ac;		/* Autoconnect used to cause this connection, if any */
 	std::string ChanModes;
 	std::string UserModes;
-	std::map<std::string,std::string> CapKeys;	/* CAPAB keys from other server */
+	std::string ExtBans;
+	std::map<std::string, std::string> CapKeys;	/* CAPAB keys from other server */
 	std::string ourchallenge;		/* Challenge sent for challenge/response */
 	std::string theirchallenge;		/* Challenge recv for challenge/response */
-	int capab_phase;			/* Have sent CAPAB already */
-	bool auth_fingerprint;			/* Did we auth using SSL fingerprint */
+	int capab_phase = 0;			/* Have sent CAPAB already */
+	bool auth_fingerprint;			/* Did we auth using a client certificate fingerprint */
 	bool auth_challenge;			/* Did we auth using challenge/response */
+	irc::sockets::sockaddrs remotesa; /* The remote socket address. */
 
 	// Data saved from incoming SERVER command, for later use when our credentials have been accepted by the other party
 	std::string description;
 	std::string sid;
 	std::string name;
 	bool hidden;
+
+	CapabData(const irc::sockets::sockaddrs& sa)
+		: remotesa(sa)
+	{
+	}
 };
 
 /** Every SERVER connection inbound or outbound is represented by an object of
  * type TreeSocket. During setup, the object can be found in Utils->timeoutlist;
  * after setup, MyRoot will have been created as a child of Utils->TreeRoot
  */
-class TreeSocket : public BufferedSocket
+class TreeSocket final
+	: public BufferedSocket
 {
-	SpanningTreeUtilities* Utils;		/* Utility class */
 	std::string linkID;			/* Description for this link */
 	ServerState LinkState;			/* Link state */
-	CapabData* capab;			/* Link setup data (held until burst is sent) */
-	TreeServer* MyRoot;			/* The server we are talking to */
-	int proto_version;			/* Remote protocol version */
-	bool ConnectionFailureShown; /* Set to true if a connection failure message was shown */
+	std::unique_ptr<CapabData> capab;	/* Link setup data (held until burst is sent) */
 
-	static const unsigned int FMODE_MAX_LENGTH = 350;
+	/* The server we are talking to */
+	TreeServer* MyRoot = nullptr;
 
 	/** Checks if the given servername and sid are both free
 	 */
 	bool CheckDuplicate(const std::string& servername, const std::string& sid);
 
- public:
-	time_t age;
+	/** Send all ListModeBase modes set on the channel
+	 */
+	void SendListModes(Channel* chan);
+
+	/** Send all users and their oper state, away state and metadata */
+	void SendUsers(TreeServer* s);
+
+	/** Send all additional info about the given server to this server */
+	void SendServerInfo(TreeServer* from);
+
+	/** Find the User source of a command given a prefix and a command string.
+	 * This connection must be fully up when calling this function.
+	 * @param prefix Prefix string to find the source User object for. Can be a sid, a uuid or a server name.
+	 * @param command The command whose source to find. This is required because certain commands (like mode
+	 * changes and kills) must be processed even if their claimed source doesn't exist. If the given command is
+	 * such a command and the source does not exist, the function returns a valid FakeUser that can be used to
+	 * to process the command with.
+	 * @return The command source to use when processing the command or NULL if the source wasn't found.
+	 * Note that the direction of the returned source is not verified.
+	 */
+	User* FindSource(const std::string& prefix, const std::string& command);
+
+	/** Finish the authentication phase of this connection.
+	 * Change the state of the connection to CONNECTED, create a TreeServer object for the server on the
+	 * other end of the connection using the details provided in the parameters, and finally send a burst.
+	 * @param remotename Name of the remote server
+	 * @param remotesid SID of the remote server
+	 * @param remotedesc Description of the remote server
+	 * @param hidden True if the remote server is hidden according to the configuration
+	 */
+	void FinishAuth(const std::string& remotename, const std::string& remotesid, const std::string& remotedesc, bool hidden);
+
+	/** Authenticate the remote server.
+	 * Validate the parameters and find the link block that matches the remote server. In case of an error,
+	 * an appropriate snotice is generated, an ERROR message is sent and the connection is closed.
+	 * Failing to find a matching link block counts as an error.
+	 * @param params Parameters they sent in the SERVER command
+	 * @return Link block for the remote server, or NULL if an error occurred
+	 */
+	std::shared_ptr<Link> AuthRemote(const CommandBase::Params& params);
+
+	/** Convenience function: read a line from the socket
+	 * @param line The line read
+	 * @param delim The line delimiter
+	 * @return true if a line was read
+	 */
+	bool GetNextLine(std::string& line, char delim = '\n');
+
+	/** Write a line directly to the socket bypassing the older protocol translation layer.
+	 * @param line The line to write directly to the socket.
+	 */
+	void WriteLineInternal(const std::string& line);
+
+public:
+	const time_t age;
+
+	// The protocol version which has been negotiated with the remote server.
+	uint16_t proto_version = PROTO_NEWEST;
 
 	/** Because most of the I/O gubbins are encapsulated within
 	 * BufferedSocket, we just call the superclass constructor for
 	 * most of the action, and append a few of our own values
 	 * to it.
 	 */
-	TreeSocket(SpanningTreeUtilities* Util, Link* link, Autoconnect* myac, const std::string& ipaddr);
+	TreeSocket(const std::shared_ptr<Link>& link, const std::shared_ptr<Autoconnect>& myac, const irc::sockets::sockaddrs& sa);
 
 	/** When a listening socket gives us a new file descriptor,
 	 * we must associate it with a socket without creating a new
 	 * connection. This constructor is used for this purpose.
 	 */
-	TreeSocket(SpanningTreeUtilities* Util, int newfd, ListenSocket* via, irc::sockets::sockaddrs* client, irc::sockets::sockaddrs* server);
+	TreeSocket(int newfd, ListenSocket* via, const irc::sockets::sockaddrs& client, const irc::sockets::sockaddrs& server);
 
 	/** Get link state
 	 */
-	ServerState GetLinkState();
+	ServerState GetLinkState() const { return LinkState; }
 
 	/** Get challenge set in our CAPAB for challenge/response
 	 */
@@ -132,7 +223,7 @@ class TreeSocket : public BufferedSocket
 
 	/** Get challenge set in our CAPAB for challenge/response
 	 */
-	void SetOurChallenge(const std::string &c);
+	void SetOurChallenge(const std::string& c);
 
 	/** Get challenge set in their CAPAB for challenge/response
 	 */
@@ -140,25 +231,22 @@ class TreeSocket : public BufferedSocket
 
 	/** Get challenge set in their CAPAB for challenge/response
 	 */
-	void SetTheirChallenge(const std::string &c);
+	void SetTheirChallenge(const std::string& c);
 
 	/** Compare two passwords based on authentication scheme
 	 */
-	bool ComparePass(const Link& link, const std::string &theirs);
+	bool ComparePass(const Link& link, const std::string& theirs);
 
 	/** Clean up information used only during server negotiation
 	 */
 	void CleanNegotiationInfo();
 
-	CullResult cull();
-	/** Destructor
-	 */
-	~TreeSocket();
+	Cullable::Result Cull() override;
 
 	/** Construct a password, optionally hashed with the other side's
 	 * challenge string
 	 */
-	std::string MakePass(const std::string &password, const std::string &challenge);
+	static std::string MakePass(const std::string& password, const std::string& challenge);
 
 	/** When an outbound connection finishes connecting, we receive
 	 * this event, and must send our SERVER string to the other
@@ -166,62 +254,43 @@ class TreeSocket : public BufferedSocket
 	 * to server docs on the inspircd.org site, the other side
 	 * will then send back its own server string.
 	 */
-	virtual void OnConnected();
+	void OnConnected() override;
 
 	/** Handle socket error event
 	 */
-	virtual void OnError(BufferedSocketError e);
+	void OnError(BufferedSocketError e) override;
 
 	/** Sends an error to the remote server, and displays it locally to show
 	 * that it was sent.
 	 */
-	void SendError(const std::string &errormessage);
+	void SendError(const std::string& errormessage);
 
 	/** Recursively send the server tree with distances as hops.
 	 * This is used during network burst to inform the other server
 	 * (and any of ITS servers too) of what servers we know about.
-	 * If at any point any of these servers already exist on the other
-	 * end, our connection may be terminated. The hopcounts given
-	 * by this function are relative, this doesn't matter so long as
-	 * they are all >1, as all the remote servers re-calculate them
-	 * to be relative too, with themselves as hop 0.
 	 */
-	void SendServers(TreeServer* Current, TreeServer* s, int hops);
+	void SendServers(TreeServer* Current, TreeServer* s);
 
-	/** Returns module list as a string, filtered by filter
-	 * @param filter a module version bitmask, such as VF_COMMON or VF_OPTCOMMON
+	/** Returns mode list as a string, filtered by type.
+	 * @param type The type of modes to return.
 	 */
-	std::string MyModules(int filter);
+	static std::string BuildModeList(ModeType type);
+
+	/** If the extban manager exists then build an extban list.
+	 * @param out The buffer to put the extban list in.
+	 * @return True if the extban manager exists; otherwise, false.
+	 */
+	static bool BuildExtBanList(std::string& out);
 
 	/** Send my capabilities to the remote side
 	 */
 	void SendCapabilities(int phase);
 
-	/** Add modules to VF_COMMON list for backwards compatability */
-	void CompatAddModules(std::vector<std::string>& modlist);
-
 	/* Isolate and return the elements that are different between two lists */
-	void ListDifference(const std::string &one, const std::string &two, char sep,
+	static void ListDifference(const std::string& one, const std::string& two, char sep,
 		std::string& mleft, std::string& mright);
 
-	bool Capab(const parameterlist &params);
-
-	/** This function forces this server to quit, removing this server
-	 * and any users on it (and servers and users below that, etc etc).
-	 * It's very slow and pretty clunky, but luckily unless your network
-	 * is having a REAL bad hair day, this function shouldnt be called
-	 * too many times a month ;-)
-	 */
-	void SquitServer(std::string &from, TreeServer* Current, int& num_lost_servers, int& num_lost_users);
-
-	/** This is a wrapper function for SquitServer above, which
-	 * does some validation first and passes on the SQUIT to all
-	 * other remaining servers.
-	 */
-	void Squit(TreeServer* Current, const std::string &reason);
-
-	/* Used on nick collision ... XXX ugly function HACK */
-	int DoCollision(User *u, time_t remotets, const std::string &remoteident, const std::string &remoteip, const std::string &remoteuid);
+	bool Capab(const CommandBase::Params& params);
 
 	/** Send one or more FJOINs for a channel of users.
 	 * If the length of a single line is more than 480-NICKMAX
@@ -229,14 +298,11 @@ class TreeSocket : public BufferedSocket
 	 */
 	void SendFJoins(Channel* c);
 
-	/** Send G, Q, Z and E lines */
+	/** Send G-, Q-, Z- and E-lines */
 	void SendXLines();
 
-	/** Send channel modes and topics */
-	void SendChannelModes();
-
-	/** send all users and their oper state/modes */
-	void SendUsers();
+	/** Send all known information about a channel */
+	void SyncChannel(Channel* chan, TreeServer* s);
 
 	/** This function is called when we want to send a netburst to a local
 	 * server. There is a set order we must do this, because for example
@@ -248,90 +314,45 @@ class TreeSocket : public BufferedSocket
 	/** This function is called when we receive data from a remote
 	 * server.
 	 */
-	void OnDataReady();
+	void OnDataReady() override;
 
 	/** Send one or more complete lines down the socket
 	 */
-	void WriteLine(std::string line);
+	void WriteLine(const std::string& line);
 
 	/** Handle ERROR command */
-	void Error(parameterlist &params);
-
-	/** Remote AWAY */
-	bool Away(const std::string &prefix, parameterlist &params);
-
-	/** SAVE to resolve nick collisions without killing */
-	bool ForceNick(const std::string &prefix, parameterlist &params);
-
-	/** ENCAP command
-	 */
-	void Encap(User* who, parameterlist &params);
-
-	/** OPERQUIT command
-	 */
-	bool OperQuit(const std::string &prefix, parameterlist &params);
-
-	/** PONG
-	 */
-	bool LocalPong(const std::string &prefix, parameterlist &params);
-
-	/** VERSION
-	 */
-	bool ServerVersion(const std::string &prefix, parameterlist &params);
-
-	/** ADDLINE
-	 */
-	bool AddLine(const std::string &prefix, parameterlist &params);
-
-	/** DELLINE
-	 */
-	bool DelLine(const std::string &prefix, parameterlist &params);
-
-	/** WHOIS
-	 */
-	bool Whois(const std::string &prefix, parameterlist &params);
-
-	/** PUSH
-	 */
-	bool Push(const std::string &prefix, parameterlist &params);
-
-	/** PING
-	 */
-	bool LocalPing(const std::string &prefix, parameterlist &params);
-
-	/** <- (remote) <- SERVER
-	 */
-	bool RemoteServer(const std::string &prefix, parameterlist &params);
+	void Error(CommandBase::Params& params);
 
 	/** (local) -> SERVER
 	 */
-	bool Outbound_Reply_Server(parameterlist &params);
+	bool Outbound_Reply_Server(CommandBase::Params& params);
 
 	/** (local) <- SERVER
 	 */
-	bool Inbound_Server(parameterlist &params);
+	bool Inbound_Server(CommandBase::Params& params);
 
 	/** Handle IRC line split
 	 */
-	void Split(const std::string &line, std::string& prefix, std::string& command, parameterlist &params);
+	void Split(const std::string& line, std::string& tags, std::string& prefix, std::string& command, CommandBase::Params& params);
 
 	/** Process complete line from buffer
 	 */
-	void ProcessLine(std::string &line);
+	void ProcessLine(std::string& line);
 
-	void ProcessConnectedLine(std::string& prefix, std::string& command, parameterlist& params);
+	/** Process message tags received from a remote server. */
+	static void ProcessTag(User* source, const std::string& tag, ClientProtocol::TagMap& tags);
+
+	/** Process a message for a fully connected server. */
+	void ProcessConnectedLine(std::string& tags, std::string& prefix, std::string& command, CommandBase::Params& params);
 
 	/** Handle socket timeout from connect()
 	 */
-	virtual void OnTimeout();
+	void OnTimeout() override;
+
 	/** Handle server quit on close
 	 */
-	virtual void Close();
+	void Close() override;
 
-	/** Returns true if this server was introduced to the rest of the network
-	 */
-	bool Introduced();
+	/** Fixes messages coming from old servers so the new command handlers understand them. */
+	bool PreProcessOldProtocolMessage(User*& who, std::string& cmd, CommandBase::Params& params);
 };
-
-#endif
-

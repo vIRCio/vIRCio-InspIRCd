@@ -1,12 +1,20 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
- *   Copyright (C) 2009 Daniel De Graaf <danieldg@inspircd.org>
- *   Copyright (C) 2007, 2009 Robin Burchell <robin+git@viroteck.net>
- *   Copyright (C) 2008 Pippijn van Steenhoven <pip88nl@gmail.com>
+ *   Copyright (C) 2021 Dominic Hamon
+ *   Copyright (C) 2020-2023 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2018 linuxdaemon <linuxdaemon.irc@gmail.com>
+ *   Copyright (C) 2014 Adam <Adam@anope.org>
+ *   Copyright (C) 2013-2014, 2016 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2013 Daniel Vassdal <shutter@canternet.org>
+ *   Copyright (C) 2012, 2019 Robby <robby@chatbelgie.be>
+ *   Copyright (C) 2009-2010 Daniel De Graaf <danieldg@inspircd.org>
+ *   Copyright (C) 2009 Matt Smith <dz@inspircd.org>
+ *   Copyright (C) 2008 Uli Schlachter <psychon@znc.in>
+ *   Copyright (C) 2008 Craig Edwards <brain@inspircd.org>
+ *   Copyright (C) 2007-2009 Robin Burchell <robin+git@viroteck.net>
+ *   Copyright (C) 2007 Oliver Lupton <om@inspircd.org>
  *   Copyright (C) 2007 Dennis Friis <peavey@inspircd.org>
- *   Copyright (C) 2007 Craig Edwards <craigedwards@brainbox.cc>
- *   Copyright (C) 2007 Oliver Lupton <oliverlupton@gmail.com>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -23,107 +31,118 @@
 
 
 #include "inspircd.h"
-#include "u_listmode.h"
-
-/* $ModDesc: Allows an extended ban (+b) syntax redirecting banned users to another channel */
+#include "listmode.h"
+#include "modules/extban.h"
 
 /* Originally written by Om, January 2009
  */
 
-class BanRedirectEntry
+class BanRedirectEntry final
 {
- public:
+public:
 	std::string targetchan;
 	std::string banmask;
 
-	BanRedirectEntry(const std::string &target = "", const std::string &mask = "")
-	: targetchan(target), banmask(mask)
+	BanRedirectEntry(const std::string& target = "", const std::string& mask = "")
+		: targetchan(target)
+		, banmask(mask)
 	{
 	}
 };
 
 typedef std::vector<BanRedirectEntry> BanRedirectList;
-typedef std::deque<std::string> StringDeque;
 
-class BanRedirect : public ModeWatcher
+class BanRedirect final
+	: public ModeWatcher
 {
- public:
-	SimpleExtItem<BanRedirectList> extItem;
-	BanRedirect(Module* parent) : ModeWatcher(parent, 'b', MODETYPE_CHANNEL),
-		extItem("banredirect", parent)
+public:
+	ChanModeReference banmode;
+	ExtBan::ManagerRef extbanmgr;
+	SimpleExtItem<BanRedirectList> redirectlist;
+
+	BanRedirect(Module* parent)
+		: ModeWatcher(parent, "ban", MODETYPE_CHANNEL)
+		, banmode(parent, "ban")
+		, extbanmgr(parent)
+		, redirectlist(parent, "banredirect", ExtensionType::CHANNEL)
 	{
 	}
 
-	bool BeforeMode(User* source, User* dest, Channel* channel, std::string &param, bool adding, ModeType type)
+	bool BeforeMode(User* source, User* dest, Channel* channel, Modes::Change& change) override
 	{
-		/* nick!ident@host -> nick!ident@host
-		 * nick!ident@host#chan -> nick!ident@host#chan
+		/* nick!user@host -> nick!user@host
+		 * nick!user@host#chan -> nick!user@host#chan
 		 * nick@host#chan -> nick!*@host#chan
-		 * nick!ident#chan -> nick!ident@*#chan
+		 * nick!user#chan -> nick!user@*#chan
 		 * nick#chan -> nick!*@*#chan
 		 */
 
-		if(channel && (type == MODETYPE_CHANNEL) && param.length())
+		if ((channel) && !change.param.empty())
 		{
 			BanRedirectList* redirects;
 
 			std::string mask[4];
-			enum { NICK, IDENT, HOST, CHAN } current = NICK;
-			std::string::iterator start_pos = param.begin();
-			long maxbans = channel->GetMaxBans();
+			enum { NICK, USER, HOST, CHAN } current = NICK;
+			std::string::iterator start_pos = change.param.begin();
 
-			if (param.length() >= 2 && param[1] == ':')
+			std::string unused = change.param;
+			if (extbanmgr && extbanmgr->Canonicalize(unused))
+				return true; // Skip extbans.
+
+			if (change.param.find('#') == std::string::npos)
 				return true;
 
-			if (param.find('#') == std::string::npos)
-				return true;
-
-			if(adding && (channel->bans.size() > static_cast<unsigned>(maxbans)))
+			ListModeBase* banlm = static_cast<ListModeBase*>(*banmode);
+			unsigned long maxbans = banlm->GetLimit(channel);
+			ListModeBase::ModeList* list = banlm->GetList(channel);
+			if (list && change.adding && maxbans <= list->size())
 			{
-				source->WriteNumeric(478, "%s %s %c :Channel ban list for %s is full (maximum entries for this channel is %ld)",
-					source->nick.c_str(), channel->name.c_str(), mode, channel->name.c_str(), maxbans);
+				source->WriteNumeric(ERR_BANLISTFULL, channel->name, banlm->GetModeChar(), INSP_FORMAT("Channel ban list for {} is full (maximum entries for this channel is {})",
+					channel->name, maxbans));
 				return false;
 			}
 
-			for(std::string::iterator curr = start_pos; curr != param.end(); curr++)
+			for(std::string::iterator curr = start_pos; curr != change.param.end(); curr++)
 			{
 				switch(*curr)
 				{
 					case '!':
+						if (current != NICK)
+							break;
 						mask[current].assign(start_pos, curr);
-						current = IDENT;
+						current = USER;
 						start_pos = curr+1;
 						break;
 					case '@':
+						if (current != USER)
+							break;
 						mask[current].assign(start_pos, curr);
 						current = HOST;
 						start_pos = curr+1;
 						break;
 					case '#':
-						/* bug #921: don't barf when redirecting to ## channels */
-						if (current != CHAN)
-						{
-							mask[current].assign(start_pos, curr);
-							current = CHAN;
-							start_pos = curr;
-						}
+						if (current == CHAN)
+							break;
+						mask[current].assign(start_pos, curr);
+						current = CHAN;
+						start_pos = curr;
 						break;
 				}
 			}
 
 			if(mask[current].empty())
 			{
-				mask[current].assign(start_pos, param.end());
+				mask[current].assign(start_pos, change.param.end());
 			}
 
 			/* nick@host wants to be changed to *!nick@host rather than nick!*@host... */
-			if(mask[NICK].length() && mask[HOST].length() && mask[IDENT].empty())
+			if(mask[NICK].length() && mask[HOST].length() && mask[USER].empty())
 			{
 				/* std::string::swap() is fast - it runs in constant time */
-				mask[NICK].swap(mask[IDENT]);
+				mask[NICK].swap(mask[USER]);
 			}
 
-			if (!mask[NICK].empty() && mask[IDENT].empty() && mask[HOST].empty())
+			if (!mask[NICK].empty() && mask[USER].empty() && mask[HOST].empty())
 			{
 				if (mask[NICK].find('.') != std::string::npos || mask[NICK].find(':') != std::string::npos)
 				{
@@ -139,55 +158,55 @@ class BanRedirect : public ModeWatcher
 				}
 			}
 
-			param.assign(mask[NICK]).append(1, '!').append(mask[IDENT]).append(1, '@').append(mask[HOST]);
+			change.param.assign(mask[NICK]).append(1, '!').append(mask[USER]).append(1, '@').append(mask[HOST]);
 
 			if(mask[CHAN].length())
 			{
-				if (adding && IS_LOCAL(source))
+				if (change.adding && IS_LOCAL(source))
 				{
-					if (!ServerInstance->IsChannel(mask[CHAN].c_str(),  ServerInstance->Config->Limits.ChanMax))
+					if (!ServerInstance->Channels.IsChannel(mask[CHAN]))
 					{
-						source->WriteNumeric(403, "%s %s :Invalid channel name in redirection (%s)", source->nick.c_str(), channel->name.c_str(), mask[CHAN].c_str());
+						source->WriteNumeric(ERR_NOSUCHCHANNEL, channel->name, INSP_FORMAT("Invalid channel name in redirection ({})", mask[CHAN]));
 						return false;
 					}
 
-					Channel *c = ServerInstance->FindChan(mask[CHAN]);
+					auto* c = ServerInstance->Channels.Find(mask[CHAN]);
 					if (!c)
 					{
-						source->WriteNumeric(690, "%s :Target channel %s must exist to be set as a redirect.",source->nick.c_str(),mask[CHAN].c_str());
+						source->WriteNumeric(690, INSP_FORMAT("Target channel {} must exist to be set as a redirect.", mask[CHAN]));
 						return false;
 					}
-					else if (adding && c->GetPrefixValue(source) < OP_VALUE)
+					else if (change.adding && c->GetPrefixValue(source) < OP_VALUE)
 					{
-						source->WriteNumeric(690, "%s :You must be opped on %s to set it as a redirect.",source->nick.c_str(), mask[CHAN].c_str());
+						source->WriteNumeric(690, INSP_FORMAT("You must be opped on {} to set it as a redirect.", mask[CHAN]));
 						return false;
 					}
 
-					if (assign(channel->name) == mask[CHAN])
+					if (irc::equals(channel->name, mask[CHAN]))
 					{
-						source->WriteNumeric(690, "%s %s :You cannot set a ban redirection to the channel the ban is on", source->nick.c_str(), channel->name.c_str());
+						source->WriteNumeric(690, channel->name, "You cannot set a ban redirection to the channel the ban is on");
 						return false;
 					}
 				}
 
-				if(adding)
+				if (change.adding)
 				{
 					/* It's a properly valid redirecting ban, and we're adding it */
-					redirects = extItem.get(channel);
+					redirects = redirectlist.Get(channel);
 					if (!redirects)
 					{
 						redirects = new BanRedirectList;
-						extItem.set(channel, redirects);
+						redirectlist.Set(channel, redirects);
 					}
 					else
 					{
-						for (BanRedirectList::iterator redir = redirects->begin(); redir != redirects->end(); ++redir)
+						for (const auto& redirect : *redirects)
 						{
 							// Mimic the functionality used when removing the mode
-							if ((irc::string(redir->targetchan.c_str()) == irc::string(mask[CHAN].c_str())) && (irc::string(redir->banmask.c_str()) == irc::string(param.c_str())))
+							if (irc::equals(redirect.targetchan, mask[CHAN]) && irc::equals(redirect.banmask, change.param))
 							{
 								// Make sure the +b handler will still set the right ban
-								param.append(mask[CHAN]);
+								change.param.append(mask[CHAN]);
 								// Silently ignore the duplicate and don't set metadata
 								// This still allows channel ops to set/unset a redirect ban to clear "ghost" redirects
 								return true;
@@ -196,29 +215,28 @@ class BanRedirect : public ModeWatcher
 					}
 
 					/* Here 'param' doesn't have the channel on it yet */
-					redirects->push_back(BanRedirectEntry(mask[CHAN], param));
+					redirects->emplace_back(mask[CHAN], change.param);
 
 					/* Now it does */
-					param.append(mask[CHAN]);
+					change.param.append(mask[CHAN]);
 				}
 				else
 				{
 					/* Removing a ban, if there's no extensible there are no redirecting bans and we're fine. */
-					redirects = extItem.get(channel);
+					redirects = redirectlist.Get(channel);
 					if (redirects)
 					{
 						/* But there were, so we need to remove the matching one if there is one */
 
 						for(BanRedirectList::iterator redir = redirects->begin(); redir != redirects->end(); redir++)
 						{
-							/* Ugly as fuck */
-							if((irc::string(redir->targetchan.c_str()) == irc::string(mask[CHAN].c_str())) && (irc::string(redir->banmask.c_str()) == irc::string(param.c_str())))
+							if ((irc::equals(redir->targetchan, mask[CHAN])) && (irc::equals(redir->banmask, change.param)))
 							{
 								redirects->erase(redir);
 
 								if(redirects->empty())
 								{
-									extItem.unset(channel);
+									redirectlist.Unset(channel);
 								}
 
 								break;
@@ -227,7 +245,7 @@ class BanRedirect : public ModeWatcher
 					}
 
 					/* Append the channel so the default +b handler can remove the entry too */
-					param.append(mask[CHAN]);
+					change.param.append(mask[CHAN]);
 				}
 			}
 		}
@@ -236,78 +254,55 @@ class BanRedirect : public ModeWatcher
 	}
 };
 
-class ModuleBanRedirect : public Module
+class ModuleBanRedirect final
+	: public Module
 {
-	BanRedirect re;
-	bool nofollow;
+private:
+	BanRedirect banwatcher;
+	bool nofollow = false;
+	ChanModeReference limitmode;
+	ChanModeReference redirectmode;
 
- public:
+public:
 	ModuleBanRedirect()
-	: re(this)
+		: Module(VF_VENDOR | VF_COMMON, "Allows specifying a channel to redirect a banned user to in the ban mask.")
+		, banwatcher(this)
+		, limitmode(this, "limit")
+		, redirectmode(this, "redirect")
 	{
-		nofollow = false;
 	}
 
-
-	void init()
+	void OnCleanup(ExtensionType type, Extensible* item) override
 	{
-		if(!ServerInstance->Modes->AddModeWatcher(&re))
-			throw ModuleException("Could not add mode watcher");
-
-		ServerInstance->Modules->AddService(re.extItem);
-		Implementation list[] = { I_OnUserPreJoin };
-		ServerInstance->Modules->Attach(list, this, sizeof(list)/sizeof(Implementation));
-	}
-
-	virtual void OnCleanup(int target_type, void* item)
-	{
-		if(target_type == TYPE_CHANNEL)
+		if (type == ExtensionType::CHANNEL)
 		{
 			Channel* chan = static_cast<Channel*>(item);
-			BanRedirectList* redirects = re.extItem.get(chan);
+			BanRedirectList* redirects = banwatcher.redirectlist.Get(chan);
 
 			if(redirects)
 			{
-				irc::modestacker modestack(false);
-				StringDeque stackresult;
-				std::vector<std::string> mode_junk;
-				mode_junk.push_back(chan->name);
+				Modes::ChangeList changelist;
 
-				for(BanRedirectList::iterator i = redirects->begin(); i != redirects->end(); i++)
-				{
-					modestack.Push('b', i->targetchan.insert(0, i->banmask));
-				}
+				for (auto& redirect : *redirects)
+					changelist.push_remove(*banwatcher.banmode, redirect.targetchan.insert(0, redirect.banmask));
 
-				for(BanRedirectList::iterator i = redirects->begin(); i != redirects->end(); i++)
-				{
-					modestack.PushPlus();
-					modestack.Push('b', i->banmask);
-				}
+				for (const auto& redirect : *redirects)
+					changelist.push_add(*banwatcher.banmode, redirect.banmask);
 
-				while(modestack.GetStackedLine(stackresult))
-				{
-					mode_junk.insert(mode_junk.end(), stackresult.begin(), stackresult.end());
-					ServerInstance->SendMode(mode_junk, ServerInstance->FakeClient);
-					mode_junk.erase(mode_junk.begin() + 1, mode_junk.end());
-				}
+				ServerInstance->Modes.Process(ServerInstance->FakeClient, chan, nullptr, changelist, ModeParser::MODE_LOCALONLY);
 			}
 		}
 	}
 
-	virtual ModResult OnUserPreJoin(User* user, Channel* chan, const char* cname, std::string &privs, const std::string &keygiven)
+	ModResult OnUserPreJoin(LocalUser* user, Channel* chan, const std::string& cname, std::string& privs, const std::string& keygiven, bool override) override
 	{
-		if (chan)
+		if (!override && chan)
 		{
-			BanRedirectList* redirects = re.extItem.get(chan);
+			BanRedirectList* redirects = banwatcher.redirectlist.Get(chan);
 
 			if (redirects)
 			{
 				/* We actually had some ban redirects to check */
-
-				/* This was replaced with user->MakeHostIP() when I had a snprintf(), but MakeHostIP() doesn't seem to add the nick.
-				 * Maybe we should have a GetFullIPHost() or something to match GetFullHost() and GetFullRealHost?
-				 */
-
 				ModResult result;
 				FIRST_MOD_RESULT(OnCheckChannelBan, result, (user, chan));
 				if (result == MOD_RES_ALLOW)
@@ -317,11 +312,11 @@ class ModuleBanRedirect : public Module
 				}
 
 				std::string ipmask(user->nick);
-				ipmask.append(1, '!').append(user->MakeHostIP());
+				ipmask.append(1, '!').append(user->GetUserAddress());
 
-				for(BanRedirectList::iterator redir = redirects->begin(); redir != redirects->end(); redir++)
+				for (const auto& redirect : *redirects)
 				{
-					if(InspIRCd::Match(user->GetFullRealHost(), redir->banmask) || InspIRCd::Match(user->GetFullHost(), redir->banmask) || InspIRCd::MatchCIDR(ipmask, redir->banmask))
+					if (InspIRCd::Match(user->GetRealMask(), redirect.banmask) || InspIRCd::Match(user->GetMask(), redirect.banmask) || InspIRCd::MatchCIDR(ipmask, redirect.banmask))
 					{
 						/* This prevents recursion when a user sets multiple ban redirects in a chain
 						 * (thanks Potter)
@@ -334,23 +329,23 @@ class ModuleBanRedirect : public Module
 							return MOD_RES_DENY;
 
 						/* tell them they're banned and are being transferred */
-						Channel* destchan = ServerInstance->FindChan(redir->targetchan);
+						auto* destchan = ServerInstance->Channels.Find(redirect.targetchan);
 						std::string destlimit;
 
 						if (destchan)
-							destlimit = destchan->GetModeParameter('l');
+							destlimit = destchan->GetModeParameter(limitmode);
 
-						if(destchan && ServerInstance->Modules->Find("m_redirect.so") && destchan->IsModeSet('L') && !destlimit.empty() && (destchan->GetUserCounter() >= atoi(destlimit.c_str())))
+						if(destchan && destchan->IsModeSet(redirectmode) && !destlimit.empty() && (destchan->GetUsers().size() >= ConvToNum<size_t>(destlimit)))
 						{
-							user->WriteNumeric(474, "%s %s :Cannot join channel (You are banned)", user->nick.c_str(), chan->name.c_str());
+							user->WriteNumeric(ERR_BANNEDFROMCHAN, chan->name, "Cannot join channel (you're banned)");
 							return MOD_RES_DENY;
 						}
 						else
 						{
-							user->WriteNumeric(474, "%s %s :Cannot join channel (You are banned)", user->nick.c_str(), chan->name.c_str());
-							user->WriteNumeric(470, "%s %s %s :You are banned from this channel, so you are automatically transferred to the redirected channel.", user->nick.c_str(), chan->name.c_str(), redir->targetchan.c_str());
+							user->WriteNumeric(ERR_BANNEDFROMCHAN, chan->name, "Cannot join channel (you're banned)");
+							user->WriteNumeric(470, chan->name, redirect.targetchan, "You are banned from this channel, so you are automatically being transferred to the redirected channel.");
 							nofollow = true;
-							Channel::JoinUser(user, redir->targetchan.c_str(), false, "", false, ServerInstance->Time());
+							Channel::JoinUser(user, redirect.targetchan);
 							nofollow = false;
 							return MOD_RES_DENY;
 						}
@@ -359,18 +354,6 @@ class ModuleBanRedirect : public Module
 			}
 		}
 		return MOD_RES_PASSTHRU;
-	}
-
-	virtual ~ModuleBanRedirect()
-	{
-		/* XXX is this the best place to do this? */
-		if (!ServerInstance->Modes->DelModeWatcher(&re))
-			ServerInstance->Logs->Log("m_banredirect.so", DEBUG, "Failed to delete modewatcher!");
-	}
-
-	virtual Version GetVersion()
-	{
-		return Version("Allows an extended ban (+b) syntax redirecting banned users to another channel", VF_COMMON|VF_VENDOR);
 	}
 };
 

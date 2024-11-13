@@ -1,10 +1,14 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
+ *   Copyright (C) 2017-2024 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2012-2015, 2018 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
  *   Copyright (C) 2010 Jens Voss <DukePyrolator@anope.org>
+ *   Copyright (C) 2009 Matt Smith <dz@inspircd.org>
  *   Copyright (C) 2009 Daniel De Graaf <danieldg@inspircd.org>
  *   Copyright (C) 2008 Robin Burchell <robin+git@viroteck.net>
- *   Copyright (C) 2007-2008 Craig Edwards <craigedwards@brainbox.cc>
+ *   Copyright (C) 2007-2008 Craig Edwards <brain@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -20,185 +24,257 @@
  */
 
 
-/* $ModDesc: Allows for delay-join channels (+D) where users don't appear to join until they speak */
-
 #include "inspircd.h"
-#include <stdarg.h>
+#include "clientprotocolevent.h"
+#include "modules/ctctags.h"
+#include "modules/ircv3_servertime.h"
+#include "modules/names.h"
+#include "modules/who.h"
 
-class DelayJoinMode : public ModeHandler
+class DelayJoinMode final
+	: public SimpleChannelMode
 {
- private:
-	CUList empty;
- public:
-	DelayJoinMode(Module* Parent) : ModeHandler(Parent, "delayjoin", 'D', PARAM_NONE, MODETYPE_CHANNEL)
+private:
+	IntExtItem& unjoined;
+	IRCv3::ServerTime::API servertime;
+
+public:
+	DelayJoinMode(Module* Parent, IntExtItem& ext)
+		: SimpleChannelMode(Parent, "delayjoin", 'D')
+		, unjoined(ext)
+		, servertime(Parent)
 	{
-		levelrequired = OP_VALUE;
+		ranktoset = ranktounset = OP_VALUE;
 	}
 
-	ModeAction OnModeChange(User* source, User* dest, Channel* channel, std::string &parameter, bool adding);
+	bool OnModeChange(User* source, User* dest, Channel* channel, Modes::Change& change) override
+	{
+		if (SimpleChannelMode::OnModeChange(source, dest, channel, change))
+		{
+			/*
+			 * Make all users visible, as +D is being removed. If we don't do this,
+			 * they remain permanently invisible on this channel!
+			 */
+			for (const auto& [member, _] : channel->GetUsers())
+				RevealUser(member, channel);
+			return true;
+		}
+		return false;
+	}
+
+	void RevealUser(User* user, Channel* chan);
 };
 
-class ModuleDelayJoin : public Module
+namespace
 {
+
+/** Hook handler for join client protocol events.
+ * This allows us to block join protocol events completely, including all associated messages (e.g. MODE, away-notify AWAY).
+ * This is not the same as OnUserJoin() because that runs only when a real join happens but this runs also when a module
+ * such as hostcycle generates a join.
+ */
+class JoinHook final
+	: public ClientProtocol::EventHook
+{
+private:
+	const IntExtItem& unjoined;
+
+public:
+	JoinHook(Module* mod, const IntExtItem& unjoinedref)
+		: ClientProtocol::EventHook(mod, "JOIN", 10)
+		, unjoined(unjoinedref)
+	{
+	}
+
+	ModResult OnPreEventSend(LocalUser* user, const ClientProtocol::Event& ev, ClientProtocol::MessageList& messagelist) override
+	{
+		const ClientProtocol::Events::Join& join = static_cast<const ClientProtocol::Events::Join&>(ev);
+		const Membership* const memb = join.GetMember();
+		const User* const u = memb->user;
+		if ((unjoined.Get(memb)) && (u != user))
+			return MOD_RES_DENY;
+		return MOD_RES_PASSTHRU;
+	}
+};
+
+}
+
+class ModuleDelayJoin final
+	: public Module
+	, public CTCTags::EventListener
+	, public Names::EventListener
+	, public Who::EventListener
+	, public Who::VisibleEventListener
+{
+private:
+	IntExtItem unjoined;
+	JoinHook joinhook;
 	DelayJoinMode djm;
- public:
-	LocalIntExt unjoined;
-	ModuleDelayJoin() : djm(this), unjoined("delayjoin", this)
+
+	void PopulateExcepts(CUList& except, Membership* memb)
+	{
+		if (!unjoined.Get(memb))
+			return;
+
+		unjoined.Unset(memb);
+		for (const auto& [member, _] : memb->chan->GetUsers())
+		{
+			if (member != memb->user && IS_LOCAL(member))
+				except.insert(member);
+		}
+	}
+
+public:
+	ModuleDelayJoin()
+		: Module(VF_VENDOR, "Adds channel mode D (delayjoin) which hides JOIN messages from users until they speak.")
+		, CTCTags::EventListener(this)
+		, Names::EventListener(this)
+		, Who::EventListener(this)
+		, Who::VisibleEventListener(this)
+		, unjoined(this, "delayjoin", ExtensionType::MEMBERSHIP)
+		, joinhook(this, unjoined)
+		, djm(this, unjoined)
 	{
 	}
 
-	void init()
-	{
-		ServerInstance->Modules->AddService(djm);
-		ServerInstance->Modules->AddService(unjoined);
-		Implementation eventlist[] = { I_OnUserJoin, I_OnUserPart, I_OnUserKick, I_OnBuildNeighborList, I_OnNamesListItem, I_OnText, I_OnRawMode };
-		ServerInstance->Modules->Attach(eventlist, this, sizeof(eventlist)/sizeof(Implementation));
-	}
-	~ModuleDelayJoin();
-	Version GetVersion();
-	void OnNamesListItem(User* issuer, Membership*, std::string &prefixes, std::string &nick);
-	void OnUserJoin(Membership*, bool, bool, CUList&);
+	ModResult OnNamesListItem(LocalUser* issuer, Membership*, std::string& prefixes, std::string& nick) override;
+	ModResult OnWhoLine(const Who::Request& request, LocalUser* source, User* user, Membership* memb, Numeric::Numeric& numeric) override;
+	ModResult OnWhoVisible(const Who::Request& request, LocalUser* source, Membership* memb) override;
+	void OnUserJoin(Membership*, bool, bool, CUList&) override;
 	void CleanUser(User* user);
-	void OnUserPart(Membership*, std::string &partmessage, CUList&);
-	void OnUserKick(User* source, Membership*, const std::string &reason, CUList&);
-	void OnBuildNeighborList(User* source, UserChanList &include, std::map<User*,bool> &exception);
-	void OnText(User* user, void* dest, int target_type, const std::string &text, char status, CUList &exempt_list);
-	ModResult OnRawMode(User* user, Channel* channel, const char mode, const std::string &param, bool adding, int pcnt);
+	void OnUserPart(Membership*, std::string& partmessage, CUList&) override;
+	void OnUserKick(User* source, Membership*, const std::string& reason, CUList&) override;
+	void OnBuildNeighborList(User* source, User::NeighborList& include, User::NeighborExceptions& exception) override;
+	void OnUserMessage(User* user, const MessageTarget& target, const MessageDetails& details) override;
+	void OnUserTagMessage(User* user, const MessageTarget& target, const CTCTags::TagMessageDetails& details) override;
+	ModResult OnRawMode(User* user, Channel* channel, const Modes::Change& change) override;
 };
 
-ModeAction DelayJoinMode::OnModeChange(User* source, User* dest, Channel* channel, std::string &parameter, bool adding)
-{
-	/* no change */
-	if (channel->IsModeSet('D') == adding)
-		return MODEACTION_DENY;
-
-	if (!adding)
-	{
-		/*
-		 * Make all users visible, as +D is being removed. If we don't do this,
-		 * they remain permanently invisible on this channel!
-		 */
-		const UserMembList* names = channel->GetUsers();
-		for (UserMembCIter n = names->begin(); n != names->end(); ++n)
-			creator->OnText(n->first, channel, TYPE_CHANNEL, "", 0, empty);
-	}
-	channel->SetMode('D', adding);
-	return MODEACTION_ALLOW;
-}
-
-ModuleDelayJoin::~ModuleDelayJoin()
-{
-}
-
-Version ModuleDelayJoin::GetVersion()
-{
-	return Version("Allows for delay-join channels (+D) where users don't appear to join until they speak", VF_VENDOR);
-}
-
-void ModuleDelayJoin::OnNamesListItem(User* issuer, Membership* memb, std::string &prefixes, std::string &nick)
+ModResult ModuleDelayJoin::OnNamesListItem(LocalUser* issuer, Membership* memb, std::string& prefixes, std::string& nick)
 {
 	/* don't prevent the user from seeing themself */
 	if (issuer == memb->user)
-		return;
+		return MOD_RES_PASSTHRU;
 
 	/* If the user is hidden by delayed join, hide them from the NAMES list */
-	if (unjoined.get(memb))
-		nick.clear();
+	if (unjoined.Get(memb))
+		return MOD_RES_DENY;
+
+	return MOD_RES_PASSTHRU;
 }
 
-static void populate(CUList& except, Membership* memb)
+ModResult ModuleDelayJoin::OnWhoLine(const Who::Request& request, LocalUser* source, User* user, Membership* memb, Numeric::Numeric& numeric)
 {
-	const UserMembList* users = memb->chan->GetUsers();
-	for(UserMembCIter i = users->begin(); i != users->end(); i++)
-	{
-		if (i->first == memb->user || !IS_LOCAL(i->first))
-			continue;
-		except.insert(i->first);
-	}
+	// We don't need to do anything if they're not delayjoined.
+	if (!memb || !unjoined.Get(memb))
+		return MOD_RES_PASSTHRU;
+
+	// Only show delayjoined users to others if the d flag has been specified.
+	if (source != user && !request.flags['d'])
+		return MOD_RES_DENY;
+
+	// Add the < flag to mark the user as delayjoined.
+	size_t flag_index;
+	if (request.GetFieldIndex('f', flag_index))
+		numeric.GetParams()[flag_index].push_back('<');
+	return MOD_RES_PASSTHRU;
+}
+
+ModResult ModuleDelayJoin::OnWhoVisible(const Who::Request& request, LocalUser* source, Membership* memb)
+{
+	// A WHO request is visible if:
+	// 1. The source is the user.
+	// 2. The user specified the delayjoin `d` flag.
+	// 3. The user is not delayjoined.
+	return source == memb->user || request.flags['d'] || !unjoined.Get(memb) ? MOD_RES_PASSTHRU : MOD_RES_DENY;
 }
 
 void ModuleDelayJoin::OnUserJoin(Membership* memb, bool sync, bool created, CUList& except)
 {
-	if (memb->chan->IsModeSet('D'))
+	if (memb->chan->IsModeSet(djm))
+		unjoined.Set(memb, ServerInstance->Time());
+}
+
+void ModuleDelayJoin::OnUserPart(Membership* memb, std::string& partmessage, CUList& except)
+{
+	PopulateExcepts(except, memb);
+}
+
+void ModuleDelayJoin::OnUserKick(User* source, Membership* memb, const std::string& reason, CUList& except)
+{
+	PopulateExcepts(except, memb);
+}
+
+void ModuleDelayJoin::OnBuildNeighborList(User* source, User::NeighborList& include, User::NeighborExceptions& exception)
+{
+	for (User::NeighborList::iterator i = include.begin(); i != include.end(); )
 	{
-		unjoined.set(memb, 1);
-		populate(except, memb);
+		Membership* memb = *i;
+		if (unjoined.Get(memb))
+			i = include.erase(i);
+		else
+			++i;
 	}
 }
 
-void ModuleDelayJoin::OnUserPart(Membership* memb, std::string &partmessage, CUList& except)
+void ModuleDelayJoin::OnUserTagMessage(User* user, const MessageTarget& target, const CTCTags::TagMessageDetails& details)
 {
-	if (unjoined.set(memb, 0))
-		populate(except, memb);
-}
-
-void ModuleDelayJoin::OnUserKick(User* source, Membership* memb, const std::string &reason, CUList& except)
-{
-	if (unjoined.set(memb, 0))
-		populate(except, memb);
-}
-
-void ModuleDelayJoin::OnBuildNeighborList(User* source, UserChanList &include, std::map<User*,bool> &exception)
-{
-	UCListIter i = include.begin();
-	while (i != include.end())
-	{
-		Channel* c = *i++;
-		Membership* memb = c->GetUser(source);
-		if (memb && unjoined.get(memb))
-			include.erase(c);
-	}
-}
-
-void ModuleDelayJoin::OnText(User* user, void* dest, int target_type, const std::string &text, char status, CUList &exempt_list)
-{
-	/* Server origin */
-	if (!user)
+	if (target.type != MessageTarget::TYPE_CHANNEL)
 		return;
 
-	if (target_type != TYPE_CHANNEL)
+	auto* channel = target.Get<Channel>();
+	djm.RevealUser(user, channel);
+}
+
+void ModuleDelayJoin::OnUserMessage(User* user, const MessageTarget& target, const MessageDetails& details)
+{
+	if (target.type != MessageTarget::TYPE_CHANNEL)
 		return;
 
-	Channel* channel = static_cast<Channel*>(dest);
+	auto* channel = target.Get<Channel>();
+	djm.RevealUser(user, channel);
+}
 
-	Membership* memb = channel->GetUser(user);
-	if (!memb || !unjoined.set(memb, 0))
+void DelayJoinMode::RevealUser(User* user, Channel* chan)
+{
+	Membership* memb = chan->GetUser(user);
+	if (!memb)
+		return;
+
+	time_t jointime = unjoined.Get(memb);
+	if (!jointime)
 		return;
 
 	/* Display the join to everyone else (the user who joined got it earlier) */
-	channel->WriteAllExceptSender(user, false, 0, "JOIN %s", channel->name.c_str());
-
-	std::string ms = memb->modes;
-	for(unsigned int i=0; i < memb->modes.length(); i++)
-		ms.append(" ").append(user->nick);
-
-	if (ms.length() > 0)
-		channel->WriteAllExceptSender(user, false, 0, "MODE %s +%s", channel->name.c_str(), ms.c_str());
+	unjoined.Unset(memb);
+	CUList except_list;
+	except_list.insert(user);
+	ClientProtocol::Events::Join joinevent(memb);
+	if (servertime)
+		servertime->Set(joinevent, jointime);
+	chan->Write(joinevent, 0, except_list);
 }
 
-/* make the user visible if he receives any mode change */
-ModResult ModuleDelayJoin::OnRawMode(User* user, Channel* channel, const char mode, const std::string &param, bool adding, int pcnt)
+/* make the user visible if they receive any mode change */
+ModResult ModuleDelayJoin::OnRawMode(User* user, Channel* channel, const Modes::Change& change)
 {
-	if (!user || !channel || param.empty())
+	if (!channel || change.param.empty())
 		return MOD_RES_PASSTHRU;
 
-	ModeHandler* mh = ServerInstance->Modes->FindMode(mode, MODETYPE_CHANNEL);
 	// If not a prefix mode then we got nothing to do here
-	if (!mh || !mh->GetPrefixRank())
+	if (!change.mh->IsPrefixMode())
 		return MOD_RES_PASSTHRU;
 
 	User* dest;
 	if (IS_LOCAL(user))
-		dest = ServerInstance->FindNickOnly(param);
+		dest = ServerInstance->Users.FindNick(change.param);
 	else
-		dest = ServerInstance->FindNick(param);
+		dest = ServerInstance->Users.Find(change.param);
 
 	if (!dest)
 		return MOD_RES_PASSTHRU;
 
-	Membership* memb = channel->GetUser(dest);
-	if (memb && unjoined.set(memb, 0))
-		channel->WriteAllExceptSender(dest, false, 0, "JOIN %s", channel->name.c_str());
+	djm.RevealUser(dest, channel);
 	return MOD_RES_PASSTHRU;
 }
 

@@ -1,8 +1,11 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
+ *   Copyright (C) 2021-2022 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2012-2014 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
+ *   Copyright (C) 2009 Daniel De Graaf <danieldg@inspircd.org>
  *   Copyright (C) 2007-2008 Robin Burchell <robin+git@viroteck.net>
- *   Copyright (C) 2007 Craig Edwards <craigedwards@brainbox.cc>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -18,155 +21,89 @@
  */
 
 
-/* $Core */
-
 #include "inspircd.h"
-#include "bancache.h"
 
-BanCacheHit *BanCacheManager::AddHit(const std::string &ip, const std::string &type, const std::string &reason)
+BanCacheHit::BanCacheHit(const std::string& type, const std::string& reason, time_t seconds)
+	: Type(type)
+	, Reason(reason)
+	, Expiry(ServerInstance->Time() + seconds)
 {
-	BanCacheHit *b;
+}
 
-	if (this->BanHash->find(ip) != this->BanHash->end()) // can't have two cache entries on the same IP, sorry..
-		return NULL;
+BanCacheHit* BanCacheManager::AddHit(const std::string& ip, const std::string& type, const std::string& reason, time_t seconds)
+{
+	BanCacheHit*& b = BanHash[ip];
+	if (b != nullptr) // can't have two cache entries on the same IP, sorry..
+		return nullptr;
 
-	b = new BanCacheHit(ip, type, reason);
-
-	this->BanHash->insert(std::make_pair(ip, b));
+	b = new BanCacheHit(type, reason, (seconds ? seconds : 86400));
 	return b;
 }
 
-BanCacheHit *BanCacheManager::AddHit(const std::string &ip, const std::string &type, const std::string &reason, time_t seconds)
+BanCacheHit* BanCacheManager::GetHit(const std::string& ip)
 {
-	BanCacheHit *b;
+	BanCacheHash::iterator i = this->BanHash.find(ip);
 
-	if (this->BanHash->find(ip) != this->BanHash->end()) // can't have two cache entries on the same IP, sorry..
-		return NULL;
+	if (i == this->BanHash.end())
+		return nullptr; // free and safe
 
-	b = new BanCacheHit(ip, type, reason, seconds);
+	if (RemoveIfExpired(i))
+		return nullptr; // expired
 
-	this->BanHash->insert(std::make_pair(ip, b));
-	return b;
+	return i->second; // hit.
 }
 
-BanCacheHit *BanCacheManager::GetHit(const std::string &ip)
+bool BanCacheManager::RemoveIfExpired(BanCacheHash::iterator& it)
 {
-	BanCacheHash::iterator i = this->BanHash->find(ip);
+	if (ServerInstance->Time() < it->second->Expiry)
+		return false;
 
-	if (i == this->BanHash->end())
-		return NULL; // free and safe
-	else
-	{
-		if (ServerInstance->Time() > i->second->Expiry)
-		{
-			ServerInstance->Logs->Log("BANCACHE", DEBUG, "Hit on " + ip + " is out of date, removing!");
-			RemoveHit(i->second);
-			return NULL; // out of date
-		}
-
-		return i->second; // hit.
-	}
-}
-
-bool BanCacheManager::RemoveHit(BanCacheHit *b)
-{
-	BanCacheHash::iterator i;
-
-	if (!b)
-		return false; // I don't think so.
-
-	i = this->BanHash->find(b->IP);
-
-	if (i == this->BanHash->end())
-	{
-		// err..
-		ServerInstance->Logs->Log("BANCACHE", DEBUG, "BanCacheManager::RemoveHit(): I got asked to remove a hit that wasn't in the hash(?)");
-	}
-	else
-	{
-		this->BanHash->erase(i);
-	}
-
-	delete b;
+	ServerInstance->Logs.Debug("BANCACHE", "Hit on " + it->first + " is out of date, removing!");
+	delete it->second;
+	it = BanHash.erase(it);
 	return true;
 }
 
-unsigned int BanCacheManager::RemoveEntries(const std::string &type, bool positive)
+void BanCacheManager::RemoveEntries(const std::string& type, bool positive)
 {
-	int removed = 0;
-
-	BanCacheHash::iterator safei;
-
 	if (positive)
-		ServerInstance->Logs->Log("BANCACHE", DEBUG, "BanCacheManager::RemoveEntries(): Removing positive hits for " + type);
+		ServerInstance->Logs.Debug("BANCACHE", "BanCacheManager::RemoveEntries(): Removing positive hits for " + type);
 	else
-		ServerInstance->Logs->Log("BANCACHE", DEBUG, "BanCacheManager::RemoveEntries(): Removing negative hits for " + type);
+		ServerInstance->Logs.Debug("BANCACHE", "BanCacheManager::RemoveEntries(): Removing all negative hits");
 
-	for (BanCacheHash::iterator n = BanHash->begin(); n != BanHash->end(); )
+	for (BanCacheHash::iterator i = BanHash.begin(); i != BanHash.end(); )
 	{
-		safei = n;
-		safei++;
+		if (RemoveIfExpired(i))
+			continue; // updates the iterator if expired
 
-		BanCacheHit *b = n->second;
+		BanCacheHit* b = i->second;
+		bool remove = false;
 
-		/* Safe to delete items here through iterator 'n' */
-		if (b->Type == type || !positive) // if removing negative hits, ignore type..
+		if (positive)
 		{
-			if ((positive && !b->Reason.empty()) || b->Reason.empty())
-			{
-				/* we need to remove this one. */
-				ServerInstance->Logs->Log("BANCACHE", DEBUG, "BanCacheManager::RemoveEntries(): Removing a hit on " + b->IP);
-				delete b;
-				BanHash->erase(n); // WORD TO THE WISE: don't use RemoveHit here, because we MUST remove the iterator in a safe way.
-				removed++;
-			}
-		}
-
-		/* End of safe section */
-		n = safei;
-	}
-
-
-	return removed;
-}
-
-void BanCacheManager::RehashCache()
-{
-	BanCacheHash* NewHash = new BanCacheHash();
-
-	BanCacheHash::iterator safei;
-	for (BanCacheHash::iterator n = BanHash->begin(); n != BanHash->end(); )
-	{
-		safei = n;
-		safei++;
-
-		/* Safe to delete items here through iterator 'n' */
-		BanCacheHit *b = n->second;
-
-		if (ServerInstance->Time() > b->Expiry)
-		{
-			/* we need to remove this one. */
-			delete b;
-			BanHash->erase(n); // WORD TO THE WISE: don't use RemoveHit here, because we MUST remove the iterator in a safe way.
+			// when removing positive hits, remove only if the type matches
+			remove = b->IsPositive() && (b->Type == type);
 		}
 		else
 		{
-			/* Actually inserts a std::pair */
-			NewHash->insert(*n);
+			// when removing negative hits, remove all of them
+			remove = !b->IsPositive();
 		}
 
-		/* End of safe section */
-
-		n = safei;
+		if (remove)
+		{
+			/* we need to remove this one. */
+			ServerInstance->Logs.Debug("BANCACHE", "BanCacheManager::RemoveEntries(): Removing a hit on " + i->first);
+			delete b;
+			i = BanHash.erase(i);
+		}
+		else
+			++i;
 	}
-
-	delete BanHash;
-	BanHash = NewHash;
 }
 
 BanCacheManager::~BanCacheManager()
 {
-	for (BanCacheHash::iterator n = BanHash->begin(); n != BanHash->end(); ++n)
-		delete n->second;
-	delete BanHash;
+	for (const auto& [_, hit] : BanHash)
+		delete hit;
 }

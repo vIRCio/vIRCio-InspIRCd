@@ -1,10 +1,14 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
+ *   Copyright (C) 2018 linuxdaemon <linuxdaemon.irc@gmail.com>
+ *   Copyright (C) 2013, 2019-2023 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
+ *   Copyright (C) 2012 Attila Molnar <attilamolnar@hush.com>
  *   Copyright (C) 2009 Daniel De Graaf <danieldg@inspircd.org>
+ *   Copyright (C) 2007 Robin Burchell <robin+git@viroteck.net>
  *   Copyright (C) 2007 Dennis Friis <peavey@inspircd.org>
- *   Copyright (C) 2006-2007 Craig Edwards <craigedwards@brainbox.cc>
- *   Copyright (C) 2006 Robin Burchell <robin+git@viroteck.net>
+ *   Copyright (C) 2006 Craig Edwards <brain@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -21,72 +25,103 @@
 
 
 #include "inspircd.h"
+#include "utility/string.h"
 
-/* $ModDesc: Provides masking of user hostnames via traditional /VHOST command */
-
-/** Handle /VHOST
- */
-class CommandVhost : public Command
+struct CustomVhost final
 {
- public:
-	CommandVhost(Module* Creator) : Command(Creator,"VHOST", 2)
+	const std::string name;
+	const std::string password;
+	const std::string hash;
+	const std::string vhost;
+
+	CustomVhost(const std::string& n, const std::string& p, const std::string& h, const std::string& v)
+		: name(n)
+		, password(p)
+		, hash(h)
+		, vhost(v)
 	{
-		syntax = "<username> <password>";
 	}
 
-	CmdResult Handle (const std::vector<std::string> &parameters, User *user)
+	bool CheckPass(const std::string& pass) const
 	{
-		ConfigTagList tags = ServerInstance->Config->ConfTags("vhost");
-		for(ConfigIter i = tags.first; i != tags.second; ++i)
-		{
-			ConfigTag* tag = i->second;
-			std::string mask = tag->getString("host");
-			std::string username = tag->getString("user");
-			std::string pass = tag->getString("pass");
-			std::string hash = tag->getString("hash");
+		return InspIRCd::CheckPassword(password, hash, pass);
+	}
+};
 
-			if (parameters[0] == username && !ServerInstance->PassCompare(user, pass, parameters[1], hash))
+typedef std::multimap<std::string, CustomVhost> CustomVhostMap;
+
+class CommandVhost final
+	: public Command
+{
+public:
+	CustomVhostMap vhosts;
+
+	CommandVhost(Module* Creator)
+		: Command(Creator, "VHOST", 2)
+	{
+		syntax = { "<username> <password>" };
+	}
+
+	CmdResult Handle(User* user, const Params& parameters) override
+	{
+		for (const auto& [_, config] : insp::equal_range(vhosts, parameters[0]))
+		{
+			if (config.CheckPass(parameters[1]))
 			{
-				if (!mask.empty())
-				{
-					user->WriteServ("NOTICE "+user->nick+" :Setting your VHost: " + mask);
-					user->ChangeDisplayedHost(mask.c_str());
-					return CMD_SUCCESS;
-				}
+				user->WriteNotice("Setting your VHost: " + config.vhost);
+				user->ChangeDisplayedHost(config.vhost);
+				return CmdResult::SUCCESS;
 			}
 		}
 
-		user->WriteServ("NOTICE "+user->nick+" :Invalid username or password.");
-		return CMD_FAILURE;
+		user->WriteNotice("Invalid username or password.");
+		return CmdResult::FAILURE;
 	}
 };
 
-class ModuleVHost : public Module
+class ModuleVHost final
+	: public Module
 {
- private:
+private:
 	CommandVhost cmd;
 
- public:
-	ModuleVHost() : cmd(this)
+public:
+	ModuleVHost()
+		: Module(VF_VENDOR, "Allows the server administrator to define accounts which can grant a custom virtual host.")
+		, cmd(this)
 	{
 	}
 
-	void init()
+	void ReadConfig(ConfigStatus& status) override
 	{
-		ServerInstance->Modules->AddService(cmd);
+		CustomVhostMap newhosts;
+		for (const auto& [_, tag] : ServerInstance->Config->ConfTags("vhost"))
+		{
+			std::string mask = tag->getString("host");
+			if (mask.empty())
+				throw ModuleException(this, "<vhost:host> is empty! at " + tag->source.str());
+
+			std::string username = tag->getString("user");
+			if (username.empty())
+				throw ModuleException(this, "<vhost:user> is empty! at " + tag->source.str());
+
+			std::string pass = tag->getString("pass");
+			if (pass.empty())
+				throw ModuleException(this, "<vhost:pass> is empty! at " + tag->source.str());
+
+			const std::string hash = tag->getString("hash", "plaintext", 1);
+			if (insp::equalsci(hash, "plaintext"))
+			{
+				ServerInstance->Logs.Warning(MODNAME, "<vhost> tag for {} at {} contains an plain text password, this is insecure!",
+					username, tag->source.str());
+			}
+
+			CustomVhost vhost(username, pass, hash, mask);
+			newhosts.emplace(username, vhost);
+		}
+
+		cmd.vhosts.swap(newhosts);
 	}
-
-	virtual ~ModuleVHost()
-	{
-	}
-
-
-	virtual Version GetVersion()
-	{
-		return Version("Provides masking of user hostnames via traditional /VHOST command",VF_VENDOR);
-	}
-
 };
 
 MODULE_INIT(ModuleVHost)
-

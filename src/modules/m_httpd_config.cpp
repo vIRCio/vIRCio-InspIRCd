@@ -1,8 +1,12 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
+ *   Copyright (C) 2013, 2018-2021, 2023 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2013, 2015 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
  *   Copyright (C) 2009-2010 Daniel De Graaf <danieldg@inspircd.org>
- *   Copyright (C) 2008 Craig Edwards <craigedwards@brainbox.cc>
+ *   Copyright (C) 2009 Uli Schlachter <psychon@znc.in>
+ *   Copyright (C) 2008 Craig Edwards <brain@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -19,96 +23,56 @@
 
 
 #include "inspircd.h"
-#include "httpd.h"
-#include "protocol.h"
+#include "modules/httpd.h"
 
-/* $ModDesc: Allows for the server configuration to be viewed over HTTP via m_httpd.so */
-
-class ModuleHttpConfig : public Module
+class ModuleHttpConfig final
+	: public Module
+	, public HTTPRequestEventListener
 {
- public:
-	void init()
+private:
+	HTTPdAPI API;
+
+public:
+	ModuleHttpConfig()
+		: Module(VF_VENDOR, "Allows the server configuration to be viewed over HTTP via the /config path.")
+		, HTTPRequestEventListener(this)
+		, API(this)
 	{
-		Implementation eventlist[] = { I_OnEvent };
-		ServerInstance->Modules->Attach(eventlist, this, sizeof(eventlist)/sizeof(Implementation));
 	}
 
-	std::string Sanitize(const std::string &str)
+	ModResult OnHTTPRequest(HTTPRequest& request) override
 	{
-		std::string ret;
+		if (request.GetPath() != "/config")
+			return MOD_RES_PASSTHRU;
 
-		for (std::string::const_iterator x = str.begin(); x != str.end(); ++x)
+		ServerInstance->Logs.Debug(MODNAME, "Handling HTTP request for {}", request.GetPath());
+
+		std::stringstream buffer;
+		for (const auto& [_, tag] : ServerInstance->Config->GetConfig())
 		{
-			switch (*x)
+			// Show the location of the tag in a comment.
+			buffer << "# " << tag->source.str() << std::endl
+				<< '<' << tag->name << ' ';
+
+			// Print out the tag with all keys aligned vertically.
+			const std::string indent(tag->name.length() + 2, ' ');
+			bool first = true;
+			for (const auto& [key, value] : tag->GetItems())
 			{
-				case '<':
-					ret += "&lt;";
-				break;
-				case '>':
-					ret += "&gt;";
-				break;
-				case '&':
-					ret += "&amp;";
-				break;
-				case '"':
-					ret += "&quot;";
-				break;
-				default:
-					if (*x < 32 || *x > 126)
-					{
-						int n = *x;
-						ret += ("&#" + ConvToStr(n) + ";");
-					}
-					else
-						ret += *x;
-				break;
+				if (!first)
+					buffer << std::endl << indent;
+
+				buffer << key << "=\"" << ServerConfig::Escape(value) << '"';
+				first = false;
 			}
+			buffer << '>' << std::endl << std::endl;
 		}
-		return ret;
-	}
 
-	void OnEvent(Event& event)
-	{
-		std::stringstream data("");
-
-		if (event.id == "httpd_url")
-		{
-			ServerInstance->Logs->Log("m_http_stats", DEBUG,"Handling httpd event");
-			HTTPRequest* http = (HTTPRequest*)&event;
-
-			if ((http->GetURI() == "/config") || (http->GetURI() == "/config/"))
-			{
-				data << "<html><head><title>InspIRCd Configuration</title></head><body>";
-				data << "<h1>InspIRCd Configuration</h1><p>";
-
-				for (ConfigDataHash::iterator x = ServerInstance->Config->config_data.begin(); x != ServerInstance->Config->config_data.end(); ++x)
-				{
-					data << "&lt;" << x->first << " ";
-					ConfigTag* tag = x->second;
-					for (std::vector<KeyVal>::const_iterator j = tag->getItems().begin(); j != tag->getItems().end(); j++)
-					{
-						data << Sanitize(j->first) << "=&quot;" << Sanitize(j->second) << "&quot; ";
-					}
-					data << "&gt;<br>";
-				}
-
-				data << "</body></html>";
-				/* Send the document back to m_httpd */
-				HTTPDocumentResponse response(this, *http, &data, 200);
-				response.headers.SetHeader("X-Powered-By", "m_httpd_config.so");
-				response.headers.SetHeader("Content-Type", "text/html");
-				response.Send();
-			}
-		}
-	}
-
-	virtual ~ModuleHttpConfig()
-	{
-	}
-
-	virtual Version GetVersion()
-	{
-		return Version("Allows for the server configuration to be viewed over HTTP via m_httpd.so", VF_VENDOR);
+		HTTPDocumentResponse response(this, request, &buffer, 200);
+		response.headers.SetHeader("X-Powered-By", MODNAME);
+		response.headers.SetHeader("Content-Type", "text/plain");
+		API->SendResponse(response);
+		return MOD_RES_DENY;
 	}
 };
 

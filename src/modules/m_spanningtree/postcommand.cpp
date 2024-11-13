@@ -1,8 +1,11 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
- *   Copyright (C) 2009 Daniel De Graaf <danieldg@inspircd.org>
- *   Copyright (C) 2007 Craig Edwards <craigedwards@brainbox.cc>
+ *   Copyright (C) 2018-2024 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2013-2016 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
+ *   Copyright (C) 2009-2010 Daniel De Graaf <danieldg@inspircd.org>
+ *   Copyright (C) 2007 Craig Edwards <brain@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -17,148 +20,116 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-
-/* $ModDesc: Provides a spanning tree server link protocol */
-
 #include "inspircd.h"
-#include "socket.h"
-#include "xline.h"
 
 #include "main.h"
 #include "utils.h"
 #include "treeserver.h"
-#include "treesocket.h"
+#include "commandbuilder.h"
 
-/* $ModDep: m_spanningtree/main.h m_spanningtree/utils.h m_spanningtree/treeserver.h m_spanningtree/treesocket.h */
-
-void ModuleSpanningTree::OnPostCommand(const std::string &command, const std::vector<std::string>& parameters, LocalUser *user, CmdResult result, const std::string &original_line)
+void ModuleSpanningTree::OnPostCommand(Command* command, const CommandBase::Params& parameters, LocalUser* user, CmdResult result, bool loop)
 {
-	if (result == CMD_SUCCESS)
-		Utils->RouteCommand(NULL, command, parameters, user);
+	if (result == CmdResult::SUCCESS)
+		Utils->RouteCommand(nullptr, command, parameters, user);
 }
 
-void SpanningTreeUtilities::RouteCommand(TreeServer* origin, const std::string &command, const parameterlist& parameters, User *user)
+void SpanningTreeUtilities::RouteCommand(TreeServer* origin, CommandBase* thiscmd, const CommandBase::Params& parameters, User* user)
 {
-	if (!ServerInstance->Parser->IsValidCommand(command, parameters.size(), user))
+	RouteDescriptor routing = thiscmd->GetRouting(user, parameters);
+	if (routing.type == RouteType::LOCAL)
 		return;
 
-	/* We know it's non-null because IsValidCommand returned true */
-	Command* thiscmd = ServerInstance->Parser->GetHandler(command);
+	const std::string& command = thiscmd->name;
+	const bool encap = ((routing.type == RouteType::OPTIONAL_BROADCAST) || (routing.type == RouteType::OPTIONAL_UNICAST));
+	CmdBuilder params(user, encap ? "ENCAP" : command.c_str());
+	params.push_tags(parameters.GetTags());
+	const TreeServer* sdest = nullptr;
 
-	RouteDescriptor routing = thiscmd->GetRouting(user, parameters);
-
-	std::string sent_cmd = command;
-	parameterlist params;
-
-	if (routing.type == ROUTE_TYPE_LOCALONLY)
+	if (routing.type == RouteType::OPTIONAL_BROADCAST)
 	{
-		/* Broadcast when it's a core command with the default route descriptor and the source is a
-		 * remote user or a remote server
-		 */
-
-		Version ver = thiscmd->creator->GetVersion();
-		if ((!(ver.Flags & VF_CORE)) || (IS_LOCAL(user)) || (IS_SERVER(user) == ServerInstance->FakeClient))
-			return;
-
-		routing = ROUTE_BROADCAST;
+		params.push('*');
+		params.push(command);
 	}
-	else if (routing.type == ROUTE_TYPE_OPT_BCAST)
+	else if (routing.type == RouteType::UNICAST || routing.type == RouteType::OPTIONAL_UNICAST)
 	{
-		params.push_back("*");
-		params.push_back(command);
-		sent_cmd = "ENCAP";
-	}
-	else if (routing.type == ROUTE_TYPE_OPT_UCAST)
-	{
-		TreeServer* sdest = FindServer(routing.serverdest);
+		sdest = static_cast<const TreeServer*>(routing.server);
 		if (!sdest)
 		{
-			ServerInstance->Logs->Log("m_spanningtree",DEFAULT,"Trying to route ENCAP to nonexistent server %s",
-				routing.serverdest.c_str());
-			return;
+			// Assume the command handler already validated routing.target and have only returned success if the target is something that the
+			// user executing the command is allowed to look up e.g. target is not an uuid if user is local.
+			sdest = FindRouteTarget(routing.target);
+			if (!sdest)
+			{
+				ServerInstance->Logs.Debug(MODNAME, "Trying to route {}{} to nonexistent server {}", (encap ? "ENCAP " : ""), command, routing.target);
+				return;
+			}
 		}
-		params.push_back(sdest->GetID());
-		params.push_back(command);
-		sent_cmd = "ENCAP";
+
+		if (encap)
+		{
+			params.push(sdest->GetId());
+			params.push(command);
+		}
 	}
 	else
 	{
 		Module* srcmodule = thiscmd->creator;
-		Version ver = srcmodule->GetVersion();
-
-		if (!(ver.Flags & (VF_COMMON | VF_CORE)) && srcmodule != Creator)
+		if (!(srcmodule->properties & (VF_COMMON | VF_CORE)) && srcmodule != Creator)
 		{
-			ServerInstance->Logs->Log("m_spanningtree",DEFAULT,"Routed command %s from non-VF_COMMON module %s",
-				command.c_str(), srcmodule->ModuleSourceFile.c_str());
+			ServerInstance->Logs.Normal(MODNAME, "Routed command {} from non-VF_COMMON module {}",
+				command, srcmodule->ModuleFile);
 			return;
 		}
 	}
 
-	std::string output_text;
-	ServerInstance->Parser->TranslateUIDs(thiscmd->translation, parameters, output_text, true, thiscmd);
+	std::string output_text = CommandParser::TranslateUIDs(thiscmd->translation, parameters, true, thiscmd);
 
-	params.push_back(output_text);
+	params.push(output_text);
 
-	if (routing.type == ROUTE_TYPE_MESSAGE)
+	if (routing.type == RouteType::MESSAGE)
 	{
 		char pfx = 0;
-		std::string dest = routing.serverdest;
-		if (ServerInstance->Modes->FindPrefix(dest[0]))
+		std::string dest = routing.target;
+		if (ServerInstance->Modes.FindPrefix(dest[0]))
 		{
 			pfx = dest[0];
-			dest = dest.substr(1);
+			dest.erase(dest.begin());
 		}
-		if (dest[0] == '#')
+		if (ServerInstance->Channels.IsPrefix(dest[0]))
 		{
-			Channel* c = ServerInstance->FindChan(dest);
+			auto* c = ServerInstance->Channels.Find(dest);
 			if (!c)
 				return;
-			TreeServerList list;
 			// TODO OnBuildExemptList hook was here
-			GetListOfServersForChannel(c,list,pfx, CUList());
-			std::string data = ":" + user->uuid + " " + sent_cmd;
-			for (unsigned int x = 0; x < params.size(); x++)
-				data += " " + params[x];
-			for (TreeServerList::iterator i = list.begin(); i != list.end(); i++)
-			{
-				TreeSocket* Sock = i->second->GetSocket();
-				if (origin && origin->GetSocket() == Sock)
-					continue;
-				if (Sock)
-					Sock->WriteLine(data);
-			}
+			CUList exempts;
+			std::string message;
+			if (parameters.size() >= 2)
+				message.assign(parameters[1]);
+			SendChannelMessage(user, c, message, pfx, parameters.GetTags(), exempts, command.c_str(), origin ? origin->GetSocket() : nullptr);
 		}
 		else if (dest[0] == '$')
 		{
-			if (origin)
-				DoOneToAllButSender(user->uuid, sent_cmd, params, origin->GetName());
-			else
-				DoOneToMany(user->uuid, sent_cmd, params);
+			params.Forward(origin);
 		}
 		else
 		{
 			// user target?
-			User* d = ServerInstance->FindNick(dest);
-			if (!d)
+			auto* d = ServerInstance->Users.Find(dest);
+			if (!d || IS_LOCAL(d))
 				return;
-			TreeServer* tsd = BestRouteTo(d->server);
+			TreeServer* tsd = TreeServer::Get(d)->GetRoute();
 			if (tsd == origin)
 				// huh? no routing stuff around in a circle, please.
 				return;
-			DoOneToOne(user->uuid, sent_cmd, params, d->server);
+			params.Unicast(d);
 		}
 	}
-	else if (routing.type == ROUTE_TYPE_BROADCAST || routing.type == ROUTE_TYPE_OPT_BCAST)
+	else if (routing.type == RouteType::BROADCAST || routing.type == RouteType::OPTIONAL_BROADCAST)
 	{
-		if (origin)
-			DoOneToAllButSender(user->uuid, sent_cmd, params, origin->GetName());
-		else
-			DoOneToMany(user->uuid, sent_cmd, params);
+		params.Forward(origin);
 	}
-	else if (routing.type == ROUTE_TYPE_UNICAST || routing.type == ROUTE_TYPE_OPT_UCAST)
+	else if (routing.type == RouteType::UNICAST || routing.type == RouteType::OPTIONAL_UNICAST)
 	{
-		if (origin && routing.serverdest == origin->GetName())
-			return;
-		DoOneToOne(user->uuid, sent_cmd, params, routing.serverdest);
+		params.Unicast(sdest->ServerUser);
 	}
 }

@@ -1,10 +1,13 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
+ *   Copyright (C) 2019-2024 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2018-2019 linuxdaemon <linuxdaemon.irc@gmail.com>
+ *   Copyright (C) 2013 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
  *   Copyright (C) 2009 Daniel De Graaf <danieldg@inspircd.org>
  *   Copyright (C) 2007 Dennis Friis <peavey@inspircd.org>
- *   Copyright (C) 2007 Robin Burchell <robin+git@viroteck.net>
- *   Copyright (C) 2005-2006 Craig Edwards <craigedwards@brainbox.cc>
+ *   Copyright (C) 2005, 2007 Craig Edwards <brain@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -21,65 +24,71 @@
 
 
 #include "inspircd.h"
+#include "modules/account.h"
 
-/* $ModDesc: Only opers may create new channels if this module is loaded */
+typedef insp::flat_set<std::string, irc::insensitive_swo> AllowChans;
 
-class ModuleRestrictChans : public Module
+class ModuleRestrictChans final
+	: public Module
 {
-	std::set<irc::string> allowchans;
+private:
+	Account::API accountapi;
+	AllowChans allowchans;
+	bool allowregistered = false;
 
-	void ReadConfig()
+	bool CanCreateChannel(LocalUser* user, const std::string& name)
 	{
-		allowchans.clear();
-		ConfigTagList tags = ServerInstance->Config->ConfTags("allowchannel");
-		for(ConfigIter i = tags.first; i != tags.second; ++i)
+		if (allowregistered && accountapi && accountapi->GetAccountName(user))
+			return true;
+
+		if (user->HasPrivPermission("channels/restricted-create"))
+			return true;
+
+		for (const auto& allowchan : allowchans)
 		{
-			ConfigTag* tag = i->second;
-			std::string txt = tag->getString("name");
-			allowchans.insert(txt.c_str());
+			if (InspIRCd::Match(name, allowchan))
+				return true;
 		}
+
+		return false;
 	}
 
- public:
-	void init()
+public:
+	ModuleRestrictChans()
+		: Module(VF_VENDOR, "Prevents unprivileged users from creating new channels.")
+		, accountapi(this)
 	{
-		ReadConfig();
-		Implementation eventlist[] = { I_OnUserPreJoin, I_OnRehash };
-		ServerInstance->Modules->Attach(eventlist, this, sizeof(eventlist)/sizeof(Implementation));
 	}
 
-	virtual void OnRehash(User* user)
+	void ReadConfig(ConfigStatus& status) override
 	{
-		ReadConfig();
+		AllowChans newallows;
+		for (const auto& [_, tag] : ServerInstance->Config->ConfTags("allowchannel"))
+		{
+			const std::string name = tag->getString("name");
+			if (name.empty())
+				throw ModuleException(this, "Empty <allowchannel:name> at " + tag->source.str());
+
+			newallows.insert(name);
+		}
+		allowchans.swap(newallows);
+
+		// Global config
+		const auto& tag = ServerInstance->Config->ConfValue("restrictchans");
+		allowregistered = tag->getBool("allowregistered", false);
 	}
 
-
-	virtual ModResult OnUserPreJoin(User* user, Channel* chan, const char* cname, std::string &privs, const std::string &keygiven)
+	ModResult OnUserPreJoin(LocalUser* user, Channel* chan, const std::string& cname, std::string& privs, const std::string& keygiven, bool override) override
 	{
-		irc::string x = cname;
-		if (!IS_LOCAL(user))
-			return MOD_RES_PASSTHRU;
-
 		// channel does not yet exist (record is null, about to be created IF we were to allow it)
-		if (!chan)
+		if (!override && !chan && !CanCreateChannel(user, cname))
 		{
-			// user is not an oper and its not in the allow list
-			if ((!IS_OPER(user)) && (allowchans.find(x) == allowchans.end()))
-			{
-				user->WriteNumeric(ERR_BANNEDFROMCHAN, "%s %s :Only IRC operators may create new channels",user->nick.c_str(),cname);
-				return MOD_RES_DENY;
-			}
+			const auto* reason = allowregistered ? "logged into an account" : "a server operator";
+			user->WriteNumeric(ERR_RESTRICTED, cname, INSP_FORMAT("You must be {} to create new channels.", reason));
+			return MOD_RES_DENY;
 		}
+
 		return MOD_RES_PASSTHRU;
-	}
-
-	virtual ~ModuleRestrictChans()
-	{
-	}
-
-	virtual Version GetVersion()
-	{
-		return Version("Only opers may create new channels if this module is loaded",VF_VENDOR);
 	}
 };
 

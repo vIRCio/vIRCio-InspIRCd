@@ -1,0 +1,37 @@
+ _____                        _____   _____    _____      _
+|_   _|                      |_   _| |  __ \  / ____|    | |
+  | |    _ __    ___   _ __    | |   | |__) || |       __| |
+  | |   | '_ \  / __| | '_ \   | |   |  _  / | |      / _` |
+ _| |_  | | | | \__ \ | |_) | _| |_  | | \ \ | |____ | (_| |
+|_____| |_| |_| |___/ | .__/ |_____| |_|  \_\ \_____| \__,_|
+ _____________________| |__________________________________
+|_____________________|_|__________________________________|
+
+                         \iThe IRC server for the 31st century\x
+
+       /\     /\
+      {  `---'  }  \bWELCOME TO AN \c13I\c04N\c07S\c08P\c03I\c10R\c12C\c06D\c99 NETWORK\x
+      {  O   O  }
+      ~~>  V  <~~    If you see this, I'm probably new.
+       \  \|/  /       If I'm not new, my owner is lazy. ;-)
+        `-----'____
+        /     \    \_
+       {       }\  )_\_   _
+       |  \_/  |/ /  \_\_/ )
+        \__/  /(_/     \__/
+          (__/
+
+      +---- To change this see \bmotd.example.txt\x ----+
+      |                                             |
+      |   * \bWeb:\x https://www.inspircd.org           |
+      |   * \bIRC:\x ircs://irc.teranova.net/inspircd   |
+      |   * \bDocs:\x https://docs.inspircd.org         |
+      |   * \bIssues:\x https://git.io/JIuYi            |
+      |   * \bDiscussions:\x https://git.io/JIuYv       |
+      |                                             |
+      | We hope you like this software.  Please do  |
+      | make sure to customise your configuration,  |
+      | though, so you love it.  Enjoy.             |
+      |                                             |
+      |                        -- The InspIRCd Team |
+      +---------------------------------------------+

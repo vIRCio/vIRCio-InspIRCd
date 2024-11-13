@@ -1,6 +1,9 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
+ *   Copyright (C) 2017-2023 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2013-2014 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
  *   Copyright (C) 2010 Daniel De Graaf <danieldg@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
@@ -19,121 +22,97 @@
 
 #include "inspircd.h"
 
-/* $ModDesc: Allows custom prefix modes to be created. */
-
-class CustomPrefixMode : public ModeHandler
+class CustomPrefixMode final
+	: public PrefixMode
 {
- public:
-	reference<ConfigTag> tag;
-	int rank;
-	bool depriv;
-	CustomPrefixMode(Module* parent, ConfigTag* Tag)
-		: ModeHandler(parent, Tag->getString("name"), 0, PARAM_ALWAYS, MODETYPE_CHANNEL), tag(Tag)
+public:
+	std::shared_ptr<ConfigTag> tag;
+
+	CustomPrefixMode(Module* parent, const std::string& Name, char Letter, char Prefix, const std::shared_ptr<ConfigTag>& Tag)
+		: PrefixMode(parent, Name, Letter, 0, Prefix)
+		, tag(Tag)
 	{
-		list = true;
-		m_paramtype = TR_NICK;
-		std::string v = tag->getString("prefix");
-		prefix = v.c_str()[0];
-		v = tag->getString("letter");
-		mode = v.c_str()[0];
-		rank = tag->getInt("rank");
-		levelrequired = tag->getInt("ranktoset", rank);
-		depriv = tag->getBool("depriv", true);
-	}
+		ModeHandler::Rank rank = tag->getNum<ModeHandler::Rank>("rank", 1, 1);
+		ModeHandler::Rank setrank = tag->getNum<ModeHandler::Rank>("ranktoset", prefixrank, rank);
+		ModeHandler::Rank unsetrank = tag->getNum<ModeHandler::Rank>("ranktounset", setrank, setrank);
+		bool depriv = tag->getBool("depriv", true);
+		this->Update(rank, setrank, unsetrank, depriv);
 
-	unsigned int GetPrefixRank()
-	{
-		return rank;
-	}
-
-	ModResult AccessCheck(User* src, Channel*, std::string& value, bool adding)
-	{
-		if (!adding && src->nick == value && depriv)
-			return MOD_RES_ALLOW;
-		return MOD_RES_PASSTHRU;
-	}
-
-	void RemoveMode(Channel* channel, irc::modestacker* stack)
-	{
-		const UserMembList* cl = channel->GetUsers();
-		std::vector<std::string> mode_junk;
-		mode_junk.push_back(channel->name);
-		irc::modestacker modestack(false);
-		std::deque<std::string> stackresult;
-
-		for (UserMembCIter i = cl->begin(); i != cl->end(); i++)
-		{
-			if (i->second->hasMode(mode))
-			{
-				if (stack)
-					stack->Push(this->GetModeChar(), i->first->nick);
-				else
-					modestack.Push(this->GetModeChar(), i->first->nick);
-			}
-		}
-
-		if (stack)
-			return;
-
-		while (modestack.GetStackedLine(stackresult))
-		{
-			mode_junk.insert(mode_junk.end(), stackresult.begin(), stackresult.end());
-			ServerInstance->SendMode(mode_junk, ServerInstance->FakeClient);
-			mode_junk.erase(mode_junk.begin() + 1, mode_junk.end());
-		}
-	}
-
-	void RemoveMode(User* user, irc::modestacker* stack)
-	{
-	}
-
-	ModeAction OnModeChange(User* source, User* dest, Channel* channel, std::string &parameter, bool adding)
-	{
-		return MODEACTION_ALLOW;
+		ServerInstance->Logs.Debug(MODNAME, "Created the {} prefix: letter={} prefix={} rank={} ranktoset={} ranktounset={} depriv={}",
+			name, GetModeChar(), GetPrefix(), GetPrefixRank(), GetLevelRequired(true), GetLevelRequired(false),
+			CanSelfRemove() ? "yes" : "no");
 	}
 };
 
-class ModuleCustomPrefix : public Module
+class ModuleCustomPrefix final
+	: public Module
 {
+private:
 	std::vector<CustomPrefixMode*> modes;
- public:
+
+public:
 	ModuleCustomPrefix()
+		: Module(VF_VENDOR, "Allows the server administrator to configure custom channel prefix modes.")
 	{
 	}
 
-	void init()
+	void init() override
 	{
-		ConfigTagList tags = ServerInstance->Config->ConfTags("customprefix");
-		while (tags.first != tags.second)
+		for (const auto& [_, tag] : ServerInstance->Config->ConfTags("customprefix"))
 		{
-			ConfigTag* tag = tags.first->second;
-			tags.first++;
-			CustomPrefixMode* mh = new CustomPrefixMode(this, tag);
-			modes.push_back(mh);
-			if (mh->rank <= 0)
-				throw ModuleException("Rank must be specified for prefix at " + tag->getTagLocation());
-			if (!isalpha(mh->GetModeChar()))
-				throw ModuleException("Mode must be a letter for prefix at " + tag->getTagLocation());
+			const std::string name = tag->getString("name");
+			if (name.empty())
+				throw ModuleException(this, "<customprefix:name> must be specified at " + tag->source.str());
+
+			if (name.find(' ') != std::string::npos)
+				throw ModuleException(this, "<customprefix:name> must not contain spaces at " + tag->source.str());
+
+			if (tag->getBool("change"))
+			{
+				ModeHandler* mh = ServerInstance->Modes.FindMode(name, MODETYPE_CHANNEL);
+				if (!mh)
+					throw ModuleException(this, "<customprefix:change> specified for a nonexistent mode at " + tag->source.str());
+
+				PrefixMode* pm = mh->IsPrefixMode();
+				if (!pm)
+					throw ModuleException(this, "<customprefix:change> specified for a non-prefix mode at " + tag->source.str());
+
+				ModeHandler::Rank rank = tag->getNum<ModeHandler::Rank>("rank", pm->GetPrefixRank(), 1);
+				ModeHandler::Rank setrank = tag->getNum<ModeHandler::Rank>("ranktoset", pm->GetLevelRequired(true), rank);
+				ModeHandler::Rank unsetrank = tag->getNum<ModeHandler::Rank>("ranktounset", pm->GetLevelRequired(false), setrank);
+				bool depriv = tag->getBool("depriv", pm->CanSelfRemove());
+				pm->Update(rank, setrank, unsetrank, depriv);
+
+				ServerInstance->Logs.Debug(MODNAME, "Changed the {} prefix: letter={} prefix={} rank={} ranktoset={} ranktounset={} depriv={}",
+					name, pm->GetModeChar(), pm->GetPrefix(), pm->GetPrefixRank(), pm->GetLevelRequired(true),
+					pm->GetLevelRequired(false), pm->CanSelfRemove() ? "yes" : "no");
+				continue;
+			}
+
+			const std::string letter = tag->getString("letter");
+			if (letter.length() != 1)
+				throw ModuleException(this, "<customprefix:letter> must be set to a mode character at " + tag->source.str());
+
+			const std::string prefix = tag->getString("prefix");
+			if (prefix.length() != 1)
+				throw ModuleException(this, "<customprefix:prefix> must be set to a mode prefix at " + tag->source.str());
+
 			try
 			{
-				ServerInstance->Modules->AddService(*mh);
+				auto* mh = new CustomPrefixMode(this, name, letter[0], prefix[0], tag);
+				modes.push_back(mh);
+				ServerInstance->Modules.AddService(*mh);
 			}
-			catch (ModuleException& e)
+			catch (const ModuleException& e)
 			{
-				throw ModuleException(e.err + " (while creating mode from " + tag->getTagLocation() + ")");
+				throw ModuleException(this, e.GetReason() + " (while creating mode from " + tag->source.str() + ")");
 			}
 		}
 	}
 
-	~ModuleCustomPrefix()
+	~ModuleCustomPrefix() override
 	{
-		for (std::vector<CustomPrefixMode*>::iterator i = modes.begin(); i != modes.end(); i++)
-			delete *i;
-	}
-
-	Version GetVersion()
-	{
-		return Version("Provides custom prefix channel modes", VF_VENDOR);
+		stdalgo::delete_all(modes);
 	}
 };
 

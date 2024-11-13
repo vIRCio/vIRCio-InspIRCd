@@ -1,6 +1,9 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
+ *   Copyright (C) 2020-2022 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
+ *   Copyright (C) 2009 Uli Schlachter <psychon@znc.in>
  *   Copyright (C) 2009 Daniel De Graaf <danieldg@inspircd.org>
  *   Copyright (C) 2008 Robin Burchell <robin+git@viroteck.net>
  *
@@ -19,64 +22,50 @@
 
 
 #include "inspircd.h"
+#include "modules/extban.h"
 
-/* $ModDesc: Implements extban +b j: - matching channel bans */
-
-class ModuleBadChannelExtban : public Module
+class ChannelExtBan final
+	: public ExtBan::MatchingBase
 {
- private:
- public:
-	void init()
-	{
-		Implementation eventlist[] = { I_OnCheckBan, I_On005Numeric };
-		ServerInstance->Modules->Attach(eventlist, this, sizeof(eventlist)/sizeof(Implementation));
-	}
-
-	~ModuleBadChannelExtban()
+public:
+	ChannelExtBan(Module* Creator)
+		: ExtBan::MatchingBase(Creator, "channel", 'j')
 	{
 	}
 
-	Version GetVersion()
+	bool IsMatch(User* user, Channel* channel, const std::string& text) override
 	{
-		return Version("Extban 'j' - channel status/join ban", VF_OPTCOMMON|VF_VENDOR);
-	}
-
-	ModResult OnCheckBan(User *user, Channel *c, const std::string& mask)
-	{
-		if ((mask.length() > 2) && (mask[0] == 'j') && (mask[1] == ':'))
+		unsigned char status = 0;
+		const char* target = text.c_str();
+		const PrefixMode* const mh = ServerInstance->Modes.FindPrefix(text[0]);
+		if (mh)
 		{
-			std::string rm = mask.substr(2);
-			char status = 0;
-			ModeHandler* mh = ServerInstance->Modes->FindPrefix(rm[0]);
-			if (mh)
-			{
-				rm = mask.substr(3);
-				status = mh->GetModeChar();
-			}
-			for (UCListIter i = user->chans.begin(); i != user->chans.end(); i++)
-			{
-				if (InspIRCd::Match((**i).name, rm))
-				{
-					if (status)
-					{
-						Membership* memb = (**i).GetUser(user);
-						if (memb && memb->hasMode(status))
-							return MOD_RES_DENY;
-					}
-					else
-						return MOD_RES_DENY;
-				}
-			}
+			status = mh->GetModeChar();
+			target++;
 		}
-		return MOD_RES_PASSTHRU;
-	}
-
-	void On005Numeric(std::string &output)
-	{
-		ServerInstance->AddExtBanChar('j');
+		for (auto* memb : user->chans)
+		{
+			if (!InspIRCd::Match(memb->chan->name, target))
+				continue;
+			if (!status || memb->GetRank() >= mh->GetPrefixRank())
+				return true;
+		}
+		return false;
 	}
 };
 
+class ModuleBadChannelExtban final
+	: public Module
+{
+private:
+	ChannelExtBan extban;
+
+public:
+	ModuleBadChannelExtban()
+		: Module(VF_VENDOR | VF_OPTCOMMON, "Adds extended ban j: (channel) which checks whether users are in a channel matching the specified glob pattern.")
+		, extban(this)
+	{
+	}
+};
 
 MODULE_INIT(ModuleBadChannelExtban)
-

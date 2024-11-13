@@ -1,0 +1,66 @@
+.\"
+.\" InspIRCd -- Internet Relay Chat Daemon
+.\"
+.\"   Copyright (C) 2014, 2018, 2024 Sadie Powell <sadie@witchery.services>
+.\"
+.\" This file is part of InspIRCd.  InspIRCd is free software: you can
+.\" redistribute it and/or modify it under the terms of the GNU General Public
+.\" License as published by the Free Software Foundation, version 2.
+.\"
+.\" This program is distributed in the hope that it will be useful, but WITHOUT
+.\" ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+.\" FOR A PARTICULAR PURPOSE.  See the GNU General Public License for more
+.\" details.
+.\"
+.\" You should have received a copy of the GNU General Public License
+.\" along with this program.  If not, see <http://www.gnu.org/licenses/>.
+.\"
+
+
+.TH "InspIRCd" "1" "2024-06-28" "InspIRCd @VERSION_FULL@" "InspIRCd Manual"
+
+.SH "NAME"
+\t\fBInspIRCd\fR - \fIthe\fR stable, high-performance and modular Internet Relay Chat Daemon
+.BR
+
+.SH "SYNOPSIS"
+\t\fBinspircd\fR [--config <file>] [--debug] [--nofork] [--nolog] [--nopid] [--protocoldebug] [--runasroot] [--version]
+
+.SH "OPTIONS"
+.TP
+.B "--config <file>"
+.br
+Sets the path to the main configuration file. Defaults to \fI@CONFIG_DIR@/inspircd.conf\fR.
+.TP
+.B "--debug"
+.br
+Log at the debug level to the standard output stream.
+.TP
+.B "--nofork"
+.br
+Don't fork into the background after starting up.
+.TP
+.B "--nolog"
+.br
+Don't write to log files.
+.TP
+.B "--nopid"
+.br
+Don't write to the PID file.
+.TP
+.B "--protocoldebug"
+.br
+Log at the raw I/O level to the standard output stream.
+.TP
+.B "--runasroot"
+.br
+Allow the server to start as root (not recommended).
+.TP
+.B "--version"
+.br
+Displays the InspIRCd version and exits.
+
+.SH "SUPPORT"
+IRC support for InspIRCd can be found at ircs://irc.teranova.net/inspircd.
+
+Bug reports and feature requests can be filed at https://github.com/inspircd/inspircd/issues.

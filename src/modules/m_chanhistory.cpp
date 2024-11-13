@@ -1,6 +1,11 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
+ *   Copyright (C) 2021 Dominic Hamon
+ *   Copyright (C) 2017-2024 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2013 Daniel Vassdal <shutter@canternet.org>
+ *   Copyright (C) 2012, 2014, 2018 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
  *   Copyright (C) 2009-2010 Daniel De Graaf <danieldg@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
@@ -18,172 +23,271 @@
 
 
 #include "inspircd.h"
+#include "clientprotocolmsg.h"
+#include "modules/ircv3_batch.h"
+#include "modules/ircv3_servertime.h"
+#include "modules/server.h"
+#include "numerichelper.h"
 
-/* $ModDesc: Provides channel history for a given number of lines */
+typedef insp::flat_map<std::string, std::string> HistoryTagMap;
 
-struct HistoryItem
+struct HistoryItem final
 {
 	time_t ts;
-	std::string line;
-	HistoryItem(const std::string& Line) : ts(ServerInstance->Time()), line(Line) {}
+	std::string text;
+	MessageType type;
+	HistoryTagMap tags;
+	std::string sourcemask;
+
+	HistoryItem(User* source, const MessageDetails& details)
+		: ts(ServerInstance->Time())
+		, text(details.text)
+		, type(details.type)
+		, sourcemask(source->GetMask())
+	{
+		tags.reserve(details.tags_out.size());
+		for (const auto& [tagname, tagvalue] : details.tags_out)
+			tags[tagname] = tagvalue.value;
+	}
 };
 
-struct HistoryList
+struct HistoryList final
 {
 	std::deque<HistoryItem> lines;
-	unsigned int maxlen, maxtime;
-	HistoryList(unsigned int len, unsigned int time) : maxlen(len), maxtime(time) {}
+	unsigned long maxlen;
+	unsigned long maxtime;
+
+	HistoryList(unsigned long len, unsigned long time)
+		: maxlen(len)
+		, maxtime(time)
+	{
+	}
+
+	size_t Prune()
+	{
+		// Prune expired entries from the list.
+		if (maxtime)
+		{
+			time_t mintime = ServerInstance->Time() - maxtime;
+			while (!lines.empty() && lines.front().ts < mintime)
+				lines.pop_front();
+		}
+		return lines.size();
+	}
 };
 
-class HistoryMode : public ModeHandler
+class HistoryMode final
+	: public ParamMode<HistoryMode, SimpleExtItem<HistoryList>>
 {
-	bool IsValidDuration(const std::string& duration)
+private:
+	bool ParseDuration(User* user, irc::sepstream& stream, unsigned long& duration)
 	{
-		for (std::string::const_iterator i = duration.begin(); i != duration.end(); ++i)
-		{
-			unsigned char c = *i;
-			if (((c >= '0') && (c <= '9')) || (c == 's') || (c == 'S'))
-				continue;
+		std::string durationstr;
+		if (!stream.GetToken(durationstr))
+			return false;
 
-			if (duration_multi[c] == 1)
-				return false;
+		if (!Duration::TryFrom(durationstr, duration) || duration == 0)
+			return false;
+
+		if (IS_LOCAL(user) && maxduration && duration > maxduration)
+			duration = maxduration; // Clamp for local users.
+
+		return true;
+	}
+
+	bool ParseLines(User* user, irc::sepstream& stream, unsigned long& lines)
+	{
+		std::string linesstr;
+		if (!stream.GetToken(linesstr))
+			return false;
+
+		lines = ConvToNum<unsigned long>(linesstr);
+		if (lines == 0)
+			return false;
+
+		if (IS_LOCAL(user) && maxlines && lines > maxlines)
+			lines = maxlines; // Clamp for local users.
+
+		return true;
+	}
+
+public:
+	unsigned long maxduration;
+	unsigned long maxlines;
+
+	HistoryMode(Module* Creator)
+		: ParamMode<HistoryMode, SimpleExtItem<HistoryList>>(Creator, "history", 'H')
+	{
+		syntax = "<max-messages>:<max-duration>";
+	}
+
+	bool OnSet(User* source, Channel* channel, std::string& parameter) override
+	{
+		irc::sepstream stream(parameter, ':');
+
+		unsigned long lines;
+		unsigned long duration;
+		if (!ParseLines(source, stream, lines) || !ParseDuration(source, stream, duration))
+		{
+			source->WriteNumeric(Numerics::InvalidModeParameter(channel, this, parameter));
+			return false;
+		}
+
+		HistoryList* history = ext.Get(channel);
+		if (history)
+		{
+			// Shrink the list if the new line number limit is lower than the old one
+			if (lines < history->lines.size())
+				history->lines.erase(history->lines.begin(), history->lines.begin() + (history->lines.size() - lines));
+
+			history->maxlen = lines;
+			history->maxtime = duration;
+			history->Prune();
+		}
+		else
+		{
+			ext.SetFwd(channel, lines, duration);
 		}
 		return true;
 	}
 
- public:
-	SimpleExtItem<HistoryList> ext;
-	unsigned int maxlines;
-	HistoryMode(Module* Creator) : ModeHandler(Creator, "history", 'H', PARAM_SETONLY, MODETYPE_CHANNEL),
-		ext("history", Creator) { }
-
-	ModeAction OnModeChange(User* source, User* dest, Channel* channel, std::string &parameter, bool adding)
+	void SerializeParam(Channel* chan, const HistoryList* history, std::string& out)
 	{
-		if (adding)
-		{
-			std::string::size_type colon = parameter.find(':');
-			if (colon == std::string::npos)
-				return MODEACTION_DENY;
-
-			std::string duration = parameter.substr(colon+1);
-			if ((IS_LOCAL(source)) && ((duration.length() > 10) || (!IsValidDuration(duration))))
-				return MODEACTION_DENY;
-
-			unsigned int len = ConvToInt(parameter.substr(0, colon));
-			int time = ServerInstance->Duration(duration);
-			if (len == 0 || time < 0)
-				return MODEACTION_DENY;
-			if (len > maxlines && IS_LOCAL(source))
-				return MODEACTION_DENY;
-			if (len > maxlines)
-				len = maxlines;
-			if (parameter == channel->GetModeParameter(this))
-				return MODEACTION_DENY;
-
-			HistoryList* history = ext.get(channel);
-			if (history)
-			{
-				// Shrink the list if the new line number limit is lower than the old one
-				if (len < history->lines.size())
-					history->lines.erase(history->lines.begin(), history->lines.begin() + (history->lines.size() - len));
-
-				history->maxlen = len;
-				history->maxtime = time;
-			}
-			else
-			{
-				ext.set(channel, new HistoryList(len, time));
-			}
-			channel->SetModeParam('H', parameter);
-		}
-		else
-		{
-			if (!channel->IsModeSet('H'))
-				return MODEACTION_DENY;
-			ext.unset(channel);
-			channel->SetModeParam('H', "");
-		}
-		return MODEACTION_ALLOW;
+		out.append(ConvToStr(history->maxlen));
+		out.append(":");
+		out.append(Duration::ToString(history->maxtime));
 	}
 };
 
-class ModuleChanHistory : public Module
+class ModuleChanHistory final
+	: public Module
+	, public ServerProtocol::RouteEventListener
 {
-	HistoryMode m;
-	bool sendnotice;
-	bool dobots;
- public:
-	ModuleChanHistory() : m(this)
-	{
-	}
+private:
+	HistoryMode historymode;
+	SimpleUserMode nohistorymode;
+	UserModeReference botmode;
+	IRCv3::Batch::CapReference batchcap;
+	IRCv3::Batch::API batchmanager;
+	IRCv3::Batch::Batch batch;
+	IRCv3::ServerTime::API servertimemanager;
+	ClientProtocol::MessageTagEvent tagevent;
+	bool prefixmsg;
+	bool savefrombots;
+	bool sendtobots;
 
-	void init()
+	void AddTag(ClientProtocol::Message& msg, const std::string& tagkey, std::string& tagval)
 	{
-		ServerInstance->Modules->AddService(m);
-		ServerInstance->Modules->AddService(m.ext);
-
-		Implementation eventlist[] = { I_OnPostJoin, I_OnUserMessage, I_OnRehash };
-		ServerInstance->Modules->Attach(eventlist, this, sizeof(eventlist)/sizeof(Implementation));
-		OnRehash(NULL);
-	}
-
-	void OnRehash(User*)
-	{
-		ConfigTag* tag = ServerInstance->Config->ConfValue("chanhistory");
-		m.maxlines = tag->getInt("maxlines", 50);
-		sendnotice = tag->getBool("notice", true);
-		dobots = tag->getBool("bots", true);
-	}
-
-	void OnUserMessage(User* user,void* dest,int target_type, const std::string &text, char status, const CUList&)
-	{
-		if (target_type == TYPE_CHANNEL && status == 0)
+		for (auto* subscriber : tagevent.GetSubscribers())
 		{
-			Channel* c = (Channel*)dest;
-			HistoryList* list = m.ext.get(c);
-			if (list)
-			{
-				char buf[MAXBUF];
-				snprintf(buf, MAXBUF, ":%s PRIVMSG %s :%s",
-					user->GetFullHost().c_str(), c->name.c_str(), text.c_str());
-				list->lines.push_back(HistoryItem(buf));
-				if (list->lines.size() > list->maxlen)
-					list->lines.pop_front();
-			}
+			ClientProtocol::MessageTagProvider* const tagprov = static_cast<ClientProtocol::MessageTagProvider*>(subscriber);
+			const ModResult res = tagprov->OnProcessTag(ServerInstance->FakeClient, tagkey, tagval);
+			if (res == MOD_RES_ALLOW)
+				msg.AddTag(tagkey, tagprov, tagval);
+			else if (res == MOD_RES_DENY)
+				break;
 		}
 	}
 
-	void OnPostJoin(Membership* memb)
+	void SendHistory(LocalUser* user, Channel* channel, HistoryList* list)
 	{
-		if (IS_REMOTE(memb->user))
+		if (batchmanager)
+		{
+			batchmanager->Start(batch);
+			batch.GetBatchStartMessage().PushParamRef(channel->name);
+		}
+
+		for (auto& item : list->lines)
+		{
+			ClientProtocol::Messages::Privmsg msg(ClientProtocol::Messages::Privmsg::nocopy, item.sourcemask, channel, item.text, item.type);
+			for (auto& [tagname, tagvalue] : item.tags)
+				AddTag(msg, tagname, tagvalue);
+			if (servertimemanager)
+				servertimemanager->Set(msg, item.ts);
+			batch.AddToBatch(msg);
+			user->Send(ServerInstance->GetRFCEvents().privmsg, msg);
+		}
+
+		if (batchmanager)
+			batchmanager->End(batch);
+	}
+
+public:
+	ModuleChanHistory()
+		: Module(VF_VENDOR, "Adds channel mode H (history) which allows message history to be viewed on joining the channel.")
+		, ServerProtocol::RouteEventListener(this)
+		, historymode(this)
+		, nohistorymode(this, "nohistory", 'N')
+		, botmode(this, "bot")
+		, batchcap(this)
+		, batchmanager(this)
+		, batch("chathistory")
+		, servertimemanager(this)
+		, tagevent(this)
+	{
+	}
+
+	void ReadConfig(ConfigStatus& status) override
+	{
+		const auto& tag = ServerInstance->Config->ConfValue("chanhistory");
+		historymode.maxduration = tag->getDuration("maxduration", 60*60*24*28);
+		historymode.maxlines = tag->getNum<unsigned long>("maxlines", 50);
+		prefixmsg = tag->getBool("prefixmsg", true);
+		savefrombots = tag->getBool("savefrombots", true);
+		sendtobots = tag->getBool("sendtobots", tag->getBool("bots", true));
+	}
+
+	ModResult OnRouteMessage(const Channel* channel, const Server* server) override
+	{
+		return channel->IsModeSet(historymode) && !server->IsService() ? MOD_RES_ALLOW : MOD_RES_PASSTHRU;
+	}
+
+	void OnUserPostMessage(User* user, const MessageTarget& target, const MessageDetails& details) override
+	{
+		if (target.type != MessageTarget::TYPE_CHANNEL || target.status)
 			return;
 
-		if (!dobots && ServerInstance->Modules->Find("m_botmode.so") && memb->user->IsModeSet('B'))
+		if (user->IsModeSet(botmode) && !savefrombots)
 			return;
 
-		HistoryList* list = m.ext.get(memb->chan);
+		std::string_view ctcpname;
+		if (details.IsCTCP(ctcpname) && !irc::equals(ctcpname, "ACTION"))
+			return;
+
+		HistoryList* list = historymode.ext.Get(target.Get<Channel>());
 		if (!list)
 			return;
-		time_t mintime = 0;
-		if (list->maxtime)
-			mintime = ServerInstance->Time() - list->maxtime;
 
-		if (sendnotice)
-		{
-			memb->user->WriteServ("NOTICE %s :Replaying up to %d lines of pre-join history spanning up to %d seconds",
-				memb->chan->name.c_str(), list->maxlen, list->maxtime);
-		}
-
-		for(std::deque<HistoryItem>::iterator i = list->lines.begin(); i != list->lines.end(); ++i)
-		{
-			if (i->ts >= mintime)
-				memb->user->Write(i->line);
-		}
+		list->lines.emplace_back(user, details);
+		if (list->lines.size() > list->maxlen)
+			list->lines.pop_front();
 	}
 
-	Version GetVersion()
+	void OnPostJoin(Membership* memb) override
 	{
-		return Version("Provides channel history replayed on join", VF_VENDOR);
+		LocalUser* localuser = IS_LOCAL(memb->user);
+		if (!localuser)
+			return;
+
+		if (memb->user->IsModeSet(botmode) && !sendtobots)
+			return;
+
+		if (memb->user->IsModeSet(nohistorymode))
+			return;
+
+		HistoryList* list = historymode.ext.Get(memb->chan);
+		if (!list || !list->Prune())
+			return;
+
+		if ((prefixmsg) && (!batchcap.IsEnabled(localuser)))
+		{
+			std::string message("Replaying up to " + ConvToStr(list->maxlen) + " lines of pre-join history");
+			if (list->maxtime > 0)
+				message.append(" from the last " + Duration::ToString(list->maxtime));
+			memb->WriteNotice(message);
+		}
+
+		SendHistory(localuser, memb->chan, list);
 	}
 };
 

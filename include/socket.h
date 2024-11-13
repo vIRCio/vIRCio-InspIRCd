@@ -1,12 +1,15 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
- *   Copyright (C) 2009 Daniel De Graaf <danieldg@inspircd.org>
- *   Copyright (C) 2005-2007 Craig Edwards <craigedwards@brainbox.cc>
+ *   Copyright (C) 2013, 2015-2016 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2012-2013, 2017-2024 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
+ *   Copyright (C) 2012 ChrisTX <xpipe@hotmail.de>
+ *   Copyright (C) 2009-2010 Daniel De Graaf <danieldg@inspircd.org>
+ *   Copyright (C) 2008 Pippijn van Steenhoven <pip88nl@gmail.com>
+ *   Copyright (C) 2007-2008 Robin Burchell <robin+git@viroteck.net>
  *   Copyright (C) 2007 Dennis Friis <peavey@inspircd.org>
- *   Copyright (C) 2007 Robin Burchell <robin+git@viroteck.net>
- *   Copyright (C) 2006 Oliver Lupton <oliverlupton@gmail.com>
- *   Copyright (C) 2006 William Pitcock <nenolod@dereferenced.org>
+ *   Copyright (C) 2006, 2008 Craig Edwards <brain@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -22,26 +25,17 @@
  */
 
 
-#ifndef INSPIRCD_SOCKET_H
-#define INSPIRCD_SOCKET_H
+#pragma once
 
 #ifndef _WIN32
-
-#include <arpa/inet.h>
-#include <sys/time.h>
-#include <sys/resource.h>
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <sys/stat.h>
-#include <netinet/in.h>
-#include <unistd.h>
-#include <fcntl.h>
-#include <netdb.h>
-
+# include <netinet/in.h>
+# include <sys/socket.h>
+# include <sys/stat.h>
+# include <sys/un.h>
 #else
-
-#include "inspircd_win32wrapper.h"
-
+# include <afunix.h>
+typedef USHORT in_port_t;
+typedef ADDRESS_FAMILY sa_family_t;
 #endif
 
 #include <cerrno>
@@ -55,19 +49,64 @@ namespace irc
 	 */
 	namespace sockets
 	{
+		/** Represents a socket address. This can be an IP/port pair or a UNIX socket path. */
 		union CoreExport sockaddrs
 		{
 			struct sockaddr sa;
 			struct sockaddr_in in4;
 			struct sockaddr_in6 in6;
-			/** Return the size of the structure for syscall passing */
-			int sa_size() const;
-			/** Return port number or -1 if invalid */
-			int port() const;
-			/** Return IP only */
+			struct sockaddr_un un;
+
+			/** Initializes this sockaddrs optionally as an unspecified socket address. */
+			explicit sockaddrs(bool initialize = true);
+
+			/** Returns the address segment of the socket address as a string. */
 			std::string addr() const;
-			/** Return human-readable IP/port pair */
+
+			/** Returns the family of the socket address (e.g. AF_INET). */
+			sa_family_t family() const;
+
+			/** Store an IP address or UNIX socket path in this socket address.
+			 * @param addr An IPv4 address, IPv6 address, or UNIX socket path.
+			 * @return True if the IP address or UNIX socket paht was stored in this socket address; otherwise, false.
+			 */
+			inline bool from(const std::string& addr) { return addr.find('/') == std::string::npos ? from_ip(addr) : from_unix(addr); }
+
+			/** Store an IP address in this socket address.
+			 * @param addr An IPv4 or IPv6 address.
+			 * @return True if the IP was stored in this socket address; otherwise, false.
+			 */
+			inline bool from_ip(const std::string& addr) { return from_ip_port(addr, 0); }
+
+			/** Store an IP address and TCP port pair in this socket address.
+			 * @param addr An IPv4 or IPv6 address.
+			 * @param port A TCP port.
+			 * @return True if the IP/port was stored in this socket address; otherwise, false.
+			 */
+			bool from_ip_port(const std::string& addr, in_port_t port);
+
+			/** Store a UNIX socket path in this socket address.
+			 * @param path A path to a UNIX socket.
+			 * @return True if the UNIX socket path was stored in this socket address; otherwise, false.
+			 */
+			bool from_unix(const std::string& path);
+
+			/** Determines whether this socket address is a local endpoint. */
+			bool is_local() const;
+
+			/** Determines whether this socket address is an IPv4 or IPv6 address. */
+			inline bool is_ip() const { return family() == AF_INET || family() == AF_INET6; }
+
+			/** Returns the TCP port number of the socket address or 0 if not relevant to this family. */
+			in_port_t port() const;
+
+			/** Returns the size of the structure for use in networking syscalls. */
+			socklen_t sa_size() const;
+
+			/** Returns the whole socket address as a string. */
 			std::string str() const;
+
+			/** Determines if this socket address refers to the same endpoint as another socket address. */
 			bool operator==(const sockaddrs& other) const;
 			inline bool operator!=(const sockaddrs& other) const { return !(*this == other); }
 		};
@@ -75,17 +114,17 @@ namespace irc
 		struct CoreExport cidr_mask
 		{
 			/** Type, AF_INET or AF_INET6 */
-			unsigned char type;
+			sa_family_t type;
 			/** Length of the mask in bits (0-128) */
 			unsigned char length;
 			/** Raw bits. Unused bits must be zero */
 			unsigned char bits[16];
 
-			cidr_mask() {}
+			cidr_mask() = default;
 			/** Construct a CIDR mask from the string. Will normalize (127.0.0.1/8 => 127.0.0.0/8). */
 			cidr_mask(const std::string& mask);
 			/** Construct a CIDR mask of a given length from the given address */
-			cidr_mask(const irc::sockets::sockaddrs& addr, int len);
+			cidr_mask(const irc::sockets::sockaddrs& addr, unsigned char len);
 			/** Equality of bits, type, and length */
 			bool operator==(const cidr_mask& other) const;
 			/** Ordering defined for maps */
@@ -108,63 +147,89 @@ namespace irc
 		 * @param match_with_username Does the  mask include a nickname segment?
 		 * @return True if the mask matches the address
 		 */
-		CoreExport bool MatchCIDR(const std::string &address, const std::string &cidr_mask, bool match_with_username);
+		CoreExport bool MatchCIDR(const std::string& address, const std::string& cidr_mask, bool match_with_username);
 
-		/** Return the size of the structure for syscall passing */
-		inline int sa_size(const irc::sockets::sockaddrs& sa) { return sa.sa_size(); }
-
-		/** Convert an address-port pair into a binary sockaddr
-		 * @param addr The IP address, IPv4 or IPv6
-		 * @param port The port, 0 for unspecified
-		 * @param sa The structure to place the result in. Will be zeroed prior to conversion
-		 * @return true if the conversion was successful, false if not.
+		/** Determines whether the specified file is a UNIX socket.
+		 * @param file The path to the file to check.
+		 * @return True if the file is a UNIX socket; otherwise, false.
 		 */
-		CoreExport bool aptosa(const std::string& addr, int port, irc::sockets::sockaddrs& sa);
-
-		/** Convert a binary sockaddr to an address-port pair
-		 * @param sa The structure to convert
-		 * @param addr the IP address
-		 * @param port the port
-		 * @return true if the conversion was successful, false if unknown address family
-		 */
-		CoreExport bool satoap(const irc::sockets::sockaddrs& sa, std::string& addr, int &port);
-
-		/** Convert a binary sockaddr to a user-readable string.
-		 * This means IPv6 addresses are written as [::1]:6667, and *:6668 is used for 0.0.0.0:6668
-		 * @param sa The structure to convert
-		 * @return The string; "<unknown>" if not a valid address
-		 */
-		inline std::string satouser(const irc::sockets::sockaddrs& sa) { return sa.str(); }
+		CoreExport bool isunix(const std::string& file);
 	}
 }
 
+/** Represents information about a failed port binding. */
+struct CoreExport FailedPort final
+{
+	/** The error which happened during binding. */
+	const std::string error;
+
+	/** The endpoint on which we were attempting to bind. */
+	const irc::sockets::sockaddrs sa;
+
+	/** The config tag that the listener was created from. */
+	const std::shared_ptr<ConfigTag> tag;
+
+	FailedPort(const std::string& err, irc::sockets::sockaddrs& addr, const std::shared_ptr<ConfigTag>& cfg)
+		: error(err)
+		, sa(addr)
+		, tag(cfg)
+	{
+	}
+
+	FailedPort(const std::string& err, const std::shared_ptr<ConfigTag>& cfg)
+		: error(err)
+		, sa(true)
+		, tag(cfg)
+	{
+	}
+};
+
+/** A list of failed port bindings, used for informational purposes on startup */
+typedef std::vector<FailedPort> FailedPortList;
+
 #include "socketengine.h"
+
 /** This class handles incoming connections on client ports.
  * It will create a new User for every valid connection
  * and assign it a file descriptor.
  */
-class CoreExport ListenSocket : public EventHandler
+class CoreExport ListenSocket final
+	: public EventHandler
 {
- public:
-	reference<ConfigTag> bind_tag;
-	std::string bind_addr;
-	int bind_port;
-	/** Human-readable bind description */
-	std::string bind_desc;
+public:
+	std::shared_ptr<ConfigTag> bind_tag;
+	const irc::sockets::sockaddrs bind_sa;
+	const int bind_protocol;
+
+	class IOHookProvRef : public dynamic_reference_nocheck<IOHookProvider>
+	{
+	public:
+		IOHookProvRef()
+			: dynamic_reference_nocheck<IOHookProvider>(nullptr, std::string())
+		{
+		}
+	};
+
+	typedef std::array<IOHookProvRef, 2> IOHookProvList;
+
+	/** IOHook providers for handling connections on this socket,
+	 * may be empty.
+	 */
+	IOHookProvList iohookprovs;
+
 	/** Create a new listening socket
 	 */
-	ListenSocket(ConfigTag* tag, const irc::sockets::sockaddrs& bind_to);
-	/** Handle an I/O event
-	 */
-	void HandleEvent(EventType et, int errornum = 0);
+	ListenSocket(const std::shared_ptr<ConfigTag>& tag, const irc::sockets::sockaddrs& bind_to, sa_family_t protocol);
 	/** Close the socket
 	 */
-	~ListenSocket();
+	~ListenSocket() override;
 
-	/** Handles sockets internals crap of a connection, convenience wrapper really
+	/** Handles new connections, called by the socket engine
 	 */
-	void AcceptInternal();
+	void OnEventHandlerRead() override;
+
+	/** Inspects the bind block belonging to this socket to set the name of the IO hook
+	 * provider which this socket will use for incoming connections.
+	 */
+	void ResetIOHookProvider();
 };
-
-#endif
-

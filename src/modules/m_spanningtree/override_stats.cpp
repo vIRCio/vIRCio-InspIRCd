@@ -1,8 +1,11 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
- *   Copyright (C) 2010 Daniel De Graaf <danieldg@inspircd.org>
- *   Copyright (C) 2007 Craig Edwards <craigedwards@brainbox.cc>
+ *   Copyright (C) 2020, 2023 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2014, 2016 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
+ *   Copyright (C) 2009 Daniel De Graaf <danieldg@inspircd.org>
+ *   Copyright (C) 2007 Craig Edwards <brain@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -18,30 +21,40 @@
  */
 
 
-/* $ModDesc: Provides a spanning tree server link protocol */
-
 #include "inspircd.h"
-#include "socket.h"
 
 #include "main.h"
 #include "utils.h"
-#include "treeserver.h"
 #include "link.h"
-#include "treesocket.h"
 
-ModResult ModuleSpanningTree::OnStats(char statschar, User* user, string_list &results)
+ModResult ModuleSpanningTree::OnStats(Stats::Context& stats)
 {
-	if ((statschar == 'c') || (statschar == 'n'))
+	if ((stats.GetSymbol() == 'c') || (stats.GetSymbol() == 'n'))
 	{
-		for (std::vector<reference<Link> >::iterator i = Utils->LinkBlocks.begin(); i != Utils->LinkBlocks.end(); ++i)
+		for (const auto& L : Utils->LinkBlocks)
 		{
-			Link* L = *i;
-			results.push_back(std::string(ServerInstance->Config->ServerName)+" 213 "+user->nick+" "+statschar+" *@"+(L->HiddenFromStats ? "<hidden>" : L->IPAddr)+" * "+(*i)->Name.c_str()+" "+ConvToStr(L->Port)+" "+(L->Hook.empty() ? "plaintext" : L->Hook));
-			if (statschar == 'c')
-				results.push_back(std::string(ServerInstance->Config->ServerName)+" 244 "+user->nick+" H * * "+L->Name.c_str());
+			std::string ipaddr = "*@";
+			if (L->HiddenFromStats)
+				ipaddr.append("<hidden>");
+			else
+				ipaddr.append(L->IPAddr);
+
+			const std::string hook = (L->Hook.empty() ? "plaintext" : L->Hook);
+			stats.AddRow(213, stats.GetSymbol(), ipaddr, '*', L->Name, L->Port, hook);
+			if (stats.GetSymbol() == 'c')
+				stats.AddRow(244, 'H', '*', '*', L->Name);
+		}
+		return MOD_RES_DENY;
+	}
+	else if (stats.GetSymbol() == 'U')
+	{
+		for (const auto& [_, tag] : ServerInstance->Config->ConfTags("services", ServerInstance->Config->ConfTags("uline")))
+		{
+			std::string name = tag->getString("server");
+			if (!name.empty())
+				stats.AddRow(248, 'U', name);
 		}
 		return MOD_RES_DENY;
 	}
 	return MOD_RES_PASSTHRU;
 }
-

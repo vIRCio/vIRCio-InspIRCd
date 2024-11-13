@@ -1,7 +1,10 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
- *   Copyright (C) 2009-2010 Daniel De Graaf <danieldg@inspircd.org>
+ *   Copyright (C) 2018, 2020-2022 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2012-2015 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
+ *   Copyright (C) 2010 Daniel De Graaf <danieldg@inspircd.org>
  *   Copyright (C) 2008 Robin Burchell <robin+git@viroteck.net>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
@@ -21,73 +24,78 @@
 #include "inspircd.h"
 #include "commands.h"
 
-#include "treesocket.h"
-#include "treeserver.h"
-#include "utils.h"
-
-/** FMODE command - server mode with timestamp checks */
-CmdResult CommandFMode::Handle(const std::vector<std::string>& params, User *who)
+/** FMODE command - channel mode change with timestamp checks */
+CmdResult CommandFMode::Handle(User* who, Params& params)
 {
-	std::string sourceserv = who->server;
+	time_t TS = ServerCommand::ExtractTS(params[1]);
 
-	std::vector<std::string> modelist;
-	time_t TS = 0;
-	for (unsigned int q = 0; (q < params.size()) && (q < 64); q++)
-	{
-		if (q == 1)
-		{
-			/* The timestamp is in this position.
-			 * We don't want to pass that up to the
-			 * server->client protocol!
-			 */
-			TS = atoi(params[q].c_str());
-		}
-		else
-		{
-			/* Everything else is fine to append to the modelist */
-			modelist.push_back(params[q]);
-		}
+	Channel* const chan = ServerInstance->Channels.Find(params[0]);
+	if (!chan)
+		// Channel doesn't exist
+		return CmdResult::FAILURE;
 
-	}
-	/* Extract the TS value of the object, either User or Channel */
-	User* dst = ServerInstance->FindNick(params[0]);
-	Channel* chan = NULL;
-	time_t ourTS = 0;
+	// Extract the TS of the channel in question
+	time_t ourTS = chan->age;
 
-	if (dst)
-	{
-		ourTS = dst->age;
-	}
-	else
-	{
-		chan = ServerInstance->FindChan(params[0]);
-		if (chan)
-		{
-			ourTS = chan->age;
-		}
-		else
-			/* Oops, channel doesnt exist! */
-			return CMD_FAILURE;
-	}
-
-	if (!TS)
-	{
-		ServerInstance->Logs->Log("m_spanningtree",DEFAULT,"*** BUG? *** TS of 0 sent to FMODE. Are some services authors smoking craq, or is it 1970 again?. Dropped.");
-		ServerInstance->SNO->WriteToSnoMask('d', "WARNING: The server %s is sending FMODE with a TS of zero. Total craq. Mode was dropped.", sourceserv.c_str());
-		return CMD_INVALID;
-	}
-
-	/* TS is equal or less: Merge the mode changes into ours and pass on.
+	/* If the TS is greater than ours, we drop the mode and don't pass it anywhere.
 	 */
-	if (TS <= ourTS)
-	{
-		bool merge = (TS == ourTS) && IS_SERVER(who);
-		ServerInstance->Modes->Process(modelist, who, merge);
-		return CMD_SUCCESS;
-	}
-	/* If the TS is greater than ours, we drop the mode and dont pass it anywhere.
+	if (TS > ourTS)
+		return CmdResult::FAILURE;
+
+	/* TS is equal or less: apply the mode change locally and forward the message
 	 */
-	return CMD_FAILURE;
+
+	// Turn modes into a Modes::ChangeList; may have more elements than max modes
+	Modes::ChangeList changelist;
+	ServerInstance->Modes.ModeParamsToChangeList(who, MODETYPE_CHANNEL, params, changelist, 2);
+
+	ModeParser::ModeProcessFlag flags = ModeParser::MODE_LOCALONLY;
+	if ((TS == ourTS) && IS_SERVER(who))
+		flags |= ModeParser::MODE_MERGE;
+
+	ServerInstance->Modes.Process(who, chan, nullptr, changelist, flags);
+	return CmdResult::SUCCESS;
 }
 
+CmdResult CommandLMode::Handle(User* who, Params& params)
+{
+	// :<sid> LMODE <chan> <chants> <modechr> [<mask> <setts> <setter>]+
+	time_t chants = ServerCommand::ExtractTS(params[1]);
 
+	Channel* const chan = ServerInstance->Channels.Find(params[0]);
+	if (!chan)
+		return CmdResult::FAILURE; // Channel doesn't exist.
+
+	// If the TS is greater than ours, we drop the mode and don't pass it anywhere.
+	if (chants > chan->age)
+		return CmdResult::FAILURE;
+
+	ModeHandler* mh = ServerInstance->Modes.FindMode(params[2][0], MODETYPE_CHANNEL);
+	if (!mh || !mh->IsListMode())
+		return CmdResult::FAILURE; // Mode doesn't exist or isn't a list mode.
+
+	if (params.size() % 3)
+		return CmdResult::FAILURE; // Invalid parameter count.
+
+	Modes::ChangeList changelist;
+	for (Params::const_iterator iter = params.begin() + 3; iter != params.end(); )
+	{
+		// The mode mask (e.g. foo!bar@baz).
+		const std::string& mask = *iter++;
+
+		// Who the mode was set by (e.g. Sadie!sadie@sadie.moe).
+		const std::string& set_by = *iter++;
+
+		// The time at which the mode was set (e.g. 956204400).
+		time_t set_at = ServerCommand::ExtractTS(*iter++);
+
+		changelist.push(mh, true, mask, set_by, set_at);
+	}
+
+	ModeParser::ModeProcessFlag flags = ModeParser::MODE_LOCALONLY;
+	if (chants == chan->age && IS_SERVER(who))
+		flags |= ModeParser::MODE_MERGE;
+
+	ServerInstance->Modes.Process(who, chan, nullptr, changelist, flags);
+	return CmdResult::SUCCESS;
+}

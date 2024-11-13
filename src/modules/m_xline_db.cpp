@@ -1,7 +1,14 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
- *   Copyright (C) 2008 Thomas Stagner <aquanight@inspircd.org>
+ *   Copyright (C) 2021 Herman <GermanAizek@yandex.ru>
+ *   Copyright (C) 2019 Matt Schatz <genius3000@g3k.solutions>
+ *   Copyright (C) 2013, 2015, 2018-2024 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2012-2013 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2012, 2014 Adam <Adam@anope.org>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
+ *   Copyright (C) 2012 ChrisTX <xpipe@hotmail.de>
+ *   Copyright (C) 2009 Daniel De Graaf <danieldg@inspircd.org>
  *   Copyright (C) 2008 Robin Burchell <robin+git@viroteck.net>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
@@ -18,39 +25,50 @@
  */
 
 
+#include <filesystem>
+#include <fstream>
+
 #include "inspircd.h"
+#include "timeutils.h"
 #include "xline.h"
 
-/* $ModConfig: <xlinedb filename="data/xline.db">
- *  Specify the filename for the xline database here*/
-/* $ModDesc: Keeps a dynamic log of all XLines created, and stores them in a seperate conf file (xline.db). */
-
-class ModuleXLineDB : public Module
+class ModuleXLineDB final
+	: public Module
+	, public Timer
 {
+private:
 	bool dirty;
 	std::string xlinedbpath;
- public:
-	void init()
+	unsigned long saveperiod;
+	unsigned long maxbackoff;
+	unsigned char backoff;
+
+public:
+	ModuleXLineDB()
+		: Module(VF_VENDOR, "Allows X-lines to be saved and reloaded on restart.")
+		, Timer(0, true)
+	{
+	}
+
+	void init() override
 	{
 		/* Load the configuration
 		 * Note:
-		 * 		this is on purpose not in the OnRehash() method. It would be non-trivial to change the database on-the-fly.
-		 * 		Imagine a scenario where the new file already exists. Merging the current XLines with the existing database is likely a bad idea
-		 * 		...and so is discarding all current in-memory XLines for the ones in the database.
+		 *		This is on purpose not changed on a rehash. It would be non-trivial to change the database on-the-fly.
+		 *		Imagine a scenario where the new file already exists. Merging the current XLines with the existing database is likely a bad idea
+		 *		...and so is discarding all current in-memory XLines for the ones in the database.
 		 */
-		ConfigTag* Conf = ServerInstance->Config->ConfValue("xlinedb");
-		xlinedbpath = Conf->getString("filename", DATA_PATH "/xline.db");
+		const auto& Conf = ServerInstance->Config->ConfValue("xlinedb");
+		xlinedbpath = ServerInstance->Config->Paths.PrependData(Conf->getString("filename", "xline.db", 1));
+		saveperiod = Conf->getDuration("saveperiod", 5);
+		backoff = Conf->getNum<uint8_t>("backoff", 0);
+		maxbackoff = Conf->getDuration("maxbackoff", saveperiod * 120, saveperiod);
+		SetInterval(saveperiod);
 
 		// Read xlines before attaching to events
 		ReadDatabase();
 
-		Implementation eventlist[] = { I_OnAddLine, I_OnDelLine, I_OnExpireLine, I_OnBackgroundTimer };
-		ServerInstance->Modules->Attach(eventlist, this, sizeof(eventlist)/sizeof(Implementation));
 		dirty = false;
-	}
-
-	virtual ~ModuleXLineDB()
-	{
 	}
 
 	/** Called whenever an xline is added by a local user.
@@ -58,9 +76,10 @@ class ModuleXLineDB : public Module
 	 * @param source The sender of the line or NULL for local server
 	 * @param line The xline being added
 	 */
-	void OnAddLine(User* source, XLine* line)
+	void OnAddLine(User* source, XLine* line) override
 	{
-		dirty = true;
+		if (!line->from_config)
+			dirty = true;
 	}
 
 	/** Called whenever an xline is deleted.
@@ -68,92 +87,99 @@ class ModuleXLineDB : public Module
 	 * @param source The user removing the line or NULL for local server
 	 * @param line the line being deleted
 	 */
-	void OnDelLine(User* source, XLine* line)
+	void OnDelLine(User* source, XLine* line) override
 	{
-		dirty = true;
+		OnAddLine(source, line);
 	}
 
-	void OnExpireLine(XLine *line)
-	{
-		dirty = true;
-	}
-
-	void OnBackgroundTimer(time_t now)
+	bool Tick() override
 	{
 		if (dirty)
 		{
 			if (WriteDatabase())
+			{
+				// If we were previously unable to write but now can then reset the time interval.
+				if (GetInterval() != saveperiod)
+					SetInterval(saveperiod, false);
+
 				dirty = false;
+			}
+			else
+			{
+				// Back off a bit to avoid spamming opers.
+				if (backoff > 1)
+					SetInterval(std::min(GetInterval() * backoff, maxbackoff), false);
+				ServerInstance->Logs.Debug(MODNAME, "Trying again in {} seconds", GetInterval());
+			}
 		}
+		return true;
 	}
 
 	bool WriteDatabase()
 	{
-		FILE *f;
-
 		/*
 		 * We need to perform an atomic write so as not to fuck things up.
-		 * So, let's write to a temporary file, flush and sync the FD, then rename the file..
+		 * So, let's write to a temporary file, flush it, then rename the file..
 		 * Technically, that means that this can block, but I have *never* seen that.
-		 *		-- w00t
+		 *     -- w00t
 		 */
-		ServerInstance->Logs->Log("m_xline_db",DEBUG, "xlinedb: Opening temporary database");
-		std::string xlinenewdbpath = xlinedbpath + ".new";
-		f = fopen(xlinenewdbpath.c_str(), "w");
-		if (!f)
+		ServerInstance->Logs.Debug(MODNAME, "Opening temporary database");
+		const std::string xlinenewdbpath = xlinedbpath + ".new." + ConvToStr(ServerInstance->Time());
+		std::ofstream stream(xlinenewdbpath);
+		if (!stream.is_open())
 		{
-			ServerInstance->Logs->Log("m_xline_db",DEBUG, "xlinedb: Cannot create database! %s (%d)", strerror(errno), errno);
-			ServerInstance->SNO->WriteToSnoMask('a', "database: cannot create new db: %s (%d)", strerror(errno), errno);
+			ServerInstance->Logs.Critical(MODNAME, "Cannot create database \"{}\"! {} ({})", xlinenewdbpath, strerror(errno), errno);
+			ServerInstance->SNO.WriteToSnoMask('x', "database: cannot create new xline db \"{}\": {} ({})", xlinenewdbpath, strerror(errno), errno);
 			return false;
 		}
 
-		ServerInstance->Logs->Log("m_xline_db",DEBUG, "xlinedb: Opened. Writing..");
+		ServerInstance->Logs.Debug(MODNAME, "Opened. Writing..");
 
 		/*
 		 * Now, much as I hate writing semi-unportable formats, additional
 		 * xline types may not have a conf tag, so let's just write them.
 		 * In addition, let's use a file version, so we can maintain some
 		 * semblance of backwards compatibility for reading on startup..
-		 * 		-- w00t
+		 *		-- w00t
 		 */
-		fprintf(f, "VERSION 1\n");
+		stream << "VERSION 1" << std::endl;
 
 		// Now, let's write.
-		std::vector<std::string> types = ServerInstance->XLines->GetAllTypes();
-		for (std::vector<std::string>::const_iterator it = types.begin(); it != types.end(); ++it)
+		for (const auto& xltype : ServerInstance->XLines->GetAllTypes())
 		{
-			XLineLookup* lookup = ServerInstance->XLines->GetAll(*it);
+			XLineLookup* lookup = ServerInstance->XLines->GetAll(xltype);
 			if (!lookup)
 				continue; // Not possible as we just obtained the list from XLineManager
 
-			for (LookupIter i = lookup->begin(); i != lookup->end(); ++i)
+			for (const auto& [_, line] : *lookup)
 			{
-				XLine* line = i->second;
-				fprintf(f, "LINE %s %s %s %lu %lu :%s\n", line->type.c_str(), line->Displayable(),
-					line->source.c_str(), (unsigned long)line->set_time, (unsigned long)line->duration, line->reason.c_str());
+				if (line->from_config)
+					continue;
+
+				stream << "LINE " << line->type << " " << line->Displayable() << " "
+					<< line->source << " " << line->set_time << " "
+					<< line->duration << " :" << line->reason << std::endl;
 			}
 		}
 
-		ServerInstance->Logs->Log("m_xline_db",DEBUG, "xlinedb: Finished writing XLines. Checking for error..");
+		ServerInstance->Logs.Debug(MODNAME, "Finished writing XLines. Checking for error..");
 
-		int write_error = 0;
-		write_error = ferror(f);
-		write_error |= fclose(f);
-		if (write_error)
+		if (stream.fail())
 		{
-			ServerInstance->Logs->Log("m_xline_db",DEBUG, "xlinedb: Cannot write to new database! %s (%d)", strerror(errno), errno);
-			ServerInstance->SNO->WriteToSnoMask('a', "database: cannot write to new db: %s (%d)", strerror(errno), errno);
+			ServerInstance->Logs.Critical(MODNAME, "Cannot write to new database \"{}\"! {} ({})", xlinenewdbpath, strerror(errno), errno);
+			ServerInstance->SNO.WriteToSnoMask('x', "database: cannot write to new xline db \"{}\": {} ({})", xlinenewdbpath, strerror(errno), errno);
 			return false;
 		}
+		stream.close();
 
 #ifdef _WIN32
 		remove(xlinedbpath.c_str());
 #endif
-		// Use rename to move temporary to new db - this is guarenteed not to fuck up, even in case of a crash.
+		// Use rename to move temporary to new db - this is guaranteed not to fuck up, even in case of a crash.
 		if (rename(xlinenewdbpath.c_str(), xlinedbpath.c_str()) < 0)
 		{
-			ServerInstance->Logs->Log("m_xline_db",DEBUG, "xlinedb: Cannot move new to old database! %s (%d)", strerror(errno), errno);
-			ServerInstance->SNO->WriteToSnoMask('a', "database: cannot replace old with new db: %s (%d)", strerror(errno), errno);
+			ServerInstance->Logs.Critical(MODNAME, "Cannot replace old database \"{}\" with new database \"{}\"! {} ({})", xlinedbpath, xlinenewdbpath, strerror(errno), errno);
+			ServerInstance->SNO.WriteToSnoMask('x', "database: cannot replace old xline db \"{}\" with new db \"{}\": {} ({})", xlinedbpath, xlinenewdbpath, strerror(errno), errno);
 			return false;
 		}
 
@@ -162,65 +188,43 @@ class ModuleXLineDB : public Module
 
 	bool ReadDatabase()
 	{
-		FILE *f;
-		char linebuf[MAXBUF];
+		// If the xline database doesn't exist then we don't need to load it.
+		std::error_code ec;
+		if (!std::filesystem::is_regular_file(xlinedbpath, ec))
+			return true;
 
-		f = fopen(xlinedbpath.c_str(), "r");
-		if (!f)
+		std::ifstream stream(xlinedbpath);
+		if (!stream.is_open())
 		{
-			if (errno == ENOENT)
-			{
-				/* xline.db doesn't exist, fake good return value (we don't care about this) */
-				return true;
-			}
-			else
-			{
-				/* this might be slightly more problematic. */
-				ServerInstance->Logs->Log("m_xline_db",DEBUG, "xlinedb: Cannot read database! %s (%d)", strerror(errno), errno);
-				ServerInstance->SNO->WriteToSnoMask('a', "database: cannot read db: %s (%d)", strerror(errno), errno);
-				return false;
-			}
+			ServerInstance->Logs.Critical(MODNAME, "Cannot read database \"{}\"! {} ({})", xlinedbpath, strerror(errno), errno);
+			ServerInstance->SNO.WriteToSnoMask('x', "database: cannot read xline db \"{}\": {} ({})", xlinedbpath, strerror(errno), errno);
+			return false;
 		}
 
-		while (fgets(linebuf, MAXBUF, f))
+		std::string line;
+		while (std::getline(stream, line))
 		{
-			char *c = linebuf;
-
-			while (c && *c)
-			{
-				if (*c == '\n')
-				{
-					*c = '\0';
-				}
-
-				c++;
-			}
-
 			// Inspired by the command parser. :)
-			irc::tokenstream tokens(linebuf);
+			irc::tokenstream tokens(line);
 			int items = 0;
 			std::string command_p[7];
 			std::string tmp;
 
-			while (tokens.GetToken(tmp) && (items < 7))
+			while (tokens.GetTrailing(tmp) && (items < 7))
 			{
 				command_p[items] = tmp;
 				items++;
 			}
 
-			ServerInstance->Logs->Log("m_xline_db",DEBUG, "xlinedb: Processing %s", linebuf);
+			ServerInstance->Logs.Debug(MODNAME, "Processing {}", line);
 
 			if (command_p[0] == "VERSION")
 			{
-				if (command_p[1] == "1")
+				if (command_p[1] != "1")
 				{
-					ServerInstance->Logs->Log("m_xline_db",DEBUG, "xlinedb: Reading db version %s", command_p[1].c_str());
-				}
-				else
-				{
-					fclose(f);
-					ServerInstance->Logs->Log("m_xline_db",DEBUG, "xlinedb: I got database version %s - I don't understand it", command_p[1].c_str());
-					ServerInstance->SNO->WriteToSnoMask('a', "database: I got a database version (%s) I don't understand", command_p[1].c_str());
+					stream.close();
+					ServerInstance->Logs.Critical(MODNAME, "I got database version {} - I don't understand it", command_p[1]);
+					ServerInstance->SNO.WriteToSnoMask('x', "database: I got a database version ({}) I don't understand", command_p[1]);
 					return false;
 				}
 			}
@@ -231,33 +235,35 @@ class ModuleXLineDB : public Module
 
 				if (!xlf)
 				{
-					ServerInstance->SNO->WriteToSnoMask('a', "database: Unknown line type (%s).", command_p[1].c_str());
+					ServerInstance->SNO.WriteToSnoMask('x', "database: Unknown line type ({}).", command_p[1]);
 					continue;
 				}
 
-				XLine* xl = xlf->Generate(ServerInstance->Time(), atoi(command_p[5].c_str()), command_p[3], command_p[6], command_p[2]);
-				xl->SetCreateTime(atoi(command_p[4].c_str()));
+				XLine* xl = xlf->Generate(ServerInstance->Time(), ConvToNum<unsigned long>(command_p[5]), command_p[3], command_p[6], command_p[2]);
+				xl->SetCreateTime(ConvToNum<time_t>(command_p[4]));
 
-				if (ServerInstance->XLines->AddLine(xl, NULL))
+				if (!ServerInstance->XLines->AddLine(xl, nullptr))
 				{
-					ServerInstance->SNO->WriteToSnoMask('x', "database: Added a line of type %s", command_p[1].c_str());
+					continue;
+					delete xl;
+				}
+
+				if (xl->duration)
+				{
+					ServerInstance->SNO.WriteToSnoMask('x', "database: added a timed {}{} on {}, expires in {} (on {}): {}",
+						xl->type, xl->type.length() <= 2 ? "-line" : "", xl->Displayable(),
+						Duration::ToString(xl->duration), Time::FromNow(xl->duration), xl->reason);
 				}
 				else
-					delete xl;
+				{
+					ServerInstance->SNO.WriteToSnoMask('x', "database: added a permanent {}{} on {}: {}", xl->type,
+						xl->type.length() <= 2 ? "-line" : "", xl->Displayable(), xl->reason);
+				}
 			}
 		}
-
-		fclose(f);
+		stream.close();
 		return true;
-	}
-
-
-
-	virtual Version GetVersion()
-	{
-		return Version("Keeps a dynamic log of all XLines created, and stores them in a separate conf file (xline.db).", VF_VENDOR);
 	}
 };
 
 MODULE_INIT(ModuleXLineDB)
-

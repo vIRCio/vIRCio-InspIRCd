@@ -1,0 +1,76 @@
+name: Alpine CI
+on:
+  pull_request:
+  push:
+  schedule:
+    - cron: '0 0 * * 0'
+jobs:
+  build:
+    if: "!contains(github.event.head_commit.message, '[skip alpine ci]')"
+    container: alpine:3.20
+    runs-on: ubuntu-latest
+    env:
+      CXX: ${{ matrix.compiler }}
+      INSPIRCD_DEBUG: 3
+      INSPIRCD_VERBOSE: 1
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          apk update
+          apk add \
+            argon2-dev \
+            clang \
+            g++ \
+            git \
+            gnutls-dev \
+            libmaxminddb-dev \
+            libpq-dev \
+            libpsl-dev \
+            make \
+            mariadb-dev \
+            openldap-dev \
+            openssl-dev \
+            pcre2-dev \
+            perl \
+            pkgconf \
+            re2-dev \
+            sqlite-dev \
+            yyjson-dev
+
+      - name: Run configure
+        run: |
+          ./configure --enable-extras "argon2 geo_maxmind ldap log_json log_syslog mysql pgsql regex_pcre2 regex_posix regex_re2 sqlite3 ssl_gnutls ssl_openssl sslrehashsignal"
+          ./configure --development --disable-auto-extras --disable-ownership --socketengine ${{ matrix.socketengine }}
+
+      - name: Build core
+        run: |
+          INSPIRCD_TARGET=inspircd make --jobs $(($(getconf _NPROCESSORS_ONLN) + 1))
+
+      - name: Build core modules
+        run: |
+          INSPIRCD_TARGET=coremods make --jobs $(($(getconf _NPROCESSORS_ONLN) + 1))
+
+      - name: Build modules
+        run: |
+          INSPIRCD_TARGET=modules make --jobs $(($(getconf _NPROCESSORS_ONLN) + 1))
+
+      - name: Install
+        run: |
+          make install
+
+      - name: Run
+        run: |
+          touch ./run/conf/inspircd.conf
+          ./run/inspircd start --runasroot
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler:
+          - clang++
+          - g++
+        socketengine:
+          - epoll
+          - poll
+          - select

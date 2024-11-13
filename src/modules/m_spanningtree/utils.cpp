@@ -1,9 +1,13 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
- *   Copyright (C) 2009 Daniel De Graaf <danieldg@inspircd.org>
- *   Copyright (C) 2007-2009 Craig Edwards <craigedwards@brainbox.cc>
- *   Copyright (C) 2008 Robin Burchell <robin+git@viroteck.net>
+ *   Copyright (C) 2013-2014, 2018-2024 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2013 Adam <Adam@anope.org>
+ *   Copyright (C) 2012-2016 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
+ *   Copyright (C) 2009-2010 Daniel De Graaf <danieldg@inspircd.org>
+ *   Copyright (C) 2008-2009 Robin Burchell <robin+git@viroteck.net>
+ *   Copyright (C) 2007-2008 Craig Edwards <brain@inspircd.org>
  *   Copyright (C) 2007 Dennis Friis <peavey@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
@@ -21,143 +25,108 @@
 
 
 #include "inspircd.h"
-#include "socket.h"
-#include "xline.h"
-#include "socketengine.h"
+#include "listmode.h"
 
 #include "main.h"
 #include "utils.h"
 #include "treeserver.h"
-#include "link.h"
 #include "treesocket.h"
 #include "resolvers.h"
+#include "commandbuilder.h"
 
-/* Create server sockets off a listener. */
-ModResult ModuleSpanningTree::OnAcceptConnection(int newsock, ListenSocket* from, irc::sockets::sockaddrs* client, irc::sockets::sockaddrs* server)
+SpanningTreeUtilities* Utils = nullptr;
+
+ModResult ModuleSpanningTree::OnAcceptConnection(int newsock, ListenSocket* from, const irc::sockets::sockaddrs& client, const irc::sockets::sockaddrs& server)
 {
-	if (from->bind_tag->getString("type") != "servers")
+	if (!insp::equalsci(from->bind_tag->getString("type"), "servers"))
 		return MOD_RES_PASSTHRU;
 
-	std::string incomingip = client->addr();
-
-	for (std::vector<std::string>::iterator i = Utils->ValidIPs.begin(); i != Utils->ValidIPs.end(); i++)
+	const std::string incomingip = client.addr();
+	for (const auto& validip : Utils->ValidIPs)
 	{
-		if (*i == "*" || *i == incomingip || irc::sockets::cidr_mask(*i).match(*client))
+		if (validip == "*" || validip == incomingip || irc::sockets::cidr_mask(validip).match(client))
 		{
 			/* we don't need to do anything with the pointer, creating it stores it in the necessary places */
-			new TreeSocket(Utils, newsock, from, client, server);
+			new TreeSocket(newsock, from, client, server);
 			return MOD_RES_ALLOW;
 		}
 	}
-	ServerInstance->SNO->WriteToSnoMask('l', "Server connection from %s denied (no link blocks with that IP address)", incomingip.c_str());
+	ServerInstance->SNO.WriteToSnoMask('l', "Server connection from {} denied (no link blocks with that IP address)", incomingip);
 	return MOD_RES_DENY;
 }
 
-/** Yay for fast searches!
- * This is hundreds of times faster than recursion
- * or even scanning a linked list, especially when
- * there are more than a few servers to deal with.
- * (read as: lots).
- */
-TreeServer* SpanningTreeUtilities::FindServer(const std::string &ServerName)
+TreeServer* SpanningTreeUtilities::FindServer(const std::string& ServerName)
 {
-	if (ServerInstance->IsSID(ServerName))
+	if (InspIRCd::IsSID(ServerName))
 		return this->FindServerID(ServerName);
 
-	server_hash::iterator iter = serverlist.find(ServerName.c_str());
+	server_hash::iterator iter = serverlist.find(ServerName);
 	if (iter != serverlist.end())
 	{
 		return iter->second;
 	}
 	else
 	{
-		return NULL;
-	}
-}
-
-/** Returns the locally connected server we must route a
- * message through to reach server 'ServerName'. This
- * only applies to one-to-one and not one-to-many routing.
- * See the comments for the constructor of TreeServer
- * for more details.
- */
-TreeServer* SpanningTreeUtilities::BestRouteTo(const std::string &ServerName)
-{
-	if (ServerName.c_str() == TreeRoot->GetName() || ServerName == ServerInstance->Config->GetSID())
-		return NULL;
-	TreeServer* Found = FindServer(ServerName);
-	if (Found)
-	{
-		return Found->GetRoute();
-	}
-	else
-	{
-		// Cheat a bit. This allows for (better) working versions of routing commands with nick based prefixes, without hassle
-		User *u = ServerInstance->FindNick(ServerName);
-		if (u)
-		{
-			Found = FindServer(u->server);
-			if (Found)
-				return Found->GetRoute();
-		}
-
-		return NULL;
+		return nullptr;
 	}
 }
 
 /** Find the first server matching a given glob mask.
- * Theres no find-using-glob method of hash_map [awwww :-(]
- * so instead, we iterate over the list using an iterator
- * and match each one until we get a hit. Yes its slow,
- * deal with it.
+ * We iterate over the list and match each one until we get a hit.
  */
-TreeServer* SpanningTreeUtilities::FindServerMask(const std::string &ServerName)
+TreeServer* SpanningTreeUtilities::FindServerMask(const std::string& ServerName)
 {
-	for (server_hash::iterator i = serverlist.begin(); i != serverlist.end(); i++)
+	for (const auto& [name, server] : serverlist)
 	{
-		if (InspIRCd::Match(i->first,ServerName))
-			return i->second;
+		if (InspIRCd::Match(name, ServerName))
+			return server;
 	}
-	return NULL;
+	return nullptr;
 }
 
-TreeServer* SpanningTreeUtilities::FindServerID(const std::string &id)
+TreeServer* SpanningTreeUtilities::FindServerID(const std::string& id)
 {
 	server_hash::iterator iter = sidlist.find(id);
 	if (iter != sidlist.end())
 		return iter->second;
 	else
-		return NULL;
+		return nullptr;
 }
 
-SpanningTreeUtilities::SpanningTreeUtilities(ModuleSpanningTree* C) : Creator(C)
+TreeServer* SpanningTreeUtilities::FindRouteTarget(const std::string& target)
 {
-	ServerInstance->Logs->Log("m_spanningtree",DEBUG,"***** Using SID for hash: %s *****", ServerInstance->Config->GetSID().c_str());
+	TreeServer* const server = FindServer(target);
+	if (server)
+		return server;
 
-	this->TreeRoot = new TreeServer(this, ServerInstance->Config->ServerName, ServerInstance->Config->ServerDesc, ServerInstance->Config->GetSID());
-	this->ReadConfiguration();
+	User* const user = ServerInstance->Users.Find(target);
+	if (user)
+		return TreeServer::Get(user);
+
+	return nullptr;
 }
 
-CullResult SpanningTreeUtilities::cull()
+SpanningTreeUtilities::SpanningTreeUtilities(ModuleSpanningTree* C)
+	: Creator(C)
 {
-	while (TreeRoot->ChildCount())
+	ServerInstance->Timers.AddTimer(&RefreshTimer);
+}
+
+Cullable::Result SpanningTreeUtilities::Cull()
+{
+	const TreeServer::ChildServers& children = TreeRoot->GetChildren();
+	while (!children.empty())
 	{
-		TreeServer* child_server = TreeRoot->GetChild(0);
-		if (child_server)
-		{
-			TreeSocket* sock = child_server->GetSocket();
-			sock->Close();
-		}
+		TreeSocket* sock = children.front()->GetSocket();
+		sock->Close();
 	}
 
-	for(std::map<TreeSocket*, std::pair<std::string, int> >::iterator i = timeoutlist.begin(); i != timeoutlist.end(); ++i)
-	{
-		TreeSocket* s = i->first;
+	for (const auto& [s, _] : timeoutlist)
 		s->Close();
-	}
-	TreeRoot->cull();
 
-	return classbase::cull();
+	TreeRoot->Cull();
+
+	return Cullable::Cull();
 }
 
 SpanningTreeUtilities::~SpanningTreeUtilities()
@@ -165,147 +134,101 @@ SpanningTreeUtilities::~SpanningTreeUtilities()
 	delete TreeRoot;
 }
 
-void SpanningTreeUtilities::AddThisServer(TreeServer* server, TreeServerList &list)
+// Returns a list of DIRECT servers for a specific channel
+void SpanningTreeUtilities::GetListOfServersForChannel(const Channel* c, TreeSocketSet& list, char status, const CUList& exempt_list) const
 {
-	if (list.find(server) == list.end())
-		list[server] = server;
-}
-
-/* returns a list of DIRECT servernames for a specific channel */
-void SpanningTreeUtilities::GetListOfServersForChannel(Channel* c, TreeServerList &list, char status, const CUList &exempt_list)
-{
-	unsigned int minrank = 0;
+	ModeHandler::Rank minrank = 0;
 	if (status)
 	{
-		ModeHandler* mh = ServerInstance->Modes->FindPrefix(status);
+		PrefixMode* mh = ServerInstance->Modes.FindPrefix(status);
 		if (mh)
 			minrank = mh->GetPrefixRank();
 	}
 
-	const UserMembList *ulist = c->GetUsers();
-
-	for (UserMembCIter i = ulist->begin(); i != ulist->end(); i++)
+	TreeServer::ChildServers children = TreeRoot->GetChildren();
+	for (const auto& [user, memb] : c->GetUsers())
 	{
-		if (IS_LOCAL(i->first))
+		if (IS_LOCAL(user))
 			continue;
 
-		if (minrank && i->second->getRank() < minrank)
+		if (minrank && memb->GetRank() < minrank)
 			continue;
 
-		if (exempt_list.find(i->first) == exempt_list.end())
+		if (exempt_list.find(user) == exempt_list.end())
 		{
-			TreeServer* best = this->BestRouteTo(i->first->server);
-			if (best)
-				AddThisServer(best,list);
+			TreeServer* best = TreeServer::Get(user);
+			list.insert(best->GetSocket());
+
+			TreeServer::ChildServers::iterator citer = std::find(children.begin(), children.end(), best);
+			if (citer != children.end())
+				children.erase(citer);
 		}
 	}
-	return;
+
+	// Check whether the servers which do not have users in the channel might need this message. This
+	// is used to keep the chanhistory module synchronised between servers.
+	for (const auto &[_, server] : Utils->serverlist)
+	{
+		if (!server->GetRoute())
+			continue; // Local server
+
+		ModResult result = Creator->routeeventprov.FirstResult(&ServerProtocol::RouteEventListener::OnRouteMessage, c, server);
+		if (result == MOD_RES_ALLOW)
+			list.insert(server->GetRoute()->GetSocket());
+	}
 }
 
-bool SpanningTreeUtilities::DoOneToAllButSender(const std::string &prefix, const std::string &command, const parameterlist &params, const std::string& omit)
+void SpanningTreeUtilities::DoOneToAllButSender(const CmdBuilder& params, const TreeServer* omitroute) const
 {
-	TreeServer* omitroute = this->BestRouteTo(omit);
-	std::string FullLine = ":" + prefix + " " + command;
-	unsigned int words = params.size();
-	for (unsigned int x = 0; x < words; x++)
+	const std::string& FullLine = params.str();
+
+	for (const auto* Route : TreeRoot->GetChildren())
 	{
-		FullLine = FullLine + " " + params[x];
-	}
-	unsigned int items = this->TreeRoot->ChildCount();
-	for (unsigned int x = 0; x < items; x++)
-	{
-		TreeServer* Route = this->TreeRoot->GetChild(x);
-		// Send the line IF:
-		// The route has a socket (its a direct connection)
-		// The route isnt the one to be omitted
-		// The route isnt the path to the one to be omitted
-		if ((Route) && (Route->GetSocket()) && (Route->GetName() != omit) && (omitroute != Route))
+		// Send the line if the route isn't the path to the one to be omitted
+		if (Route != omitroute)
 		{
-			TreeSocket* Sock = Route->GetSocket();
-			if (Sock)
-				Sock->WriteLine(FullLine);
+			Route->GetSocket()->WriteLine(FullLine);
 		}
 	}
-	return true;
 }
 
-bool SpanningTreeUtilities::DoOneToMany(const std::string &prefix, const std::string &command, const parameterlist &params)
+void SpanningTreeUtilities::DoOneToOne(const CmdBuilder& params, const Server* server)
 {
-	std::string FullLine = ":" + prefix + " " + command;
-	unsigned int words = params.size();
-	for (unsigned int x = 0; x < words; x++)
-	{
-		FullLine = FullLine + " " + params[x];
-	}
-	unsigned int items = this->TreeRoot->ChildCount();
-	for (unsigned int x = 0; x < items; x++)
-	{
-		TreeServer* Route = this->TreeRoot->GetChild(x);
-		if (Route && Route->GetSocket())
-		{
-			TreeSocket* Sock = Route->GetSocket();
-			if (Sock)
-				Sock->WriteLine(FullLine);
-		}
-	}
-	return true;
-}
-
-bool SpanningTreeUtilities::DoOneToOne(const std::string &prefix, const std::string &command, const parameterlist &params, const std::string& target)
-{
-	TreeServer* Route = this->BestRouteTo(target);
-	if (Route)
-	{
-		std::string FullLine = ":" + prefix + " " + command;
-		unsigned int words = params.size();
-		for (unsigned int x = 0; x < words; x++)
-		{
-			FullLine = FullLine + " " + params[x];
-		}
-		if (Route && Route->GetSocket())
-		{
-			TreeSocket* Sock = Route->GetSocket();
-			if (Sock)
-				Sock->WriteLine(FullLine);
-		}
-		return true;
-	}
-	else
-	{
-		return false;
-	}
+	const TreeServer* ts = static_cast<const TreeServer*>(server);
+	TreeSocket* sock = ts->GetSocket();
+	if (sock)
+		sock->WriteLine(params);
 }
 
 void SpanningTreeUtilities::RefreshIPCache()
 {
 	ValidIPs.clear();
-	for (std::vector<reference<Link> >::iterator i = LinkBlocks.begin(); i != LinkBlocks.end(); ++i)
+	for (const auto& L : LinkBlocks)
 	{
-		Link* L = *i;
-		if (!L->Port)
+		bool isunix = L->IPAddr.find('/') != std::string::npos;
+		if (!L->Port && !isunix)
 		{
-			ServerInstance->Logs->Log("m_spanningtree",DEFAULT,"m_spanningtree: Ignoring a link block without a port.");
+			ServerInstance->Logs.Warning(MODNAME, "Ignoring an IP link block without a port.");
 			/* Invalid link block */
 			continue;
 		}
 
-		if (L->AllowMask.length())
-			ValidIPs.push_back(L->AllowMask);
+		ValidIPs.insert(ValidIPs.end(), L->AllowMasks.begin(), L->AllowMasks.end());
 
-		irc::sockets::sockaddrs dummy;
-		bool ipvalid = irc::sockets::aptosa(L->IPAddr, L->Port, dummy);
-		if ((L->IPAddr == "*") || (ipvalid))
+		irc::sockets::sockaddrs dummy(false);
+		bool ipvalid = dummy.from_ip_port(L->IPAddr, L->Port);
+		if ((L->IPAddr == "*") || (isunix) || (ipvalid))
 			ValidIPs.push_back(L->IPAddr);
-		else
+		else if (this->Creator->DNS)
 		{
+			auto* sr = new SecurityIPResolver(Creator, *this->Creator->DNS, L->IPAddr, L, DNS::QUERY_AAAA);
 			try
 			{
-				bool cached = false;
-				SecurityIPResolver* sr = new SecurityIPResolver(Creator, this, L->IPAddr, L, cached, DNS_QUERY_AAAA);
-				ServerInstance->AddResolver(sr, cached);
+				this->Creator->DNS->Process(sr);
 			}
-			catch (...)
+			catch (const DNS::Exception&)
 			{
+				delete sr;
 			}
 		}
 	}
@@ -313,84 +236,104 @@ void SpanningTreeUtilities::RefreshIPCache()
 
 void SpanningTreeUtilities::ReadConfiguration()
 {
-	ConfigTag* security = ServerInstance->Config->ConfValue("security");
-	ConfigTag* options = ServerInstance->Config->ConfValue("options");
-	FlatLinks = security->getBool("flatlinks");
-	HideULines = security->getBool("hideulines");
-	AnnounceTSChange = options->getBool("announcets");
+	const auto& options = ServerInstance->Config->ConfValue("options");
 	AllowOptCommon = options->getBool("allowmismatch");
-	ChallengeResponse = !security->getBool("disablehmac");
-	quiet_bursts = ServerInstance->Config->ConfValue("performance")->getBool("quietbursts");
-	PingWarnTime = options->getInt("pingwarning");
-	PingFreq = options->getInt("serverpingfreq");
+	AnnounceTSChange = options->getBool("announcets");
+	PingWarnTime = options->getDuration("pingwarning", 15);
+	PingFreq = options->getDuration("serverpingfreq", 60, 1);
 
-	if (PingFreq == 0)
-		PingFreq = 60;
+	const auto& security = ServerInstance->Config->ConfValue("security");
+	FlatLinks = security->getBool("flatlinks");
+	HideServices = security->getBool("hideservices", security->getBool("hideulines"));
+	HideSplits = security->getBool("hidesplits");
 
-	if (PingWarnTime < 0 || PingWarnTime > PingFreq - 1)
+	const auto& performance = ServerInstance->Config->ConfValue("performance");
+	quiet_bursts = performance->getBool("quietbursts");
+
+	if (PingWarnTime >= PingFreq)
 		PingWarnTime = 0;
 
 	AutoconnectBlocks.clear();
 	LinkBlocks.clear();
-	ConfigTagList tags = ServerInstance->Config->ConfTags("link");
-	for(ConfigIter i = tags.first; i != tags.second; ++i)
+
+	for (const auto& [_, tag] : ServerInstance->Config->ConfTags("link"))
 	{
-		ConfigTag* tag = i->second;
-		reference<Link> L = new Link(tag);
-		std::string linkname = tag->getString("name");
-		L->Name = linkname.c_str();
-		L->AllowMask = tag->getString("allowmask");
-		L->IPAddr = tag->getString("ipaddr");
-		L->Port = tag->getInt("port");
+		auto L = std::make_shared<Link>(tag);
+
+		irc::spacesepstream sep = tag->getString("allowmask");
+		for (std::string s; sep.GetToken(s);)
+			L->AllowMasks.push_back(s);
+
+		const std::string path = tag->getString("path");
+		if (path.empty())
+		{
+			L->IPAddr = tag->getString("ipaddr");
+			L->Port = tag->getNum<in_port_t>("port", 0);
+			if (tag->getBool("sctp"))
+			{
+#ifdef IPPROTO_SCTP
+				L->Protocol = IPPROTO_SCTP;
+#else
+				throw ModuleException((Module*)Creator, "Unable to use SCTP for outgoing connections as this platform does not support SCTP!");
+#endif
+			}
+		}
+		else
+		{
+			L->IPAddr = ServerInstance->Config->Paths.PrependData(path);
+			L->Port = 0;
+		}
+
+		L->Name = tag->getString("name");
 		L->SendPass = tag->getString("sendpass", tag->getString("password"));
 		L->RecvPass = tag->getString("recvpass", tag->getString("password"));
 		L->Fingerprint = tag->getString("fingerprint");
 		L->HiddenFromStats = tag->getBool("statshidden");
-		L->Timeout = tag->getInt("timeout", 30);
-		L->Hook = tag->getString("ssl");
+		L->Timeout = tag->getDuration("timeout", 30);
+		L->Hook = tag->getString("sslprofile");
 		L->Bind = tag->getString("bind");
 		L->Hidden = tag->getBool("hidden");
 
 		if (L->Name.empty())
-			throw ModuleException("Invalid configuration, found a link tag without a name!" + (!L->IPAddr.empty() ? " IP address: "+L->IPAddr : ""));
+			throw ModuleException((Module*)Creator, "Invalid configuration, found a link tag without a name!" + (!L->IPAddr.empty() ? " IP address: "+L->IPAddr : ""));
 
 		if (L->Name.find('.') == std::string::npos)
-			throw ModuleException("The link name '"+assign(L->Name)+"' is invalid as it must contain at least one '.' character");
+			throw ModuleException((Module*)Creator, "The link name '"+L->Name+"' is invalid as it must contain at least one '.' character");
 
-		if (L->Name.length() > 64)
-			throw ModuleException("The link name '"+assign(L->Name)+"' is invalid as it is longer than 64 characters");
+		if (L->Name.length() > ServerInstance->Config->Limits.MaxHost)
+			throw ModuleException((Module*)Creator, "The link name '"+L->Name+"' is invalid as it is longer than " + ConvToStr(ServerInstance->Config->Limits.MaxHost) + " characters");
 
 		if (L->RecvPass.empty())
-			throw ModuleException("Invalid configuration for server '"+assign(L->Name)+"', recvpass not defined");
+			throw ModuleException((Module*)Creator, "Invalid configuration for server '"+L->Name+"', recvpass not defined");
 
 		if (L->SendPass.empty())
-			throw ModuleException("Invalid configuration for server '"+assign(L->Name)+"', sendpass not defined");
+			throw ModuleException((Module*)Creator, "Invalid configuration for server '"+L->Name+"', sendpass not defined");
 
 		if ((L->SendPass.find(' ') != std::string::npos) || (L->RecvPass.find(' ') != std::string::npos))
-			throw ModuleException("Link block '" + assign(L->Name) + "' has a password set that contains a space character which is invalid");
+			throw ModuleException((Module*)Creator, "Link block '" + L->Name + "' has a password set that contains a space character which is invalid");
 
 		if ((L->SendPass[0] == ':') || (L->RecvPass[0] == ':'))
-			throw ModuleException("Link block '" + assign(L->Name) + "' has a password set that begins with a colon (:) which is invalid");
+			throw ModuleException((Module*)Creator, "Link block '" + L->Name + "' has a password set that begins with a colon (:) which is invalid");
 
 		if (L->IPAddr.empty())
 		{
 			L->IPAddr = "*";
-			ServerInstance->Logs->Log("m_spanningtree",DEFAULT,"Configuration warning: Link block '" + assign(L->Name) + "' has no IP defined! This will allow any IP to connect as this server, and MAY not be what you want.");
+			ServerInstance->Logs.Warning(MODNAME, "Configuration warning: Link block '" + L->Name + "' has no IP defined! This will allow any IP to connect as this server, and MAY not be what you want.");
 		}
 
-		if (!L->Port)
-			ServerInstance->Logs->Log("m_spanningtree",DEFAULT,"Configuration warning: Link block '" + assign(L->Name) + "' has no port defined, you will not be able to /connect it.");
+		if (!L->Port && L->IPAddr.find('/') == std::string::npos)
+			ServerInstance->Logs.Warning(MODNAME, "Configuration warning: Link block '" + L->Name + "' has no port defined, you will not be able to /connect it.");
 
+		std::transform(L->Fingerprint.begin(), L->Fingerprint.end(), L->Fingerprint.begin(), ::tolower);
 		L->Fingerprint.erase(std::remove(L->Fingerprint.begin(), L->Fingerprint.end(), ':'), L->Fingerprint.end());
+
 		LinkBlocks.push_back(L);
 	}
 
-	tags = ServerInstance->Config->ConfTags("autoconnect");
-	for(ConfigIter i = tags.first; i != tags.second; ++i)
+	for (const auto& [_, tag] : ServerInstance->Config->ConfTags("autoconnect"))
 	{
-		ConfigTag* tag = i->second;
-		reference<Autoconnect> A = new Autoconnect(tag);
-		A->Period = tag->getInt("period");
+		auto A = std::make_shared<Autoconnect>(tag);
+		A->Period = tag->getDuration("period", 60, 1);
 		A->NextConnectTime = ServerInstance->Time() + A->Period;
 		A->position = -1;
 		irc::spacesepstream ss(tag->getString("server"));
@@ -400,44 +343,86 @@ void SpanningTreeUtilities::ReadConfiguration()
 			A->servers.push_back(server);
 		}
 
-		if (A->Period <= 0)
-		{
-			throw ModuleException("Invalid configuration for autoconnect, period not a positive integer!");
-		}
-
 		if (A->servers.empty())
 		{
-			throw ModuleException("Invalid configuration for autoconnect, server cannot be empty!");
+			throw ModuleException((Module*)Creator, "Invalid configuration for autoconnect, server cannot be empty!");
 		}
 
 		AutoconnectBlocks.push_back(A);
 	}
 
+	for (const auto& [_, server] : serverlist)
+		server->CheckService();
+
 	RefreshIPCache();
 }
 
-Link* SpanningTreeUtilities::FindLink(const std::string& name)
+std::shared_ptr<Link> SpanningTreeUtilities::FindLink(const std::string& name)
 {
-	for (std::vector<reference<Link> >::iterator i = LinkBlocks.begin(); i != LinkBlocks.end(); ++i)
+	for (const auto& x : LinkBlocks)
 	{
-		Link* x = *i;
-		if (InspIRCd::Match(x->Name.c_str(), name.c_str(), rfc_case_insensitive_map))
+		if (InspIRCd::Match(x->Name, name, ascii_case_insensitive_map))
 		{
 			return x;
 		}
 	}
-	return NULL;
+	return nullptr;
 }
 
-void SpanningTreeUtilities::Rehash()
+void SpanningTreeUtilities::SendChannelMessage(const User* source, const Channel* target, const std::string& text, char status, const ClientProtocol::TagMap& tags, const CUList& exempt_list, const char* message_type, const TreeSocket* omit) const
 {
-	server_hash temp;
-	for (server_hash::const_iterator i = serverlist.begin(); i != serverlist.end(); ++i)
-		temp.insert(std::make_pair(i->first, i->second));
-	serverlist.swap(temp);
-	temp.clear();
+	CmdBuilder msg(source, message_type);
+	msg.push_tags(tags);
+	msg.push_raw(' ');
+	if (status != 0)
+		msg.push_raw(status);
+	msg.push_raw(target->name);
+	if (!text.empty())
+		msg.push_last(text);
 
-	for (server_hash::const_iterator i = sidlist.begin(); i != sidlist.end(); ++i)
-		temp.insert(std::make_pair(i->first, i->second));
-	sidlist.swap(temp);
+	TreeSocketSet list;
+	this->GetListOfServersForChannel(target, list, status, exempt_list);
+
+	for (auto* Sock : list)
+	{
+		if (Sock != omit)
+			Sock->WriteLine(msg);
+	}
+}
+
+std::string SpanningTreeUtilities::BuildLinkString(uint16_t proto, Module* mod)
+{
+	Module::LinkData data;
+	std::string compatdata;
+	mod->GetLinkData(data, compatdata);
+
+	if (proto <= PROTO_INSPIRCD_3)
+		return compatdata;
+
+	std::stringstream buffer;
+	for (Module::LinkData::const_iterator iter = data.begin(); iter != data.end(); ++iter)
+	{
+		if (iter != data.begin())
+			buffer << '&';
+
+		buffer << iter->first << '=' << Percent::Encode(iter->second);
+	}
+	return buffer.str();
+}
+
+void SpanningTreeUtilities::SendListLimits(Channel* chan, TreeSocket* sock)
+{
+	std::stringstream buffer;
+	for (auto* lm : ServerInstance->Modes.GetListModes())
+		buffer << lm->GetModeChar() << " " << lm->GetLimit(chan) << " ";
+
+	std::string bufferstr = buffer.str();
+	if (bufferstr.empty())
+		return; // Should never happen.
+
+	bufferstr.pop_back();
+	if (sock)
+		sock->WriteLine(CommandMetadata::Builder(chan, "maxlist", bufferstr));
+	else
+		CommandMetadata::Builder(chan, "maxlist", bufferstr).Broadcast();
 }

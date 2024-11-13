@@ -1,10 +1,13 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
- *   Copyright (C) 2010 Daniel De Graaf <danieldg@inspircd.org>
+ *   Copyright (C) 2013, 2017, 2020-2021, 2023-2024 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2013 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
+ *   Copyright (C) 2009-2010 Daniel De Graaf <danieldg@inspircd.org>
  *   Copyright (C) 2008 Robin Burchell <robin+git@viroteck.net>
  *   Copyright (C) 2007 Dennis Friis <peavey@inspircd.org>
- *   Copyright (C) 2006 Craig Edwards <craigedwards@brainbox.cc>
+ *   Copyright (C) 2006 Craig Edwards <brain@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -20,42 +23,59 @@
  */
 
 
-#ifndef SNOMASKS_H
-#define SNOMASKS_H
+#pragma once
 
-class Snomask
+class SnomaskManager;
+class Snomask final
 {
- public:
+	/** Description of this snomask, e.g.: OPER, ANNOUNCEMENT, XLINE
+	 */
 	std::string Description;
+
+	/** Information about the last sent message,
+	 * used for sending "last message repeated X times" messages
+	 */
 	std::string LastMessage;
-	int Count;
-	bool LastBlocked;
 	char LastLetter;
+	unsigned int Count = 0;
 
-	/** Create a new Snomask
+	/** Log and send a message to all opers who have the given snomask set
+	 * @param letter The target users of this message
+	 * @param desc The description of this snomask, will be prepended to the message
+	 * @param msg The message to send
 	 */
-	Snomask() : Count(0), LastBlocked(false), LastLetter(0)
-	{
-	}
+	static void Send(char letter, const std::string& desc, const std::string& msg);
 
+public:
 	/** Sends a message to all opers with this snomask.
+	 * @param message The message to send
+	 * @param letter The snomask character to send the message to.
 	 */
-	void SendMessage(const std::string &message, char letter);
+	void SendMessage(const std::string& message, char letter);
 
 	/** Sends out the (last message repeated N times) message
 	 */
 	void Flush();
+
+	/** Returns the description of this snomask
+	 * @param letter The letter of this snomask. If uppercase, the description of the remote
+	 * variant of this snomask will be returned (i.e.: "REMOTE" will be prepended to the description).
+	 * @return The description of this snomask
+	 */
+	std::string GetDescription(char letter) const;
+
+	friend class SnomaskManager;
 };
 
 /** Snomask manager handles routing of SNOMASK (usermode +s) messages to opers.
  * Modules and the core can enable and disable snomask characters. If they do,
  * then sending snomasks using these characters becomes possible.
  */
-class CoreExport SnomaskManager
+class CoreExport SnomaskManager final
 {
- public:
 	Snomask	masks[26];
 
+public:
 	/** Create a new SnomaskManager
 	 */
 	SnomaskManager();
@@ -67,34 +87,41 @@ class CoreExport SnomaskManager
 	 * @param description The descriptive text sent along with any
 	 * server notices, at the start of the notice, e.g. "GLOBOPS".
 	 */
-	void EnableSnomask(char letter, const std::string &description);
+	void EnableSnomask(char letter, const std::string& description);
 
 	/** Write to all users with a given snomask (local server only)
 	 * @param letter The snomask letter to write to
 	 * @param text The text to send to the users
 	 */
-	void WriteToSnoMask(char letter, const std::string &text);
+	void WriteToSnoMask(char letter, const std::string& text);
 
 	/** Write to all users with a given snomask (local server only)
 	 * @param letter The snomask letter to write to
 	 * @param text A format string containing text to send
-	 * @param ... Format arguments
+	 * @param args Format arguments
 	 */
-	void WriteToSnoMask(char letter, const char* text, ...) CUSTOM_PRINTF(3, 4);
+	template <typename... Args>
+	void WriteToSnoMask(char letter, const char* text, Args&&... args)
+	{
+		WriteToSnoMask(letter, fmt::vformat(text, fmt::make_format_args(args...)));
+	}
 
 	/** Write to all users with a given snomask (sent globally)
 	 * @param letter The snomask letter to write to
 	 * @param text The text to send to the users
 	 */
-	void WriteGlobalSno(char letter, const std::string &text);
+	void WriteGlobalSno(char letter, const std::string& text);
 
 	/** Write to all users with a given snomask (sent globally)
 	 * @param letter The snomask letter to write to
 	 * @param text A format string containing text to send
-	 * @param ... Format arguments
+	 * @param args Format arguments
 	 */
-	void WriteGlobalSno(char letter, const char* text, ...) CUSTOM_PRINTF(3, 4);
-
+	template <typename... Args>
+	void WriteGlobalSno(char letter, const char* text, Args&&... args)
+	{
+		WriteGlobalSno(letter, fmt::vformat(text, fmt::make_format_args(args...)));
+	}
 
 	/** Called once per 5 seconds from the mainloop, this flushes any cached
 	 * snotices. The way the caching works is as follows:
@@ -105,6 +132,18 @@ class CoreExport SnomaskManager
 	 * is not particularly significant, in order to keep notices going out.
 	 */
 	void FlushSnotices();
-};
 
-#endif
+	/** Check whether a given character is a valid snomask.
+	 * @param ch The character to check
+	 * @return True if the given char is allowed to be set via +s.
+	 */
+	static bool IsSnomask(char ch);
+
+	/** Check whether a given character is an enabled (initialized) snomask.
+	 * Valid snomask chars are lower- or uppercase letters and have a description.
+	 * Snomasks are initialized with EnableSnomask().
+	 * @param ch The character to check
+	 * @return True if the given char is allowed to be set via +s.
+	 */
+	bool IsSnomaskUsable(char ch) const;
+};

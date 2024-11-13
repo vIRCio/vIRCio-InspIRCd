@@ -1,8 +1,16 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
- *   Copyright (C) 2007 Dennis Friis <peavey@inspircd.org>
+ *   Copyright (C) 2019-2023 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2017 B00mX0r <b00mx0r@aureus.pw>
+ *   Copyright (C) 2012-2014, 2016 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
+ *   Copyright (C) 2010 Craig Edwards <brain@inspircd.org>
+ *   Copyright (C) 2009 Uli Schlachter <psychon@znc.in>
+ *   Copyright (C) 2009 Daniel De Graaf <danieldg@inspircd.org>
+ *   Copyright (C) 2007-2008 Dennis Friis <peavey@inspircd.org>
  *   Copyright (C) 2007 Robin Burchell <robin+git@viroteck.net>
+ *   Copyright (C) 2007 John Brooks <john@jbrooks.io>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -19,24 +27,23 @@
 
 
 #include "inspircd.h"
+#include "numerichelper.h"
 
-/* $ModDesc: Provides command CYCLE, acts as a server-side HOP command to part and rejoin a channel. */
-
-/** Handle /CYCLE
- */
-class CommandCycle : public Command
+class CommandCycle final
+	: public SplitCommand
 {
- public:
-	CommandCycle(Module* Creator) : Command(Creator,"CYCLE", 1)
+public:
+	CommandCycle(Module* Creator)
+		: SplitCommand(Creator, "CYCLE", 1)
 	{
-		Penalty = 3; syntax = "<channel> :[reason]";
-		TRANSLATE3(TR_TEXT, TR_TEXT, TR_END);
+		penalty = 3000;
+		syntax = { "<channel> [:<reason>]" };
 	}
 
-	CmdResult Handle (const std::vector<std::string> &parameters, User *user)
+	CmdResult HandleLocal(LocalUser* user, const Params& parameters) override
 	{
-		Channel* channel = ServerInstance->FindChan(parameters[0]);
-		std::string reason = ConvToStr("Cycling");
+		auto* channel = ServerInstance->Channels.Find(parameters[0]);
+		std::string reason = "Cycling";
 
 		if (parameters.size() > 1)
 		{
@@ -46,64 +53,45 @@ class CommandCycle : public Command
 
 		if (!channel)
 		{
-			user->WriteNumeric(403, "%s %s :No such channel", user->nick.c_str(), parameters[0].c_str());
-			return CMD_FAILURE;
+			user->WriteNumeric(Numerics::NoSuchChannel(parameters[0]));
+			return CmdResult::FAILURE;
 		}
 
 		if (channel->HasUser(user))
 		{
-			/*
-			 * technically, this is only ever sent locally, but pays to be safe ;p
-			 */
-			if (IS_LOCAL(user))
+			if (channel->GetPrefixValue(user) < VOICE_VALUE && channel->IsBanned(user))
 			{
-				if (channel->GetPrefixValue(user) < VOICE_VALUE && channel->IsBanned(user))
-				{
-					/* banned, boned. drop the message. */
-					user->WriteServ("NOTICE "+user->nick+" :*** You may not cycle, as you are banned on channel " + channel->name);
-					return CMD_FAILURE;
-				}
-
-				channel->PartUser(user, reason);
-
-				Channel::JoinUser(user, parameters[0].c_str(), true, "", false, ServerInstance->Time());
+				// User is banned, send an error and don't cycle them
+				user->WriteNumeric(ERR_BANNEDFROMCHAN, channel->name, "You may not cycle, as you are banned on channel " + channel->name);
+				return CmdResult::FAILURE;
 			}
 
-			return CMD_SUCCESS;
+			channel->PartUser(user, reason);
+			Channel::JoinUser(user, parameters[0], true);
+
+			return CmdResult::SUCCESS;
 		}
 		else
 		{
-			user->WriteNumeric(442, "%s %s :You're not on that channel", user->nick.c_str(), channel->name.c_str());
+			user->WriteNumeric(ERR_NOTONCHANNEL, channel->name, "You're not on that channel");
 		}
 
-		return CMD_FAILURE;
+		return CmdResult::FAILURE;
 	}
 };
 
-
-class ModuleCycle : public Module
+class ModuleCycle final
+	: public Module
 {
+private:
 	CommandCycle cmd;
- public:
+
+public:
 	ModuleCycle()
-		: cmd(this)
+		: Module(VF_VENDOR, "Allows channel members to part and rejoin a channel without needing to worry about channel modes such as +i (inviteonly) which might prevent rejoining.")
+		, cmd(this)
 	{
 	}
-
-	void init()
-	{
-		ServerInstance->Modules->AddService(cmd);
-	}
-
-	virtual ~ModuleCycle()
-	{
-	}
-
-	virtual Version GetVersion()
-	{
-		return Version("Provides command CYCLE, acts as a server-side HOP command to part and rejoin a channel.", VF_VENDOR);
-	}
-
 };
 
 MODULE_INIT(ModuleCycle)

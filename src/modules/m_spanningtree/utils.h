@@ -1,10 +1,14 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
+ *   Copyright (C) 2021 Dominic Hamon
+ *   Copyright (C) 2013, 2017-2018, 2020-2023 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2012-2013, 2015-2016 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
  *   Copyright (C) 2009 Daniel De Graaf <danieldg@inspircd.org>
  *   Copyright (C) 2008 Robin Burchell <robin+git@viroteck.net>
- *   Copyright (C) 2007 Dennis Friis <peavey@inspircd.org>
- *   Copyright (C) 2007 Craig Edwards <craigedwards@brainbox.cc>
+ *   Copyright (C) 2007-2008 Dennis Friis <peavey@inspircd.org>
+ *   Copyright (C) 2007 Craig Edwards <brain@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -20,37 +24,36 @@
  */
 
 
-#ifndef M_SPANNINGTREE_UTILS_H
-#define M_SPANNINGTREE_UTILS_H
+#pragma once
 
 #include "inspircd.h"
+#include "cachetimer.h"
 
-/* Foward declarations */
 class TreeServer;
 class TreeSocket;
 class Link;
 class Autoconnect;
 class ModuleSpanningTree;
 class SpanningTreeUtilities;
+class CmdBuilder;
 
-/* This hash_map holds the hash equivalent of the server
- * tree, used for rapid linear lookups.
+extern SpanningTreeUtilities* Utils;
+
+/** Associative container type, mapping server names/ids to TreeServers
  */
-#ifdef HASHMAP_DEPRECATED
-	typedef nspace::hash_map<std::string, TreeServer*, nspace::insensitive, irc::StrHashComp> server_hash;
-#else
-	typedef nspace::hash_map<std::string, TreeServer*, nspace::hash<std::string>, irc::StrHashComp> server_hash;
-#endif
-
-typedef std::map<TreeServer*,TreeServer*> TreeServerList;
+typedef std::unordered_map<std::string, TreeServer*, irc::insensitive, irc::StrHashComp> server_hash;
 
 /** Contains helper functions and variables for this module,
  * and keeps them out of the global namespace
  */
-class SpanningTreeUtilities : public classbase
+class SpanningTreeUtilities final
+	: public Cullable
 {
- public:
-	typedef std::map<TreeSocket*, std::pair<std::string, int> > TimeoutList;
+	CacheRefreshTimer RefreshTimer;
+
+public:
+	typedef std::set<TreeSocket*> TreeSocketSet;
+	typedef std::map<TreeSocket*, std::pair<std::string, unsigned int>> TimeoutList;
 
 	/** Creator module
 	 */
@@ -59,9 +62,14 @@ class SpanningTreeUtilities : public classbase
 	/** Flatten links and /MAP for non-opers
 	 */
 	bool FlatLinks;
+
+	/** True if we're going to hide netsplits as *.net *.split for non-opers
+	 */
+	bool HideSplits;
+
 	/** Hide U-Lined servers in /MAP and /LINKS
 	 */
-	bool HideULines;
+	bool HideServices;
 	/** Announce TS changes to channels on merge
 	 */
 	bool AnnounceTSChange;
@@ -77,10 +85,10 @@ class SpanningTreeUtilities : public classbase
 	/* Number of seconds that a server can go without ping
 	 * before opers are warned of high latency.
 	 */
-	int PingWarnTime;
+	unsigned long PingWarnTime;
 	/** This variable represents the root of the server tree
 	 */
-	TreeServer *TreeRoot;
+	TreeServer* TreeRoot = nullptr;
 	/** IPs allowed to link to us
 	 */
 	std::vector<std::string> ValidIPs;
@@ -95,22 +103,14 @@ class SpanningTreeUtilities : public classbase
 	TimeoutList timeoutlist;
 	/** Holds the data from the <link> tags in the conf
 	 */
-	std::vector<reference<Link> > LinkBlocks;
+	std::vector<std::shared_ptr<Link>> LinkBlocks;
 	/** Holds the data from the <autoconnect> tags in the conf
 	 */
-	std::vector<reference<Autoconnect> > AutoconnectBlocks;
-
-	/** True (default) if we are to use challenge-response HMAC
-	 * to authenticate passwords.
-	 *
-	 * NOTE: This defaults to on, but should be turned off if
-	 * you are linking to an older version of inspircd.
-	 */
-	bool ChallengeResponse;
+	std::vector<std::shared_ptr<Autoconnect>> AutoconnectBlocks;
 
 	/** Ping frequency of server to server links
 	 */
-	int PingFreq;
+	unsigned long PingFreq = 60;
 
 	/** Initialise utility class
 	 */
@@ -118,66 +118,67 @@ class SpanningTreeUtilities : public classbase
 
 	/** Prepare for class destruction
 	 */
-	CullResult cull();
+	Cullable::Result Cull() override;
 
 	/** Destroy class and free listeners etc
 	 */
-	~SpanningTreeUtilities();
+	~SpanningTreeUtilities() override;
 
-	void RouteCommand(TreeServer*, const std::string&, const parameterlist&, User*);
+	void RouteCommand(TreeServer* origin, CommandBase* cmd, const CommandBase::Params& parameters, User* user);
 
 	/** Send a message from this server to one other local or remote
 	 */
-	bool DoOneToOne(const std::string &prefix, const std::string &command, const parameterlist &params, const std::string& target);
+	static void DoOneToOne(const CmdBuilder& params, const Server* target);
 
 	/** Send a message from this server to all but one other, local or remote
 	 */
-	bool DoOneToAllButSender(const std::string &prefix, const std::string &command, const parameterlist &params, const std::string& omit);
-
-	/** Send a message from this server to all others
-	 */
-	bool DoOneToMany(const std::string &prefix, const std::string &command, const parameterlist &params);
+	void DoOneToAllButSender(const CmdBuilder& params, const TreeServer* omit) const;
 
 	/** Read the spanningtree module's tags from the config file
 	 */
 	void ReadConfiguration();
 
-	/** Add a server to the server list for GetListOfServersForChannel
+	/** Handle nick collision
 	 */
-	void AddThisServer(TreeServer* server, TreeServerList &list);
+	static bool DoCollision(User* u, TreeServer* server, time_t remotets, const std::string& remoteuser, const std::string& remoteip, const std::string& remoteuid, const char* collidecmd);
 
 	/** Compile a list of servers which contain members of channel c
 	 */
-	void GetListOfServersForChannel(Channel* c, TreeServerList &list, char status, const CUList &exempt_list);
+	void GetListOfServersForChannel(const Channel* c, TreeSocketSet& list, char status, const CUList& exempt_list) const;
 
-	/** Find a server by name
+	/** Find a server by name or SID
 	 */
-	TreeServer* FindServer(const std::string &ServerName);
+	TreeServer* FindServer(const std::string& ServerName);
 
 	/** Find server by SID
 	 */
-	TreeServer* FindServerID(const std::string &id);
+	TreeServer* FindServerID(const std::string& id);
 
-	/** Find a route to a server by name
+	/** Find a server based on a target string.
+	 * @param target Target string where a command should be routed to. May be a server name, a sid, a nickname or a uuid.
 	 */
-	TreeServer* BestRouteTo(const std::string &ServerName);
+	TreeServer* FindRouteTarget(const std::string& target);
 
 	/** Find a server by glob mask
 	 */
-	TreeServer* FindServerMask(const std::string &ServerName);
+	TreeServer* FindServerMask(const std::string& ServerName);
 
 	/** Find a link tag from a server name
 	 */
-	Link* FindLink(const std::string& name);
+	std::shared_ptr<Link> FindLink(const std::string& name);
 
 	/** Refresh the IP cache used for allowing inbound connections
 	 */
 	void RefreshIPCache();
 
-	/** Recreate serverlist and sidlist, this is needed because of m_nationalchars changing
-	 * national_case_insensitive_map which is used by the hash function
+	/** Sends a PRIVMSG or a NOTICE to a channel obeying an exempt list and an optional prefix
 	 */
-	void Rehash();
+	void SendChannelMessage(const User* source, const Channel* target, const std::string& text, char status, const ClientProtocol::TagMap& tags, const CUList& exempt_list, const char* message_type, const TreeSocket* omit = nullptr) const;
+
+	// Builds link data to be sent to another server.
+	static std::string BuildLinkString(uint16_t protocol, Module* mod);
+
+	/** Send the channel list mode limits to either the specified server or all servers if nullptr. */
+	static void SendListLimits(Channel* chan, TreeSocket* sock = nullptr);
 };
 
-#endif

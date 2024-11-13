@@ -1,6 +1,10 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
+ *   Copyright (C) 2018 linuxdaemon <linuxdaemon.irc@gmail.com>
+ *   Copyright (C) 2013-2014, 2016-2024 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2012-2014 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
  *   Copyright (C) 2009-2010 Daniel De Graaf <danieldg@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
@@ -17,24 +21,57 @@
  */
 
 
-#include "inspircd.h"
+#include <cinttypes>
+#include <filesystem>
 #include <fstream>
-#include "configparser.h"
 
-struct Parser
+#include "inspircd.h"
+#include "configparser.h"
+#include "timeutils.h"
+#include "utility/string.h"
+
+#ifdef _WIN32
+# define pclose _pclose
+# define popen _popen
+#else
+# include <unistd.h>
+#endif
+
+enum ParseFlags
+{
+	// Executable includes are disabled.
+	FLAG_NO_EXEC = 2,
+
+	// All includes are disabled.
+	FLAG_NO_INC = 4,
+
+	// &env.FOO; is disabled.
+	FLAG_NO_ENV = 8,
+
+	// It's okay if an include doesn't exist.
+	FLAG_MISSING_OKAY = 16
+};
+
+struct Parser final
 {
 	ParseStack& stack;
 	int flags;
-	FILE* const file;
-	fpos current;
-	fpos last_tag;
-	reference<ConfigTag> tag;
-	int ungot;
+	FilePtr file;
+	FilePosition current;
+	FilePosition last_tag;
+	std::shared_ptr<ConfigTag> tag;
+	int ungot = -1;
 	std::string mandatory_tag;
 
-	Parser(ParseStack& me, int myflags, FILE* conf, const std::string& name, const std::string& mandatorytag)
-		: stack(me), flags(myflags), file(conf), current(name), last_tag(name), ungot(-1), mandatory_tag(mandatorytag)
-	{ }
+	Parser(ParseStack& me, int myflags, FilePtr conf, const std::string& name, const std::string& mandatorytag)
+		: stack(me)
+		, flags(myflags)
+		, file(std::move(conf))
+		, current(name, 1, 0)
+		, last_tag(name, 0, 0)
+		, mandatory_tag(mandatorytag)
+	{
+	}
 
 	int next(bool eof_ok = false)
 	{
@@ -44,7 +81,7 @@ struct Parser
 			ungot = -1;
 			return ch;
 		}
-		int ch = fgetc(file);
+		int ch = fgetc(file.get());
 		if (ch == EOF && !eof_ok)
 		{
 			throw CoreException("Unexpected end-of-file");
@@ -52,11 +89,11 @@ struct Parser
 		else if (ch == '\n')
 		{
 			current.line++;
-			current.col = 0;
+			current.column = 1;
 		}
 		else
 		{
-			current.col++;
+			current.column++;
 		}
 		return ch;
 	}
@@ -70,12 +107,26 @@ struct Parser
 
 	void comment()
 	{
-		while (1)
+		while (true)
 		{
-			int ch = next();
+			int ch = next(true);
 			if (ch == '\n')
 				return;
+
+			if (ch == EOF)
+			{
+				unget(ch);
+				return;
+			}
 		}
+	}
+
+	static bool wordchar(int ch)
+	{
+		return isalnum(ch)
+			|| ch == '-'
+			|| ch == '.'
+			|| ch == '_';
 	}
 
 	void nextword(std::string& rv)
@@ -83,7 +134,7 @@ struct Parser
 		int ch = next();
 		while (isspace(ch))
 			ch = next();
-		while (isalnum(ch) || ch == '_'|| ch == '-')
+		while (wordchar(ch))
 		{
 			rv.push_back(ch);
 			ch = next();
@@ -91,7 +142,7 @@ struct Parser
 		unget(ch);
 	}
 
-	bool kv(std::vector<KeyVal>* items, std::set<std::string>& seen)
+	bool kv()
 	{
 		std::string key;
 		nextword(key);
@@ -114,53 +165,72 @@ struct Parser
 		ch = next();
 		if (ch != '"')
 		{
-			throw CoreException("Invalid character in value of <" + tag->tag + ":" + key + ">");
+			throw CoreException("Invalid character in value of <" + tag->name + ":" + key + ">");
 		}
-		while (1)
+		while (true)
 		{
 			ch = next();
-			if (ch == '&' && (flags & FLAG_USE_XML))
+			if (ch == '&')
 			{
 				std::string varname;
-				while (1)
+				while (true)
 				{
 					ch = next();
-					if (isalnum(ch))
+					if (wordchar(ch) || (varname.empty() && ch == '#'))
 						varname.push_back(ch);
 					else if (ch == ';')
 						break;
 					else
 					{
-						stack.errstr << "Invalid XML entity name in value of <" + tag->tag + ":" + key + ">\n"
+						stack.errstr << "Invalid XML entity name in value of <" + tag->name + ":" + key + ">\n"
 							<< "To include an ampersand or quote, use &amp; or &quot;\n";
 						throw CoreException("Parse error");
 					}
 				}
-				std::map<std::string, std::string>::iterator var = stack.vars.find(varname);
-				if (var == stack.vars.end())
-					throw CoreException("Undefined XML entity reference '&" + varname + ";'");
-				value.append(var->second);
-			}
-			else if (ch == '\\' && !(flags & FLAG_USE_XML))
-			{
-				int esc = next();
-				if (esc == 'n')
-					value.push_back('\n');
-				else if (isalpha(esc))
-					throw CoreException("Unknown escape character \\" + std::string(1, esc));
+				if (varname.empty())
+					throw CoreException("Empty XML entity reference");
+				else if (varname[0] == '#' && (varname.size() == 1 || (varname.size() == 2 && varname[1] == 'x')))
+					throw CoreException("Empty numeric character reference");
+				else if (varname[0] == '#')
+				{
+					const char* cvarname = varname.c_str();
+					char* endptr;
+					unsigned long lvalue;
+					if (cvarname[1] == 'x')
+						lvalue = strtoul(cvarname + 2, &endptr, 16);
+					else
+						lvalue = strtoul(cvarname + 1, &endptr, 10);
+					if (*endptr != '\0' || lvalue > 255)
+						throw CoreException("Invalid numeric character reference '&" + varname + ";'");
+					value.push_back(static_cast<char>(lvalue));
+				}
+				else if (varname.compare(0, 4, "env.") == 0)
+				{
+					if (flags & FLAG_NO_ENV)
+						throw CoreException("XML environment entity reference in file included with noenv=\"yes\"");
+
+					const char* envstr = getenv(varname.c_str() + 4);
+					if (!envstr)
+						throw CoreException("Undefined XML environment entity reference '&" + varname + ";'");
+
+					value.append(envstr);
+				}
 				else
-					value.push_back(esc);
+				{
+					insp::flat_map<std::string, std::string>::iterator var = stack.vars.find(varname);
+					if (var == stack.vars.end())
+						throw CoreException("Undefined XML entity reference '&" + varname + ";'");
+					value.append(var->second);
+				}
 			}
 			else if (ch == '"')
 				break;
-			else
+			else if (ch != '\r')
 				value.push_back(ch);
 		}
 
-		if (!seen.insert(key).second)
+		if (!tag->GetItems().insert({key, value}).second)
 			throw CoreException("Duplicate key '" + key + "' found");
-
-		items->push_back(KeyVal(key, value));
 		return true;
 	}
 
@@ -179,11 +249,11 @@ struct Parser
 		if (name.empty())
 			throw CoreException("Empty tag name");
 
-		std::vector<KeyVal>* items;
-		std::set<std::string> seen;
-		tag = ConfigTag::create(name, current.filename, current.line, items);
-
-		while (kv(items, seen));
+		tag = std::make_shared<ConfigTag>(name, last_tag);
+		while (kv())
+		{
+			// Do nothing here (silences a GCC warning).
+		}
 
 		if (name == mandatory_tag)
 		{
@@ -191,57 +261,42 @@ struct Parser
 			mandatory_tag.clear();
 		}
 
-		if (name == "include")
+		if (insp::equalsci(name, "include"))
 		{
 			stack.DoInclude(tag, flags);
 		}
-		else if (name == "files")
+		else if (insp::equalsci(name, "files"))
 		{
-			for(std::vector<KeyVal>::iterator i = items->begin(); i != items->end(); i++)
-			{
-				stack.DoReadFile(i->first, i->second, flags, false);
-			}
+			for (const auto& [key, value] : tag->GetItems())
+				stack.DoReadFile(key, value, flags, false);
 		}
-		else if (name == "execfiles")
+		else if (insp::equalsci(name, "execfiles"))
 		{
-			for(std::vector<KeyVal>::iterator i = items->begin(); i != items->end(); i++)
-			{
-				stack.DoReadFile(i->first, i->second, flags, true);
-			}
+			for (const auto& [key, value] : tag->GetItems())
+				stack.DoReadFile(key, value, flags, true);
 		}
-		else if (name == "define")
+		else if (insp::equalsci(name, "define"))
 		{
-			if (!(flags & FLAG_USE_XML))
-				throw CoreException("<define> tags may only be used in XML-style config (add <config format=\"xml\">)");
-			std::string varname = tag->getString("name");
-			std::string value = tag->getString("value");
+			const std::string varname = tag->getString("name");
 			if (varname.empty())
-				throw CoreException("Variable definition must include variable name");
-			stack.vars[varname] = value;
-		}
-		else if (name == "config")
-		{
-			std::string format = tag->getString("format");
-			if (format == "xml")
-				flags |= FLAG_USE_XML;
-			else if (format == "compat")
-				flags &= ~FLAG_USE_XML;
-			else if (!format.empty())
-				throw CoreException("Unknown configuration format " + format);
+				throw CoreException("Variable definition must include a variable name, at " + tag->source.str());
+
+			if (stack.vars.find(varname) == stack.vars.end() || tag->getBool("replace", true))
+				stack.vars[varname] = tag->getString("value");
 		}
 		else
 		{
-			stack.output.insert(std::make_pair(name, tag));
+			stack.output.emplace(name, tag);
 		}
-		// this is not a leak; reference<> takes care of the delete
-		tag = NULL;
+		// this is not a leak; shared_ptr takes care of the delete
+		tag = nullptr;
 	}
 
 	bool outer_parse()
 	{
 		try
 		{
-			while (1)
+			while (true)
 			{
 				int ch = next(true);
 				switch (ch)
@@ -264,25 +319,39 @@ struct Parser
 						break;
 					case 0xFE:
 					case 0xFF:
-						stack.errstr << "Do not save your files as UTF-16; use ASCII!\n";
+						stack.errstr << "Do not save your files as UTF-16 or UTF-32, use UTF-8!\n";
+						[[fallthrough]];
 					default:
 						throw CoreException("Syntax error - start of tag expected");
 				}
 			}
 		}
-		catch (CoreException& err)
+		catch (const CoreException& err)
 		{
 			stack.errstr << err.GetReason() << " at " << current.str();
 			if (tag)
-				stack.errstr << " (inside tag " << tag->tag << " at line " << tag->src_line << ")\n";
-			else
-				stack.errstr << " (last tag was on line " << last_tag.line << ")\n";
+				stack.errstr << " (inside <" << tag->name << "> tag on line " << tag->source.line << ")";
+			else if (last_tag.line)
+				stack.errstr << " (last tag was on line " << last_tag.line << ")";
+			stack.errstr << '\n';
 		}
 		return false;
 	}
 };
 
-void ParseStack::DoInclude(ConfigTag* tag, int flags)
+FilePosition::FilePosition(const std::string& Name, unsigned long Line, unsigned long Column)
+	: name(Name)
+	, line(Line)
+	, column(Column)
+{
+}
+
+std::string FilePosition::str() const
+{
+	return name + ":" + ConvToStr(line) + ":" + ConvToStr(column);
+}
+
+void ParseStack::DoInclude(const std::shared_ptr<ConfigTag>& tag, int flags)
 {
 	if (flags & FLAG_NO_INC)
 		throw CoreException("Invalid <include> tag in file included with noinclude=\"yes\"");
@@ -295,11 +364,56 @@ void ParseStack::DoInclude(ConfigTag* tag, int flags)
 	{
 		if (tag->getBool("noinclude", false))
 			flags |= FLAG_NO_INC;
+
 		if (tag->getBool("noexec", false))
 			flags |= FLAG_NO_EXEC;
+
+		if (tag->getBool("noenv", false))
+			flags |= FLAG_NO_ENV;
+
+		if (tag->getBool("missingokay", false))
+			flags |= FLAG_MISSING_OKAY;
+		else
+			flags &= ~FLAG_MISSING_OKAY;
+
 		if (!ParseFile(name, flags, mandatorytag))
 			throw CoreException("Included");
 	}
+	else if (tag->readString("directory", name))
+	{
+		if (tag->getBool("noinclude", false))
+			flags |= FLAG_NO_INC;
+		if (tag->getBool("noexec", false))
+			flags |= FLAG_NO_EXEC;
+		if (tag->getBool("noenv", false))
+			flags |= FLAG_NO_ENV;
+
+		const std::string includedir = ServerInstance->Config->Paths.PrependConfig(name);
+		std::set<std::string> configs;
+		try
+		{
+			for (const auto& entry : std::filesystem::directory_iterator(includedir))
+			{
+				if (!entry.is_regular_file())
+					continue;
+
+				const std::string path = entry.path().string();
+				if (InspIRCd::Match(path, "*.conf"))
+					configs.insert(path);
+			}
+		}
+		catch (const std::filesystem::filesystem_error& err)
+		{
+			throw CoreException("Unable to read directory for include " + includedir + ": " + err.what());
+		}
+
+		for (const auto& config : configs)
+		{
+			if (!ParseFile(config, flags, mandatorytag))
+				throw CoreException("Included");
+		}
+	}
+
 	else if (tag->readString("executable", name))
 	{
 		if (flags & FLAG_NO_EXEC)
@@ -308,9 +422,41 @@ void ParseStack::DoInclude(ConfigTag* tag, int flags)
 			flags |= FLAG_NO_INC;
 		if (tag->getBool("noexec", true))
 			flags |= FLAG_NO_EXEC;
-		if (!ParseExec(name, flags, mandatorytag))
+		if (tag->getBool("noenv", true))
+			flags |= FLAG_NO_ENV;
+
+		if (!ParseFile(name, flags, mandatorytag, true))
 			throw CoreException("Included");
 	}
+}
+
+FilePtr ParseStack::DoOpenFile(const std::string& name, bool isexec)
+{
+	if (isexec)
+	{
+		ServerInstance->Logs.Debug("CONFIG", "Opening executable: {}", name);
+		return FilePtr(popen(name.c_str(), "r"), pclose);
+	}
+
+	const std::string path = ServerInstance->Config->Paths.PrependConfig(name);
+	ServerInstance->Logs.Debug("CONFIG", "Opening file: {}", path);
+#ifndef _WIN32
+	struct stat pathinfo;
+	if (stat(path.c_str(), &pathinfo) == 0)
+	{
+		if (getegid() != pathinfo.st_gid)
+		{
+			ServerInstance->Logs.Warning("CONFIG", "Possible configuration error: {} is owned by group {} but the server is running as group {}.",
+				path, pathinfo.st_gid, getegid());
+		}
+		if (geteuid() != pathinfo.st_uid)
+		{
+			ServerInstance->Logs.Warning("CONFIG", "Possible configuration error: {} is owned by user {} but the server is running as user {}.",
+				path, pathinfo.st_uid, geteuid());
+		}
+	}
+#endif
+	return FilePtr(fopen(path.c_str(), "r"), fclose);
 }
 
 void ParseStack::DoReadFile(const std::string& key, const std::string& name, int flags, bool exec)
@@ -320,191 +466,286 @@ void ParseStack::DoReadFile(const std::string& key, const std::string& name, int
 	if (exec && (flags & FLAG_NO_EXEC))
 		throw CoreException("Invalid <execfiles> tag in file included with noexec=\"yes\"");
 
-	FileWrapper file(exec ? popen(name.c_str(), "r") : fopen(name.c_str(), "r"), exec);
-	if (!file)
-		throw CoreException("Could not read \"" + name + "\" for \"" + key + "\" file");
-
-	file_cache& cache = FilesOutput[key];
-	cache.clear();
-
-	char linebuf[MAXBUF*10];
-	while (fgets(linebuf, sizeof(linebuf), file))
+	if (FilesOutput.emplace(key, std::make_pair(name, exec)).second)
 	{
-		size_t len = strlen(linebuf);
-		if (len)
-		{
-			if (linebuf[len-1] == '\n')
-				len--;
-			cache.push_back(std::string(linebuf, len));
-		}
+		ServerInstance->Logs.Debug("CONFIG", "Stored config key: {} => {} (executable: {}).",
+			key, name, exec ? "yes" : "no");
 	}
 }
 
-bool ParseStack::ParseFile(const std::string& name, int flags, const std::string& mandatory_tag)
+ParseStack::ParseStack(ServerConfig* conf)
+	: output(conf->config_data)
+	, FilesOutput(conf->filesources)
+	, errstr(conf->errstr)
 {
-	ServerInstance->Logs->Log("CONFIG", DEBUG, "Reading file %s", name.c_str());
-	for (unsigned int t = 0; t < reading.size(); t++)
-	{
-		if (std::string(name) == reading[t])
-		{
-			throw CoreException("File " + name + " is included recursively (looped inclusion)");
-		}
-	}
+	vars = {
+		// Special character escapes.
+		{ "newline", "\n" },
+		{ "nl",      "\n" },
+
+		// XML escapes.
+		{ "amp",  "&"  },
+		{ "apos", "'"  },
+		{ "gt",   ">"  },
+		{ "lt",   "<"  },
+		{ "quot", "\"" },
+
+		// Directories that were set at build time.
+		{ "dir.config",  INSPIRCD_CONFIG_PATH  },
+		{ "dir.example", INSPIRCD_EXAMPLE_PATH },
+		{ "dir.data",    INSPIRCD_DATA_PATH    },
+		{ "dir.log",     INSPIRCD_LOG_PATH     },
+		{ "dir.module",  INSPIRCD_MODULE_PATH  },
+		{ "dir.runtime", INSPIRCD_RUNTIME_PATH },
+
+		// IRC formatting codes.
+		{ "irc.bold",          "\x02" },
+		{ "irc.color",         "\x03" },
+		{ "irc.colour",        "\x03" },
+		{ "irc.hexcolor",      "\x04" },
+		{ "irc.hexcolour",     "\x04" },
+		{ "irc.italic",        "\x1D" },
+		{ "irc.monospace",     "\x11" },
+		{ "irc.reset",         "\x0F" },
+		{ "irc.reverse",       "\x16" },
+		{ "irc.strikethrough", "\x1E" },
+		{ "irc.underline",     "\x1F" },
+	};
+}
+
+bool ParseStack::ParseFile(const std::string& path, int flags, const std::string& mandatory_tag, bool isexec)
+{
+	if (stdalgo::isin(reading, path))
+		throw CoreException((isexec ? "Executable " : "File ") + path + " is included recursively (looped inclusion)");
 
 	/* It's not already included, add it to the list of files we've loaded */
 
-	FileWrapper file(fopen(name.c_str(), "r"));
+	FilePtr file = DoOpenFile(path, isexec);
 	if (!file)
-		throw CoreException("Could not read \"" + name + "\" for include");
+	{
+		if (flags & FLAG_MISSING_OKAY)
+			return true;
 
-	reading.push_back(name);
-	Parser p(*this, flags, file, name, mandatory_tag);
+		throw CoreException(INSP_FORMAT("Could not read \"{}\" for include: {}", path, strerror(errno)));
+	}
+
+	reading.push_back(path);
+	Parser p(*this, flags, std::move(file), path, mandatory_tag);
 	bool ok = p.outer_parse();
 	reading.pop_back();
 	return ok;
 }
 
-bool ParseStack::ParseExec(const std::string& name, int flags, const std::string& mandatory_tag)
+void ConfigTag::LogMalformed(const std::string& key, const std::string& val, const std::string& def, const std::string& reason) const
 {
-	ServerInstance->Logs->Log("CONFIG", DEBUG, "Reading executable %s", name.c_str());
-	for (unsigned int t = 0; t < reading.size(); t++)
-	{
-		if (std::string(name) == reading[t])
-		{
-			throw CoreException("Executable " + name + " is included recursively (looped inclusion)");
-		}
-	}
-
-	/* It's not already included, add it to the list of files we've loaded */
-
-	FileWrapper file(popen(name.c_str(), "r"), true);
-	if (!file)
-		throw CoreException("Could not open executable \"" + name + "\" for include");
-
-	reading.push_back(name);
-	Parser p(*this, flags, file, name, mandatory_tag);
-	bool ok = p.outer_parse();
-	reading.pop_back();
-	return ok;
+	ServerInstance->Logs.Warning("CONFIG", "The value of <{}:{}> at {} ({}) is {}; using the default ({}) instead.",
+		name, key, source.str(), val, reason, def);
 }
 
-#ifdef __clang__
-# pragma clang diagnostic push
-# pragma clang diagnostic ignored "-Wunknown-pragmas"
-# pragma clang diagnostic ignored "-Wundefined-bool-conversion"
-#elif defined __GNUC__
-# pragma GCC diagnostic push
-# pragma GCC diagnostic ignored "-Wpragmas"
-# pragma GCC diagnostic ignored "-Wnonnull-compare"
-#endif
-bool ConfigTag::readString(const std::string& key, std::string& value, bool allow_lf)
+bool ConfigTag::readString(const std::string& key, std::string& value, bool allow_lf) const
 {
-	// TODO: this is undefined behaviour but changing the API is too risky for 2.0.
-	if (!this)
-		return false;
-	for(std::vector<KeyVal>::iterator j = items.begin(); j != items.end(); ++j)
+	for (const auto& [ikey, ivalue] : items)
 	{
-		if(j->first != key)
+		if (!insp::equalsci(ikey, key))
 			continue;
-		value = j->second;
- 		if (!allow_lf && (value.find('\n') != std::string::npos))
+
+		value = ivalue;
+		if (!allow_lf && (value.find('\n') != std::string::npos))
 		{
-			ServerInstance->Logs->Log("CONFIG",DEFAULT, "Value of <" + tag + ":" + key + "> at " + getTagLocation() +
+			ServerInstance->Logs.Warning("CONFIG", "Value of <" + name + ":" + key + "> at " + source.str() +
 				" contains a linefeed, and linefeeds in this value are not permitted -- stripped to spaces.");
-			for (std::string::iterator n = value.begin(); n != value.end(); n++)
-				if (*n == '\n')
-					*n = ' ';
+
+			for (auto& chr : value)
+			{
+				if (chr == '\n')
+					chr = ' ';
+			}
 		}
 		return true;
 	}
 	return false;
 }
-#ifdef __clang__
-# pragma clang diagnostic pop
-#elif defined __GNUC__
-# pragma GCC diagnostic pop
-#endif
 
-std::string ConfigTag::getString(const std::string& key, const std::string& def)
+std::string ConfigTag::getString(const std::string& key, const std::string& def, const std::function<bool(const std::string&)>& validator) const
 {
-	std::string res = def;
-	readString(key, res);
-	return res;
-}
-
-long ConfigTag::getInt(const std::string &key, long def)
-{
-	std::string result;
-	if(!readString(key, result))
+	std::string res;
+	if (!readString(key, res))
 		return def;
 
-	const char* res_cstr = result.c_str();
-	char* res_tail = NULL;
-	long res = strtol(res_cstr, &res_tail, 0);
-	if (res_tail == res_cstr)
-		return def;
-	switch (toupper(*res_tail))
+	if (!validator(res))
 	{
-		case 'K':
-			res= res* 1024;
-			break;
-		case 'M':
-			res= res* 1024 * 1024;
-			break;
-		case 'G':
-			res= res* 1024 * 1024 * 1024;
-			break;
+		LogMalformed(key, res, def, "not valid");
+		return def;
 	}
 	return res;
 }
 
-double ConfigTag::getFloat(const std::string &key, double def)
+std::string ConfigTag::getString(const std::string& key, const std::string& def, size_t minlen, size_t maxlen) const
+{
+	std::string res;
+	if (!readString(key, res))
+		return def;
+
+	if (res.length() < minlen || res.length() > maxlen)
+	{
+		LogMalformed(key, res, def, "not between " + ConvToStr(minlen) + " and " + ConvToStr(maxlen)  + " characters in length");
+		return def;
+	}
+	return res;
+}
+
+namespace
+{
+	/** Check for an invalid magnitude specifier. If one is found a warning is logged and the
+	 * value is corrected (set to \p def).
+	 * @param tag The tag name; used in the warning message.
+	 * @param key The key name; used in the warning message.
+	 * @param val The full value set in the config as a string.
+	 * @param num The value to verify and modify if needed.
+	 * @param def The default value, \p res will be set to this if \p tail does not contain a.
+	 *            valid magnitude specifier.
+	 * @param tail The location in the config value at which the magnifier is located.
+	 */
+	template <typename Numeric>
+	void CheckMagnitude(const ConfigTag* tag, const std::string& key, const std::string& val, Numeric& num, Numeric def, const char* tail)
+	{
+		// If this is NULL then no magnitude specifier was given.
+		if (!*tail)
+			return;
+
+		switch (toupper(*tail))
+		{
+			case 'K':
+				num *= 1024;
+				return;
+
+			case 'M':
+				num *= 1024 * 1024;
+				return;
+
+			case 'G':
+				num *= 1024 * 1024 * 1024;
+				return;
+
+			default:
+				num = def;
+				tag->LogMalformed(key, val, ConvToStr(def), "contains an invalid magnitude specifier (" + ConvToStr(*tail) +")");
+				return;
+		}
+	}
+
+	/** Check for an out of range value. If the value falls outside the boundaries a warning is
+	 * logged and the value is corrected (set to \p def).
+	 * @param tag The tag name; used in the warning message.
+	 * @param key The key name; used in the warning message.
+	 * @param num The value to verify and modify if needed.
+	 * @param def The default value, \p res will be set to this if (min <= res <= max) doesn't hold true.
+	 * @param min Minimum accepted value for \p res.
+	 * @param max Maximum accepted value for \p res.
+	 */
+	template <typename Numeric>
+	void CheckRange(const ConfigTag* tag, const std::string& key, Numeric& num, Numeric def, Numeric min, Numeric max)
+	{
+		if (num >= min && num <= max)
+			return;
+
+		tag->LogMalformed(key, ConvToStr(num), ConvToStr(def), "not between " + ConvToStr(min) + " and " + ConvToStr(max));
+		num = def;
+	}
+}
+
+intmax_t ConfigTag::getSInt(const std::string& key, intmax_t def, intmax_t min, intmax_t max) const
+{
+	std::string result;
+	if(!readString(key, result) || result.empty())
+		return def;
+
+	const char* res_cstr = result.c_str();
+	char* res_tail = nullptr;
+	intmax_t res = strtoimax(res_cstr, &res_tail, 0);
+	if (res_tail == res_cstr)
+		return def;
+
+	CheckMagnitude(this, key, result, res, def, res_tail);
+	CheckRange(this, key, res, def, min, max);
+	return res;
+}
+
+uintmax_t ConfigTag::getUInt(const std::string& key, uintmax_t def, uintmax_t min, uintmax_t max) const
+{
+	std::string result;
+	if (!readString(key, result) || result.empty())
+		return def;
+
+	const char* res_cstr = result.c_str();
+	char* res_tail = nullptr;
+	uintmax_t res = strtoumax(res_cstr, &res_tail, 0);
+	if (res_tail == res_cstr)
+		return def;
+
+	CheckMagnitude(this, key, result, res, def, res_tail);
+	CheckRange(this, key, res, def, min, max);
+	return res;
+}
+
+unsigned long ConfigTag::getDuration(const std::string& key, unsigned long def, unsigned long min, unsigned long max) const
+{
+	std::string duration;
+	if (!readString(key, duration) || duration.empty())
+		return def;
+
+	unsigned long ret;
+	if (!Duration::TryFrom(duration, ret))
+	{
+		LogMalformed(key, duration, ConvToStr(def), "is not a duration");
+		return def;
+	}
+
+	CheckRange(this, key, ret, def, min, max);
+	return ret;
+}
+
+long double ConfigTag::getFloat(const std::string& key, long double def, long double min, long double max) const
 {
 	std::string result;
 	if (!readString(key, result))
 		return def;
-	return strtod(result.c_str(), NULL);
+
+	long double res = strtold(result.c_str(), nullptr);
+	CheckRange(this, key, res, def, min, max);
+	return res;
 }
 
-bool ConfigTag::getBool(const std::string &key, bool def)
+bool ConfigTag::getBool(const std::string& key, bool def) const
 {
 	std::string result;
-	if(!readString(key, result))
+	if(!readString(key, result) || result.empty())
 		return def;
 
-	if (result == "yes" || result == "true" || result == "1" || result == "on")
+	if (insp::equalsci(result, "yes") || insp::equalsci(result, "true") || insp::equalsci(result, "on"))
 		return true;
-	if (result == "no" || result == "false" || result == "0" || result == "off")
+
+	if (insp::equalsci(result, "no") || insp::equalsci(result, "false") || insp::equalsci(result, "off"))
 		return false;
 
-	ServerInstance->Logs->Log("CONFIG",DEFAULT, "Value of <" + tag + ":" + key + "> at " + getTagLocation() +
-		" is not valid, ignoring");
+	LogMalformed(key, result, def ? "yes" : "no", "is not a boolean");
 	return def;
 }
 
-std::string ConfigTag::getTagLocation()
+unsigned char ConfigTag::getCharacter(const std::string& key, unsigned char def, bool emptynul) const
 {
-	return src_name + ":" + ConvToStr(src_line);
+	std::string result;
+	if (!readString(key, result))
+		return def;
+
+	if (result.size() != 1)
+		return result.empty() && emptynul ? 0 : def;
+
+	return result[0];
 }
 
-ConfigTag* ConfigTag::create(const std::string& Tag, const std::string& file, int line, std::vector<KeyVal>*& Items)
+ConfigTag::ConfigTag(const std::string& Name, const FilePosition& Source)
+	: name(Name)
+	, source(Source)
 {
-	ConfigTag* rv = new ConfigTag(Tag, file, line);
-	Items = &rv->items;
-	return rv;
-}
-
-ConfigTag::ConfigTag(const std::string& Tag, const std::string& file, int line)
-	: tag(Tag), src_name(file), src_line(line)
-{
-}
-
-std::string OperInfo::getConfig(const std::string& key)
-{
-	std::string rv;
-	if (type_block)
-		type_block->readString(key, rv);
-	if (oper_block)
-		oper_block->readString(key, rv);
-	return rv;
 }

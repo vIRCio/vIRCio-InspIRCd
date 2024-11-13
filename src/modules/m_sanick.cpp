@@ -1,9 +1,12 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
+ *   Copyright (C) 2016 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2013, 2019-2023 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2012, 2019 Robby <robby@chatbelgie.be>
+ *   Copyright (C) 2009 Daniel De Graaf <danieldg@inspircd.org>
+ *   Copyright (C) 2008 Robin Burchell <robin+git@viroteck.net>
  *   Copyright (C) 2007, 2009 Dennis Friis <peavey@inspircd.org>
- *   Copyright (C) 2007 Robin Burchell <robin+git@viroteck.net>
- *   Copyright (C) 2004-2005 Craig Edwards <craigedwards@brainbox.cc>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -21,97 +24,84 @@
 
 #include "inspircd.h"
 
-/* $ModDesc: Provides support for SANICK command */
-
-/** Handle /SANICK
- */
-class CommandSanick : public Command
+class CommandSanick final
+	: public Command
 {
- public:
-	CommandSanick(Module* Creator) : Command(Creator,"SANICK", 2)
+private:
+	UserModeReference servprotectmode;
+
+public:
+	CommandSanick(Module* Creator)
+		: Command(Creator, "SANICK", 2)
+		, servprotectmode(Creator, "servprotect")
 	{
-		allow_empty_last_param = false;
-		flags_needed = 'o'; Penalty = 0; syntax = "<nick> <new-nick>";
-		TRANSLATE3(TR_NICK, TR_TEXT, TR_END);
+		access_needed = CmdAccess::OPERATOR;
+		syntax = { "<nick> <newnick>" };
+		translation = { TR_NICK, TR_TEXT };
 	}
 
-	CmdResult Handle (const std::vector<std::string>& parameters, User *user)
+	CmdResult Handle(User* user, const Params& parameters) override
 	{
-		User* target = ServerInstance->FindNick(parameters[0]);
+		auto* target = ServerInstance->Users.Find(parameters[0], true);
 
 		/* Do local sanity checks and bails */
 		if (IS_LOCAL(user))
 		{
-			if (target && ServerInstance->ULine(target->server))
+			if (target && target->IsModeSet(servprotectmode))
 			{
-				user->WriteNumeric(ERR_NOPRIVILEGES, "%s :Cannot use an SA command on a u-lined client",user->nick.c_str());
-				return CMD_FAILURE;
+				user->WriteNumeric(ERR_NOPRIVILEGES, "Cannot use an SA command on a service");
+				return CmdResult::FAILURE;
 			}
 
-			if ((!target) || (target->registered != REG_ALL))
+			if (!target)
 			{
-				user->WriteServ("NOTICE %s :*** No such nickname: '%s'", user->nick.c_str(), parameters[0].c_str());
-				return CMD_FAILURE;
+				user->WriteNotice("*** No such nickname: '" + parameters[0] + "'");
+				return CmdResult::FAILURE;
 			}
 
-			if (!ServerInstance->IsNick(parameters[1].c_str(), ServerInstance->Config->Limits.NickMax))
+			if (!ServerInstance->IsNick(parameters[1]))
 			{
-				user->WriteServ("NOTICE %s :*** Invalid nickname '%s'", user->nick.c_str(), parameters[1].c_str());
-				return CMD_FAILURE;
+				user->WriteNotice("*** Invalid nickname: '" + parameters[1] + "'");
+				return CmdResult::FAILURE;
 			}
 		}
 
 		/* Have we hit target's server yet? */
 		if (target && IS_LOCAL(target))
 		{
-			std::string oldnick = user->nick;
-			std::string newnick = target->nick;
-			if (target->ChangeNick(parameters[1], true))
+			const std::string oldnick = target->nick;
+			const std::string& newnick = parameters[1];
+			if (!ServerInstance->Users.FindNick(newnick) && target->ChangeNick(newnick))
 			{
-				ServerInstance->SNO->WriteGlobalSno('a', oldnick+" used SANICK to change "+newnick+" to "+parameters[1]);
+				ServerInstance->SNO.WriteGlobalSno('a', user->nick + " used SANICK to change " + oldnick + " to " + newnick);
 			}
 			else
 			{
-				ServerInstance->SNO->WriteGlobalSno('a', oldnick+" failed SANICK (from "+newnick+" to "+parameters[1]+")");
+				ServerInstance->SNO.WriteGlobalSno('a', user->nick + " failed SANICK (from " + oldnick + " to " + newnick + ")");
 			}
 		}
 
-		return CMD_SUCCESS;
+		return CmdResult::SUCCESS;
 	}
 
-	RouteDescriptor GetRouting(User* user, const std::vector<std::string>& parameters)
+	RouteDescriptor GetRouting(User* user, const Params& parameters) override
 	{
-		User* dest = ServerInstance->FindNick(parameters[0]);
-		if (dest)
-			return ROUTE_OPT_UCAST(dest->server);
-		return ROUTE_LOCALONLY;
+		return ROUTE_OPT_UCAST(parameters[0]);
 	}
 };
 
-
-class ModuleSanick : public Module
+class ModuleSanick final
+	: public Module
 {
+private:
 	CommandSanick cmd;
- public:
+
+public:
 	ModuleSanick()
-		: cmd(this)
+		: Module(VF_VENDOR | VF_OPTCOMMON, "Adds the /SANICK command which allows server operators to change the nickname of a user.")
+		, cmd(this)
 	{
 	}
-
-	void init()
-	{
-		ServerInstance->Modules->AddService(cmd);
-	}
-
-	virtual ~ModuleSanick()
-	{
-	}
-
-	virtual Version GetVersion()
-	{
-		return Version("Provides support for SANICK command", VF_OPTCOMMON | VF_VENDOR);
-	}
-
 };
 
 MODULE_INIT(ModuleSanick)

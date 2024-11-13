@@ -1,6 +1,10 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
+ *   Copyright (C) 2020-2021 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
+ *   Copyright (C) 2009 Uli Schlachter <psychon@znc.in>
+ *   Copyright (C) 2009 Daniel De Graaf <danieldg@inspircd.org>
  *   Copyright (C) 2008 Robin Burchell <robin+git@viroteck.net>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
@@ -18,44 +22,35 @@
 
 
 #include "inspircd.h"
+#include "modules/extban.h"
 
-/* $ModDesc: Implements extban +b s: - server name bans */
-
-class ModuleServerBan : public Module
+class ServerExtBan final
+	: public ExtBan::MatchingBase
 {
- private:
- public:
-	void init()
-	{
-		Implementation eventlist[] = { I_OnCheckBan, I_On005Numeric };
-		ServerInstance->Modules->Attach(eventlist, this, sizeof(eventlist)/sizeof(Implementation));
-	}
-
-	~ModuleServerBan()
+public:
+	ServerExtBan(Module* Creator)
+		: ExtBan::MatchingBase(Creator, "server", 's')
 	{
 	}
 
-	Version GetVersion()
+	bool IsMatch(User* user, Channel* channel, const std::string& text) override
 	{
-		return Version("Extban 's' - server ban",VF_OPTCOMMON|VF_VENDOR);
-	}
-
-	ModResult OnCheckBan(User *user, Channel *c, const std::string& mask)
-	{
-		if ((mask.length() > 2) && (mask[0] == 's') && (mask[1] == ':'))
-		{
-			if (InspIRCd::Match(user->server, mask.substr(2)))
-				return MOD_RES_DENY;
-		}
-		return MOD_RES_PASSTHRU;
-	}
-
-	void On005Numeric(std::string &output)
-	{
-		ServerInstance->AddExtBanChar('s');
+		return InspIRCd::Match(user->server->GetPublicName(), text);
 	}
 };
 
+class ModuleServerBan final
+	: public Module
+{
+private:
+	ServerExtBan extban;
+
+public:
+	ModuleServerBan()
+		: Module(VF_VENDOR | VF_OPTCOMMON, "Adds extended ban s: (server) which check whether users are on a server matching the specified glob pattern.")
+		, extban(this)
+	{
+	}
+};
 
 MODULE_INIT(ModuleServerBan)
-

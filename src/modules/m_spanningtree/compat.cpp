@@ -1,7 +1,7 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
- *   Copyright (C) 2009-2010 Daniel De Graaf <danieldg@inspircd.org>
+ *   Copyright (C) 2021, 2024 Sadie Powell <sadie@witchery.services>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -19,178 +19,220 @@
 
 #include "inspircd.h"
 #include "main.h"
-#include "treesocket.h"
 
-static const char* const forge_common_1201[] = {
-	"m_allowinvite.so",
-	"m_alltime.so",
-	"m_auditorium.so",
-	"m_banexception.so",
-	"m_blockcaps.so",
-	"m_blockcolor.so",
-	"m_botmode.so",
-	"m_censor.so",
-	"m_chanfilter.so",
-	"m_chanhistory.so",
-	"m_channelban.so",
-	"m_chanprotect.so",
-	"m_chghost.so",
-	"m_chgname.so",
-	"m_commonchans.so",
-	"m_customtitle.so",
-	"m_deaf.so",
-	"m_delayjoin.so",
-	"m_delaymsg.so",
-	"m_exemptchanops.so",
-	"m_gecosban.so",
-	"m_globops.so",
-	"m_helpop.so",
-	"m_hidechans.so",
-	"m_hideoper.so",
-	"m_invisible.so",
-	"m_inviteexception.so",
-	"m_joinflood.so",
-	"m_kicknorejoin.so",
-	"m_knock.so",
-	"m_messageflood.so",
-	"m_muteban.so",
-	"m_nickflood.so",
-	"m_nicklock.so",
-	"m_noctcp.so",
-	"m_nokicks.so",
-	"m_nonicks.so",
-	"m_nonotice.so",
-	"m_nopartmsg.so",
-	"m_ojoin.so",
-	"m_operprefix.so",
-	"m_permchannels.so",
-	"m_redirect.so",
-	"m_regex_glob.so",
-	"m_regex_pcre.so",
-	"m_regex_posix.so",
-	"m_regex_tre.so",
-	"m_remove.so",
-	"m_sajoin.so",
-	"m_sakick.so",
-	"m_sanick.so",
-	"m_sapart.so",
-	"m_saquit.so",
-	"m_serverban.so",
-	"m_services_account.so",
-	"m_servprotect.so",
-	"m_setident.so",
-	"m_showwhois.so",
-	"m_silence.so",
-	"m_sslmodes.so",
-	"m_stripcolor.so",
-	"m_swhois.so",
-	"m_uninvite.so",
-	"m_watch.so"
-};
-
-static std::string wide_newline("\r\n");
-static std::string newline("\n");
-
-void TreeSocket::CompatAddModules(std::vector<std::string>& modlist)
+namespace
 {
-	if (proto_version < 1202)
+	size_t NextToken(const std::string& line, size_t start)
 	{
-		// you MUST have chgident loaded in order to be able to translate FIDENT
-		modlist.push_back("m_chgident.so");
-		for(int i=0; i * sizeof(char*) < sizeof(forge_common_1201); i++)
-		{
-			if (ServerInstance->Modules->Find(forge_common_1201[i]))
-				modlist.push_back(forge_common_1201[i]);
-		}
-		// module was merged
-		if (ServerInstance->Modules->Find("m_operchans.so"))
-		{
-			modlist.push_back("m_operchans.so");
-			modlist.push_back("m_operinvex.so");
-		}
+		if (start == std::string::npos || start + 1 > line.length())
+			return std::string::npos;
+
+		return line.find(' ', start + 1);
 	}
 }
 
-void TreeSocket::WriteLine(std::string line)
+void TreeSocket::WriteLine(const std::string& original_line)
 {
-	if (LinkState == CONNECTED)
+	if (LinkState != CONNECTED || proto_version == PROTO_NEWEST)
 	{
-		if (line[0] != ':')
+		// Don't translate connections which have negotiated PROTO_NEWEST or
+		// where the protocol hasn't been negotiated yet.
+		WriteLineInternal(original_line);
+		return;
+	}
+
+	std::string line = original_line;
+	size_t cmdstart = 0;
+
+	if (line[0] == '@') // Skip the tags.
+	{
+		cmdstart = NextToken(line, 0);
+		if (cmdstart != std::string::npos)
+			cmdstart++;
+	}
+
+	size_t sidstart = std::string::npos;
+	if (line[cmdstart] == ':') // Skip the prefix.
+	{
+		sidstart = cmdstart + 1;
+		cmdstart = NextToken(line, cmdstart);
+		if (cmdstart != std::string::npos)
+			cmdstart++;
+	}
+
+	// Find the end of the command.
+	size_t cmdend = NextToken(line, cmdstart);
+	if (cmdend == std::string::npos)
+		cmdend = line.size() - 1;
+
+	std::string command(line, cmdstart, cmdend - cmdstart);
+	if (proto_version == PROTO_INSPIRCD_3)
+	{
+		if (irc::equals(command, "FHOST") || irc::equals(command, "FIDENT"))
 		{
-			ServerInstance->Logs->Log("m_spanningtree", DEFAULT, "Sending line without server prefix!");
-			line = ":" + ServerInstance->Config->GetSID() + " " + line;
+			// FIDENT/FHOST has two parameters in v4; drop the real username/hostname.
+			// :<sid> FIDENT|FHOST <display|*> <real|*>
+			size_t displayend = NextToken(line, cmdend);
+			if (displayend != std::string::npos)
+			{
+				if ((displayend - cmdend) == 2 && line[displayend - 1] == '*')
+					return; // FIDENT/FHOST is only changing the real username/hostname; drop.
+
+				// Trim the rest of the line.
+				line.erase(displayend);
+			}
 		}
-		if (proto_version != ProtocolVersion)
+		else if (irc::equals(command, "LMODE"))
 		{
-			std::string::size_type a = line.find(' ');
-			std::string::size_type b = line.find(' ', a + 1);
-			std::string command = line.substr(a + 1, b-a-1);
-			// now try to find a translation entry
-			// TODO a more efficient lookup method will be needed later
-			if (proto_version < 1202 && command == "FIDENT")
-			{
-				ServerInstance->Logs->Log("m_spanningtree",DEBUG,"Rewriting FIDENT for 1201-protocol server");
-				line = ":" + ServerInstance->Config->GetSID() + " CHGIDENT " +  line.substr(1,a-1) + line.substr(b);
-			}
-			else if (proto_version < 1202 && command == "SAVE")
-			{
-				ServerInstance->Logs->Log("m_spanningtree",DEBUG,"Rewriting SAVE for 1201-protocol server");
-				std::string::size_type c = line.find(' ', b + 1);
-				std::string uid = line.substr(b, c - b);
-				line = ":" + ServerInstance->Config->GetSID() + " SVSNICK" + uid + line.substr(b);
-			}
-			else if (proto_version < 1202 && command == "AWAY")
-			{
-				if (b != std::string::npos)
-				{
-					ServerInstance->Logs->Log("m_spanningtree",DEBUG,"Stripping AWAY timestamp for 1201-protocol server");
-					std::string::size_type c = line.find(' ', b + 1);
-					line.erase(b,c-b);
-				}
-			}
-			else if (proto_version < 1202 && command == "ENCAP")
-			{
-				// :src ENCAP target command [args...]
-				//     A     B      C       D
-				// Therefore B and C cannot be npos in a valid command
-				if (b == std::string::npos)
-					return;
-				std::string::size_type c = line.find(' ', b + 1);
-				if (c == std::string::npos)
-					return;
-				std::string::size_type d = line.find(' ', c + 1);
-				std::string subcmd = line.substr(c + 1, d - c - 1);
+			// LMODE is new in v4; downgrade to FMODE.
 
-				if (subcmd == "CHGIDENT" && d != std::string::npos)
-				{
-					std::string::size_type e = line.find(' ', d + 1);
-					if (e == std::string::npos)
-						return; // not valid
-					std::string target = line.substr(d + 1, e - d - 1);
+			// :<sid>  LMODE <chan> <chants> <modechr> [<mask> <setts> <setter>]+
+			auto chanend = NextToken(line, cmdend);
+			auto chantsend = NextToken(line, chanend);
+			auto modechrend = NextToken(line, chantsend);
 
-					ServerInstance->Logs->Log("m_spanningtree",DEBUG,"Forging acceptance of CHGIDENT from 1201-protocol server");
-					recvq.insert(0, ":" + target + " FIDENT " + line.substr(e) + "\n");
-				}
+			if (modechrend != std::string::npos)
+			{
+				// This should only be one character but its best to be sure...
+				auto modechr = line.substr(chantsend + 1, modechrend - chantsend - 1);
+				auto prevend = modechrend;
 
-				Command* thiscmd = ServerInstance->Parser->GetHandler(subcmd);
-				if (thiscmd && subcmd != "WHOISNOTICE")
+				// Build a new mode and parameter list.
+				std::string modelist = "+";
+				std::string paramlist;
+				while (prevend != std::string::npos)
 				{
-					Version ver = thiscmd->creator->GetVersion();
-					if (ver.Flags & VF_OPTCOMMON)
+					// We drop the setts and setter for the old protocol.
+					auto maskend = NextToken(line, prevend);
+					auto settsend = NextToken(line, maskend);
+					if (settsend != std::string::npos)
 					{
-						ServerInstance->Logs->Log("m_spanningtree",DEBUG,"Removing ENCAP on '%s' for 1201-protocol server",
-							subcmd.c_str());
-						line.erase(a, c-a);
+						modelist.append(modechr);
+						paramlist.append(" ").append(line.substr(prevend + 1, maskend - prevend - 1));
+					}
+					prevend = NextToken(line, settsend);
+				}
+
+				// Replace the mode tuples with a list of mode values.
+				line.replace(modechrend, line.length() - modechrend, paramlist);
+
+				// Replace the mode character with a list of +modes
+				line.replace(chantsend + 1, modechrend - chantsend - 1, modelist);
+
+				// Replace LMODE with FMODE.
+				line.replace(cmdstart, 5, "FMODE");
+			}
+		}
+		else if (irc::equals(command, "METADATA"))
+		{
+			// :<sid> METADATA <uuid|chan|*|@> <name> :<value>
+			size_t targetend = NextToken(line, cmdend);
+			size_t nameend = NextToken(line, targetend);
+			size_t flagend = NextToken(line, nameend);
+			if (flagend != std::string::npos)
+			{
+				std::string extname(line, targetend + 1, nameend - targetend - 1);
+				if (irc::equals(extname, "ssl_cert"))
+				{
+					// Check we have the "e" flag (no error).
+					if (line.find('e', nameend + 1) < flagend)
+					{
+						size_t fpend = NextToken(line, flagend);
+						if (fpend != std::string::npos)
+						{
+							size_t commapos = line.find(',', flagend + 1);
+							if (commapos < fpend)
+							{
+								// Multiple fingerprints in ssl_cert was introduced in PROTO_INSPIRCD_4; drop it.
+								line.erase(commapos, fpend - commapos);
+							}
+
+						}
 					}
 				}
 			}
 		}
+		else if (irc::equals(command, "SINFO"))
+		{
+			// :<sid> SINFO <key> :<value>
+			auto keyend = NextToken(line, cmdend);
+			if (keyend != std::string::npos && sidstart != std::string::npos)
+			{
+				auto skey = line.substr(cmdend + 1, keyend - cmdend - 1);
+				if (irc::equals(skey, "customversion"))
+					return;
+				else if (irc::equals(skey, "rawbranch"))
+				{
+					// InspIRCd-4. testnet.inspircd.org :Test
+					auto* sid = Utils->FindServerID(line.substr(sidstart, cmdstart - sidstart - 1));
+					if (sid)
+					{
+						line.replace(cmdend + 1, keyend - cmdend - 1, "version");
+						line.append(INSP_FORMAT(". {} :{}", sid->GetPublicName(), sid->GetDesc()));
+					}
+				}
+				else if (irc::equals(skey, "rawversion"))
+				{
+					// InspIRCd-4.0.0-a10. sadie.testnet.inspircd.org :[597] Test
+					auto* sid = Utils->FindServerID(line.substr(sidstart, cmdstart - sidstart - 1));
+					if (sid)
+					{
+						line.replace(cmdend + 1, keyend - cmdend - 1, "fullversion");
+						line.append(INSP_FORMAT(". {} :[{}] {}", sid->GetName(), sid->GetId(), sid->GetDesc()));
+					}
+				}
+			}
+		}
+		else if (irc::equals(command, "SQUERY"))
+		{
+			// SQUERY was introduced in PROTO_INSPIRCD_4; convert to PRIVMSG.
+			line.replace(cmdstart, 6, "PRIVMSG");
+		}
+		else if (irc::equals(command, "UID"))
+		{
+			// :<sid> UID <uuid> <nickchanged> <nick> <host> <dhost> <user> <duser> <ip.string> <signon> <modes> [<modepara>] :<real>
+			//                                                       ^^^^^^ New in 1206
+			size_t uuidend = NextToken(line, cmdend);
+			size_t nickchangedend = NextToken(line, uuidend);
+			size_t nickend = NextToken(line, nickchangedend);
+			size_t hostend = NextToken(line, nickend);
+			size_t dhostend = NextToken(line, hostend);
+			size_t userend = NextToken(line, dhostend);
+			if (userend != std::string::npos)
+				line.erase(dhostend, userend - dhostend);
+		}
 	}
 
-	ServerInstance->Logs->Log("m_spanningtree", RAWIO, "S[%d] O %s", this->GetFd(), line.c_str());
-	this->WriteData(line);
-	if (proto_version < 1202)
-		this->WriteData(wide_newline);
-	else
-		this->WriteData(newline);
+	WriteLineInternal(line);
+}
+
+bool TreeSocket::PreProcessOldProtocolMessage(User*& who, std::string& cmd, CommandBase::Params& params)
+{
+	if (irc::equals(cmd, "FHOST") || irc::equals(cmd, "FIDENT"))
+	{
+		if (params.size() < 2)
+			params.push_back("*");
+	}
+	else if (irc::equals(cmd, "SVSJOIN") || irc::equals(cmd, "SVSNICK") || irc::equals(cmd, "SVSPART"))
+	{
+		if (params.empty())
+			return false; // Malformed.
+
+		auto* target = ServerInstance->Users.FindUUID(params[0]);
+		if (!target)
+			return false; // User gone.
+
+		params.insert(params.begin(), { target->uuid.substr(0, 3), cmd });
+		cmd = "ENCAP";
+	}
+	else if (irc::equals(cmd, "UID"))
+	{
+		if (params.size() < 6)
+			return false; // Malformed.
+
+		// :<sid> UID <uuid> <nickchanged> <nick> <host> <dhost> <user> <duser> <ip.string> <signon> <modes> [<modepara>] :<real>
+		//                                                       ^^^^^^ New in 1206
+		params.insert(params.begin() + 5, params[5]);
+	}
+	return true;
 }

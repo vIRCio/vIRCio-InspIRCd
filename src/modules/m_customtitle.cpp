@@ -1,8 +1,11 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
+ *   Copyright (C) 2018 linuxdaemon <linuxdaemon.irc@gmail.com>
+ *   Copyright (C) 2013, 2018-2023 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2012, 2015 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
  *   Copyright (C) 2009 Daniel De Graaf <danieldg@inspircd.org>
- *   Copyright (C) 2008 Pippijn van Steenhoven <pip88nl@gmail.com>
  *   Copyright (C) 2007 Dennis Friis <peavey@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
@@ -20,114 +23,135 @@
 
 
 #include "inspircd.h"
+#include "extension.h"
+#include "modules/whois.h"
 
-/* $ModDesc: Provides the TITLE command which allows setting of CUSTOM WHOIS TITLE line */
-
-/** Handle /TITLE
- */
-class CommandTitle : public Command
+struct CustomTitle final
 {
- public:
+	const std::string name;
+	const std::string password;
+	const std::string hash;
+	const std::string host;
+	const std::string title;
+	const std::string vhost;
+
+	CustomTitle(const std::string& n, const std::string& p, const std::string& h, const std::string& hst, const std::string& t, const std::string& v)
+		: name(n)
+		, password(p)
+		, hash(h)
+		, host(hst)
+		, title(t)
+		, vhost(v)
+	{
+	}
+
+	bool MatchUser(User* user) const
+	{
+		return InspIRCd::MatchMask(host, user->GetRealUserHost(), user->GetUserAddress());
+	}
+
+	bool CheckPass(const std::string& pass) const
+	{
+		return InspIRCd::CheckPassword(password, hash, pass);
+	}
+};
+
+typedef std::multimap<std::string, CustomTitle> CustomVhostMap;
+
+class CommandTitle final
+	: public Command
+{
+public:
 	StringExtItem ctitle;
-	CommandTitle(Module* Creator) : Command(Creator,"TITLE", 2),
-		ctitle("ctitle", Creator)
+	CustomVhostMap configs;
+
+	CommandTitle(Module* Creator)
+		: Command(Creator, "TITLE", 2)
+		, ctitle(Creator, "ctitle", ExtensionType::USER, true)
 	{
-		syntax = "<user> <password>";
+		syntax = { "<username> <password>" };
 	}
 
-	bool OneOfMatches(const char* host, const char* ip, const char* hostlist)
+	CmdResult Handle(User* user, const Params& parameters) override
 	{
-		std::stringstream hl(hostlist);
-		std::string xhost;
-		while (hl >> xhost)
+		for (const auto& [_, config] : insp::equal_range(configs, parameters[0]))
 		{
-			if (InspIRCd::Match(host, xhost, ascii_case_insensitive_map) || InspIRCd::MatchCIDR(ip, xhost, ascii_case_insensitive_map))
+			if (config.MatchUser(user) && config.CheckPass(parameters[1]))
 			{
-				return true;
-			}
-		}
-		return false;
-	}
+				ctitle.Set(user, config.title);
 
-	CmdResult Handle(const std::vector<std::string> &parameters, User* user)
-	{
-		char TheHost[MAXBUF];
-		char TheIP[MAXBUF];
+				if (!config.vhost.empty())
+					user->ChangeDisplayedHost(config.vhost);
 
-		snprintf(TheHost,MAXBUF,"%s@%s",user->ident.c_str(), user->host.c_str());
-		snprintf(TheIP, MAXBUF,"%s@%s",user->ident.c_str(), user->GetIPString());
+				user->WriteNotice("Custom title set to '" + config.title + "'");
 
-		ConfigTagList tags = ServerInstance->Config->ConfTags("title");
-		for (ConfigIter i = tags.first; i != tags.second; ++i)
-		{
-			std::string Name = i->second->getString("name");
-			std::string pass = i->second->getString("password");
-			std::string hash = i->second->getString("hash");
-			std::string host = i->second->getString("host", "*@*");
-			std::string title = i->second->getString("title");
-			std::string vhost = i->second->getString("vhost");
-
-			if (Name == parameters[0] && !ServerInstance->PassCompare(user, pass, parameters[1], hash) && OneOfMatches(TheHost,TheIP,host.c_str()) && !title.empty())
-			{
-				ctitle.set(user, title);
-
-				ServerInstance->PI->SendMetaData(user, "ctitle", title);
-
-				if (!vhost.empty())
-					user->ChangeDisplayedHost(vhost.c_str());
-
-				user->WriteServ("NOTICE %s :Custom title set to '%s'",user->nick.c_str(), title.c_str());
-
-				return CMD_SUCCESS;
+				return CmdResult::SUCCESS;
 			}
 		}
 
-		user->WriteServ("NOTICE %s :Invalid title credentials",user->nick.c_str());
-		return CMD_SUCCESS;
+		user->WriteNotice("Invalid title credentials");
+		return CmdResult::SUCCESS;
 	}
 
 };
 
-class ModuleCustomTitle : public Module
+class ModuleCustomTitle final
+	: public Module
+	, public Whois::LineEventListener
 {
+private:
 	CommandTitle cmd;
 
- public:
-	ModuleCustomTitle() : cmd(this)
+public:
+	ModuleCustomTitle()
+		: Module(VF_VENDOR | VF_OPTCOMMON, "Allows the server administrator to define accounts which can grant a custom title in /WHOIS and an optional virtual host.")
+		, Whois::LineEventListener(this)
+		, cmd(this)
 	{
 	}
 
-	void init()
+	void ReadConfig(ConfigStatus& status) override
 	{
-		ServerInstance->Modules->AddService(cmd);
-		ServerInstance->Modules->AddService(cmd.ctitle);
-		ServerInstance->Modules->Attach(I_OnWhoisLine, this);
+		CustomVhostMap newtitles;
+		for (const auto& [_, tag] : ServerInstance->Config->ConfTags("title"))
+		{
+			std::string name = tag->getString("name", "", 1);
+			if (name.empty())
+				throw ModuleException(this, "<title:name> is empty at " + tag->source.str());
+
+			std::string pass = tag->getString("password");
+			if (pass.empty())
+				throw ModuleException(this, "<title:password> is empty at " + tag->source.str());
+
+			const std::string hash = tag->getString("hash", "plaintext", 1);
+			if (insp::equalsci(hash, "plaintext"))
+			{
+				ServerInstance->Logs.Normal(MODNAME, "<title> tag for {} at {} contains an plain text password, this is insecure!",
+					name, tag->source.str());
+			}
+
+			std::string host = tag->getString("host", "*@*", 1);
+			std::string title = tag->getString("title");
+			std::string vhost = tag->getString("vhost");
+			CustomTitle config(name, pass, hash, host, title, vhost);
+			newtitles.emplace(name, config);
+		}
+		cmd.configs.swap(newtitles);
 	}
 
 	// :kenny.chatspike.net 320 Brain Azhrarn :is getting paid to play games.
-	ModResult OnWhoisLine(User* user, User* dest, int &numeric, std::string &text)
+	ModResult OnWhoisLine(Whois::Context& whois, Numeric::Numeric& numeric) override
 	{
 		/* We use this and not OnWhois because this triggers for remote, too */
-		if (numeric == 312)
+		if (numeric.GetNumeric() == RPL_WHOISSERVER)
 		{
 			/* Insert our numeric before 312 */
-			const std::string* ctitle = cmd.ctitle.get(dest);
-			if (ctitle)
-			{
-				ServerInstance->SendWhoisLine(user, dest, 320, "%s %s :%s",user->nick.c_str(), dest->nick.c_str(), ctitle->c_str());
-			}
+			const std::string* ctitle = cmd.ctitle.Get(whois.GetTarget());
+			if (ctitle && !ctitle->empty())
+				whois.SendLine(RPL_WHOISSPECIAL, *ctitle);
 		}
 		/* Don't block anything */
 		return MOD_RES_PASSTHRU;
-	}
-
-	~ModuleCustomTitle()
-	{
-	}
-
-	Version GetVersion()
-	{
-		return Version("Custom Title for users", VF_OPTCOMMON | VF_VENDOR);
 	}
 };
 

@@ -1,11 +1,15 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
+ *   Copyright (C) 2019 Matt Schatz <genius3000@g3k.solutions>
+ *   Copyright (C) 2013, 2017-2023 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2013 Adam <Adam@anope.org>
+ *   Copyright (C) 2012-2014, 2016 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2012, 2019 Robby <robby@chatbelgie.be>
  *   Copyright (C) 2009 Daniel De Graaf <danieldg@inspircd.org>
- *   Copyright (C) 2005-2009 Robin Burchell <robin+git@viroteck.net>
- *   Copyright (C) 2004-2008 Craig Edwards <craigedwards@brainbox.cc>
+ *   Copyright (C) 2007-2009 Robin Burchell <robin+git@viroteck.net>
  *   Copyright (C) 2007 Dennis Friis <peavey@inspircd.org>
- *   Copyright (C) 2007 John Brooks <john.brooks@dereferenced.net>
+ *   Copyright (C) 2004, 2006-2008 Craig Edwards <brain@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -22,87 +26,108 @@
 
 
 #include "inspircd.h"
+#include "modules/stats.h"
+#include "stringutils.h"
+#include "timeutils.h"
 #include "xline.h"
-#include "bancache.h"
 
 /** An XLineFactory specialized to generate GLine* pointers
  */
-class GLineFactory : public XLineFactory
+class GLineFactory final
+	: public XLineFactory
 {
- public:
-	GLineFactory() : XLineFactory("G") { }
+public:
+	GLineFactory()
+		: XLineFactory("G")
+	{
+	}
 
 	/** Generate a GLine
 	 */
-	XLine* Generate(time_t set_time, long duration, std::string source, std::string reason, std::string xline_specific_mask)
+	XLine* Generate(time_t set_time, unsigned long duration, const std::string& source, const std::string& reason, const std::string& xline_specific_mask) override
 	{
-		IdentHostPair ih = ServerInstance->XLines->IdentSplit(xline_specific_mask);
+		UserHostPair ih = XLineManager::SplitUserHost(xline_specific_mask);
 		return new GLine(set_time, duration, source, reason, ih.first, ih.second);
 	}
 };
 
 /** An XLineFactory specialized to generate ELine* pointers
  */
-class ELineFactory : public XLineFactory
+class ELineFactory final
+	: public XLineFactory
 {
- public:
-	ELineFactory() : XLineFactory("E") { }
+public:
+	ELineFactory()
+		: XLineFactory("E")
+	{
+	}
 
 	/** Generate an ELine
 	 */
-	XLine* Generate(time_t set_time, long duration, std::string source, std::string reason, std::string xline_specific_mask)
+	XLine* Generate(time_t set_time, unsigned long duration, const std::string& source, const std::string& reason, const std::string& xline_specific_mask) override
 	{
-		IdentHostPair ih = ServerInstance->XLines->IdentSplit(xline_specific_mask);
+		UserHostPair ih = XLineManager::SplitUserHost(xline_specific_mask);
 		return new ELine(set_time, duration, source, reason, ih.first, ih.second);
 	}
 };
 
 /** An XLineFactory specialized to generate KLine* pointers
  */
-class KLineFactory : public XLineFactory
+class KLineFactory final
+	: public XLineFactory
 {
- public:
-        KLineFactory() : XLineFactory("K") { }
+public:
+	KLineFactory()
+		: XLineFactory("K")
+	{
+	}
 
 	/** Generate a KLine
 	 */
-        XLine* Generate(time_t set_time, long duration, std::string source, std::string reason, std::string xline_specific_mask)
-        {
-                IdentHostPair ih = ServerInstance->XLines->IdentSplit(xline_specific_mask);
-                return new KLine(set_time, duration, source, reason, ih.first, ih.second);
-        }
+	XLine* Generate(time_t set_time, unsigned long duration, const std::string& source, const std::string& reason, const std::string& xline_specific_mask) override
+	{
+		UserHostPair ih = XLineManager::SplitUserHost(xline_specific_mask);
+		return new KLine(set_time, duration, source, reason, ih.first, ih.second);
+	}
 };
 
 /** An XLineFactory specialized to generate QLine* pointers
  */
-class QLineFactory : public XLineFactory
+class QLineFactory final
+	: public XLineFactory
 {
- public:
-        QLineFactory() : XLineFactory("Q") { }
+public:
+	QLineFactory()
+		: XLineFactory("Q")
+	{
+	}
 
 	/** Generate a QLine
 	 */
-        XLine* Generate(time_t set_time, long duration, std::string source, std::string reason, std::string xline_specific_mask)
-        {
-                return new QLine(set_time, duration, source, reason, xline_specific_mask);
-        }
+	XLine* Generate(time_t set_time, unsigned long duration, const std::string& source, const std::string& reason, const std::string& xline_specific_mask) override
+	{
+		return new QLine(set_time, duration, source, reason, xline_specific_mask);
+	}
 };
 
 /** An XLineFactory specialized to generate ZLine* pointers
  */
-class ZLineFactory : public XLineFactory
+class ZLineFactory final
+	: public XLineFactory
 {
- public:
-        ZLineFactory() : XLineFactory("Z") { }
+public:
+	ZLineFactory()
+		: XLineFactory("Z")
+	{
+	}
 
 	/** Generate a ZLine
 	 */
-        XLine* Generate(time_t set_time, long duration, std::string source, std::string reason, std::string xline_specific_mask)
-        {
-                return new ZLine(set_time, duration, source, reason, xline_specific_mask);
-        }
+	XLine* Generate(time_t set_time, unsigned long duration, const std::string& source, const std::string& reason, const std::string& xline_specific_mask) override
+	{
+		return new ZLine(set_time, duration, source, reason, xline_specific_mask);
+	}
 };
-
 
 /*
  * This is now version 3 of the XLine subsystem, let's see if we can get it as nice and
@@ -114,7 +139,7 @@ class ZLineFactory : public XLineFactory
  *  was added, it iterated every existing line for every existing user. Ow. Expiry was also
  *  expensive, as the lists were NOT sorted.
  *
- *  Version 2 moved permanent lines into a seperate list from non-permanent to help optimize
+ *  Version 2 moved permanent lines into a separate list from non-permanent to help optimize
  *  matching speed, but matched in the same way.
  *  Expiry was also sped up by sorting the list by expiry (meaning just remove the items at the
  *  head of the list that are outdated.)
@@ -123,7 +148,7 @@ class ZLineFactory : public XLineFactory
  * than it could have been, something which we address here.
  *
  * VERSION 3:
- *  All lines are (as in v1) stored together -- no seperation of perm and non-perm. They are stored in
+ *  All lines are (as in v1) stored together -- no separation of perm and non-perm. They are stored in
  *  a map of maps (first map is line type, second map is for quick lookup on add/delete/etc).
  *
  *  Expiry is *no longer* performed on a timer, and no longer uses a sorted list of any variety. This
@@ -136,7 +161,7 @@ class ZLineFactory : public XLineFactory
  *  bans. :)
  */
 
-bool XLine::Matches(User *u)
+bool XLine::Matches(User* u) const
 {
 	return false;
 }
@@ -156,12 +181,11 @@ void XLineManager::CheckELines()
 	if (ELines.empty())
 		return;
 
-	for (LocalUserList::const_iterator u2 = ServerInstance->Users->local_users.begin(); u2 != ServerInstance->Users->local_users.end(); u2++)
+	for (auto* u :  ServerInstance->Users.GetLocalUsers())
 	{
-		User* u = (User*)(*u2);
 		u->exempt = false;
 
-		/* This uses safe iteration to ensure that if a line expires here, it doenst trash the iterator */
+		/* This uses safe iteration to ensure that if a line expires here, it doesn't trash the iterator */
 		LookupIter safei;
 
 		for (LookupIter i = ELines.begin(); i != ELines.end(); )
@@ -169,7 +193,7 @@ void XLineManager::CheckELines()
 			safei = i;
 			safei++;
 
-			XLine *e = i->second;
+			XLine* e = i->second;
 			if ((!e->duration || ServerInstance->Time() < e->expiry) && e->Matches(u))
 				u->exempt = true;
 
@@ -178,13 +202,12 @@ void XLineManager::CheckELines()
 	}
 }
 
-
-XLineLookup* XLineManager::GetAll(const std::string &type)
+XLineLookup* XLineManager::GetAll(const std::string& type)
 {
 	ContainerIter n = lookup_lines.find(type);
 
 	if (n == lookup_lines.end())
-		return NULL;
+		return nullptr;
 
 	LookupIter safei;
 	const time_t current = ServerInstance->Time();
@@ -204,7 +227,7 @@ XLineLookup* XLineManager::GetAll(const std::string &type)
 	return &(n->second);
 }
 
-void XLineManager::DelAll(const std::string &type)
+void XLineManager::DelAll(const std::string& type)
 {
 	ContainerIter n = lookup_lines.find(type);
 
@@ -223,19 +246,19 @@ void XLineManager::DelAll(const std::string &type)
 std::vector<std::string> XLineManager::GetAllTypes()
 {
 	std::vector<std::string> items;
-	for (ContainerIter x = lookup_lines.begin(); x != lookup_lines.end(); ++x)
-		items.push_back(x->first);
+	for (const auto& [type, _] : lookup_lines)
+		items.push_back(type);
 	return items;
 }
 
-IdentHostPair XLineManager::IdentSplit(const std::string &ident_and_host)
+UserHostPair XLineManager::SplitUserHost(const std::string& user_and_host)
 {
-	IdentHostPair n = std::make_pair<std::string,std::string>("*","*");
-	std::string::size_type x = ident_and_host.find('@');
+	UserHostPair n = std::make_pair("*", "*");
+	std::string::size_type x = user_and_host.find('@');
 	if (x != std::string::npos)
 	{
-		n.second = ident_and_host.substr(x + 1,ident_and_host.length());
-		n.first = ident_and_host.substr(0, x);
+		n.second = user_and_host.substr(x + 1, user_and_host.length());
+		n.first = user_and_host.substr(0, x);
 		if (!n.first.length())
 			n.first.assign("*");
 		if (!n.second.length())
@@ -244,7 +267,7 @@ IdentHostPair XLineManager::IdentSplit(const std::string &ident_and_host)
 	else
 	{
 		n.first.clear();
-		n.second = ident_and_host;
+		n.second = user_and_host;
 	}
 
 	return n;
@@ -264,21 +287,39 @@ bool XLineManager::AddLine(XLine* line, User* user)
 		LookupIter i = x->second.find(line->Displayable());
 		if (i != x->second.end())
 		{
-			// XLine propagation bug was here, if the line to be added already exists and
-			// it's expired then expire it and add the new one instead of returning false
-			if ((!i->second->duration) || (ServerInstance->Time() < i->second->expiry))
-				return false;
+			bool silent = false;
 
-			ExpireLine(x, i);
+			// Allow replacing a config line for an updated config line.
+			if (i->second->from_config && line->from_config)
+			{
+				// Nothing changed, skip adding this one.
+				if (i->second->reason == line->reason)
+					return false;
+
+				silent = true;
+			}
+			// Allow replacing a non-config line for a new config line.
+			else if (!line->from_config)
+			{
+				// X-line propagation bug was here, if the line to be added already exists and
+				// it's expired then expire it and add the new one instead of returning false
+				if ((!i->second->duration) || (ServerInstance->Time() < i->second->expiry))
+					return false;
+			}
+			else
+			{
+				silent = true;
+			}
+
+			ExpireLine(x, i, silent);
 		}
 	}
 
-	/*ELine* item = new ELine(ServerInstance->Time(), duration, source, reason, ih.first.c_str(), ih.second.c_str());*/
 	XLineFactory* xlf = GetFactory(line->type);
 	if (!xlf)
 		return false;
 
-	ServerInstance->BanCache->RemoveEntries(line->type, false); // XXX perhaps remove ELines here?
+	ServerInstance->BanCache.RemoveEntries(line->type, false); // XXX perhaps remove ELines here?
 
 	if (xlf->AutoApplyToUserList(line))
 		pending_lines.push_back(line);
@@ -286,14 +327,14 @@ bool XLineManager::AddLine(XLine* line, User* user)
 	lookup_lines[line->type][line->Displayable()] = line;
 	line->OnAdd();
 
-	FOREACH_MOD(I_OnAddLine,OnAddLine(user, line));
+	FOREACH_MOD(OnAddLine, (user, line));
 
 	return true;
 }
 
 // deletes a line, returns true if the line existed and was removed
 
-bool XLineManager::DelLine(const char* hostmask, const std::string &type, User* user, bool simulate)
+bool XLineManager::DelLine(const std::string& hostmask, const std::string& type, std::string& reason, User* user, bool simulate)
 {
 	ContainerIter x = lookup_lines.find(type);
 
@@ -305,18 +346,18 @@ bool XLineManager::DelLine(const char* hostmask, const std::string &type, User* 
 	if (y == x->second.end())
 		return false;
 
+	reason.assign(y->second->reason);
+
 	if (simulate)
 		return true;
 
-	ServerInstance->BanCache->RemoveEntries(y->second->type, true);
+	ServerInstance->BanCache.RemoveEntries(y->second->type, true);
 
-	FOREACH_MOD(I_OnDelLine,OnDelLine(user, y->second));
+	FOREACH_MOD(OnDelLine, (user, y->second));
 
 	y->second->Unset();
 
-	std::vector<XLine*>::iterator pptr = std::find(pending_lines.begin(), pending_lines.end(), y->second);
-	if (pptr != pending_lines.end())
-		pending_lines.erase(pptr);
+	stdalgo::erase(pending_lines, y->second);
 
 	delete y->second;
 	x->second.erase(y);
@@ -324,20 +365,19 @@ bool XLineManager::DelLine(const char* hostmask, const std::string &type, User* 
 	return true;
 }
 
-
 void ELine::Unset()
 {
 	ServerInstance->XLines->CheckELines();
 }
 
-// returns a pointer to the reason if a nickname matches a qline, NULL if it didnt match
+// returns a pointer to the reason if a nickname matches a Q-line, NULL if it didn't match
 
-XLine* XLineManager::MatchesLine(const std::string &type, User* user)
+XLine* XLineManager::MatchesLine(const std::string& type, User* user)
 {
 	ContainerIter x = lookup_lines.find(type);
 
 	if (x == lookup_lines.end())
-		return NULL;
+		return nullptr;
 
 	const time_t current = ServerInstance->Time();
 
@@ -363,19 +403,19 @@ XLine* XLineManager::MatchesLine(const std::string &type, User* user)
 
 		i = safei;
 	}
-	return NULL;
+	return nullptr;
 }
 
-XLine* XLineManager::MatchesLine(const std::string &type, const std::string &pattern)
+XLine* XLineManager::MatchesLine(const std::string& type, const std::string& pattern)
 {
 	ContainerIter x = lookup_lines.find(type);
 
 	if (x == lookup_lines.end())
-		return NULL;
+		return nullptr;
 
 	const time_t current = ServerInstance->Time();
 
-	 LookupIter safei;
+	LookupIter safei;
 
 	for (LookupIter i = x->second.begin(); i != x->second.end(); )
 	{
@@ -398,120 +438,106 @@ XLine* XLineManager::MatchesLine(const std::string &type, const std::string &pat
 
 		i = safei;
 	}
-	return NULL;
+	return nullptr;
 }
 
 // removes lines that have expired
-void XLineManager::ExpireLine(ContainerIter container, LookupIter item)
+void XLineManager::ExpireLine(ContainerIter container, LookupIter item, bool silent)
 {
-	FOREACH_MOD(I_OnExpireLine, OnExpireLine(item->second));
+	ServerInstance->BanCache.RemoveEntries(item->second->type, true);
+	FOREACH_MOD(OnExpireLine, (item->second));
 
-	item->second->DisplayExpiry();
+	if (!silent)
+		item->second->DisplayExpiry();
+
 	item->second->Unset();
 
 	/* TODO: Can we skip this loop by having a 'pending' field in the XLine class, which is set when a line
 	 * is pending, cleared when it is no longer pending, so we skip over this loop if its not pending?
 	 * -- Brain
 	 */
-	std::vector<XLine*>::iterator pptr = std::find(pending_lines.begin(), pending_lines.end(), item->second);
-	if (pptr != pending_lines.end())
-		pending_lines.erase(pptr);
+	stdalgo::erase(pending_lines, item->second);
 
 	delete item->second;
 	container->second.erase(item);
 }
 
-
 // applies lines, removing clients and changing nicks etc as applicable
 void XLineManager::ApplyLines()
 {
-	LocalUserList::reverse_iterator u2 = ServerInstance->Users->local_users.rbegin();
-	while (u2 != ServerInstance->Users->local_users.rend())
+	const UserManager::LocalList& list = ServerInstance->Users.GetLocalUsers();
+	for (UserManager::LocalList::const_iterator j = list.begin(); j != list.end(); )
 	{
-		User* u = *u2++;
+		LocalUser* u = *j++;
 
 		// Don't ban people who are exempt.
 		if (u->exempt)
 			continue;
 
-		for (std::vector<XLine *>::iterator i = pending_lines.begin(); i != pending_lines.end(); i++)
+		for (auto* x : pending_lines)
 		{
-			XLine *x = *i;
 			if (x->Matches(u))
+			{
 				x->Apply(u);
+
+				// If applying the X-line has killed the user then don't
+				// apply any more lines to them.
+				if (u->quitting)
+					break;
+			}
 		}
 	}
 
 	pending_lines.clear();
 }
 
-void XLineManager::InvokeStats(const std::string &type, int numeric, User* user, string_list &results)
+bool XLineManager::InvokeStats(const std::string& type, Stats::Context& context)
 {
-	ContainerIter n = lookup_lines.find(type);
+	ContainerIter citer = lookup_lines.find(type);
+	if (citer == lookup_lines.end())
+		return false;
 
-	time_t current = ServerInstance->Time();
-
-	LookupIter safei;
-
-	if (n != lookup_lines.end())
+	for (LookupIter liter = citer->second.begin(); liter != citer->second.end(); )
 	{
-		XLineLookup& list = n->second;
-		for (LookupIter i = list.begin(); i != list.end(); )
+		// We might be about to expire the XLine so we have to increment the
+		// iterator early to avoid doing that causing iterator invalidation.
+		LookupIter current = liter++;
+
+		XLine* xline = current->second;
+		if (xline->duration && xline->expiry <= ServerInstance->Time())
 		{
-			safei = i;
-			safei++;
-
-			if (i->second->duration && current > i->second->expiry)
-			{
-				ExpireLine(n, i);
-			}
-			else
-				results.push_back(ServerInstance->Config->ServerName+" "+ConvToStr(numeric)+" "+user->nick+" :"+i->second->Displayable()+" "+
-					ConvToStr(i->second->set_time)+" "+ConvToStr(i->second->duration)+" "+i->second->source+" :"+i->second->reason);
-			i = safei;
+			// This XLine has expired so remove and skip it.
+			ExpireLine(citer, current);
+			continue;
 		}
-	}
-}
 
+		context.AddGenericRow(xline->Displayable(), xline->set_time, xline->duration, xline->source, xline->reason);
+	}
+	return true;
+}
 
 XLineManager::XLineManager()
 {
-	GLineFactory* GFact;
-	ELineFactory* EFact;
-	KLineFactory* KFact;
-	QLineFactory* QFact;
-	ZLineFactory* ZFact;
-
-
-	GFact = new GLineFactory;
-	EFact = new ELineFactory;
-	KFact = new KLineFactory;
-	QFact = new QLineFactory;
-	ZFact = new ZLineFactory;
-
-	RegisterFactory(GFact);
-	RegisterFactory(EFact);
-	RegisterFactory(KFact);
-	RegisterFactory(QFact);
-	RegisterFactory(ZFact);
+	RegisterFactory(new ELineFactory());
+	RegisterFactory(new GLineFactory());
+	RegisterFactory(new KLineFactory());
+	RegisterFactory(new QLineFactory());
+	RegisterFactory(new ZLineFactory());
 }
 
 XLineManager::~XLineManager()
 {
-	const char gekqz[] = "GEKQZ";
-	for(unsigned int i=0; i < sizeof(gekqz); i++)
+	for(const char line : "GEKQZ")
 	{
-		XLineFactory* xlf = GetFactory(std::string(1, gekqz[i]));
+		XLineFactory* xlf = GetFactory(std::string(1, line));
 		delete xlf;
 	}
 
 	// Delete all existing XLines
-	for (XLineContainer::iterator i = lookup_lines.begin(); i != lookup_lines.end(); i++)
+	for (const auto& [_, lines] : lookup_lines)
 	{
-		for (XLineLookup::iterator j = i->second.begin(); j != i->second.end(); j++)
-		{
-			delete j->second;
-		}
+		for (const auto& [__, line] : lines)
+			delete line;
 	}
 }
 
@@ -521,41 +547,51 @@ void XLine::Apply(User* u)
 
 bool XLine::IsBurstable()
 {
-	return true;
+	return !from_config;
 }
 
-void XLine::DefaultApply(User* u, const std::string &line, bool bancache)
+void XLine::DefaultApply(User* u, bool bancache)
 {
-	char sreason[MAXBUF];
-	snprintf(sreason, MAXBUF, "%s-Lined: %s", line.c_str(), this->reason.c_str());
-	if (!ServerInstance->Config->MoronBanner.empty())
-		u->WriteServ("NOTICE %s :*** %s", u->nick.c_str(), ServerInstance->Config->MoronBanner.c_str());
+	if (!ServerInstance->Config->XLineMessage.empty())
+		u->WriteNumeric(ERR_YOUREBANNEDCREEP, ServerInstance->Config->XLineMessage);
 
-	if (ServerInstance->Config->HideBans)
-		ServerInstance->Users->QuitUser(u, line + "-Lined", sreason);
+	Template::VariableMap vars = {
+		{ "created",   Time::ToString(set_time)                            },
+		{ "duration",  Duration::ToString(duration)                        },
+		{ "expiry",    Time::ToString(expiry)                              },
+		{ "fulltype",  type.length() <= 2 ? type + "-lined" : type         },
+		{ "reason",    reason                                              },
+		{ "remaining", Duration::ToString(ServerInstance->Time() - expiry) },
+		{ "setter",    source                                              },
+		{ "type",      type                                                },
+	};
+
+	const std::string banreason = Template::Replace(ServerInstance->Config->XLineQuit, vars);
+	if (ServerInstance->Config->XLineQuitPublic.empty())
+		ServerInstance->Users.QuitUser(u, banreason);
 	else
-		ServerInstance->Users->QuitUser(u, sreason);
-
+	{
+		const std::string publicreason = Template::Replace(ServerInstance->Config->XLineQuitPublic, vars);
+		ServerInstance->Users.QuitUser(u, publicreason, &banreason);
+	}
 
 	if (bancache)
 	{
-		ServerInstance->Logs->Log("BANCACHE", DEBUG, "BanCache: Adding positive hit (" + line + ") for " + u->GetIPString());
-		if (this->duration > 0)
-			ServerInstance->BanCache->AddHit(u->GetIPString(), this->type, line + "-Lined: " + this->reason, (this->expiry - ServerInstance->Time()));
-		else
-			ServerInstance->BanCache->AddHit(u->GetIPString(), this->type, line + "-Lined: " + this->reason);
+		ServerInstance->Logs.Debug("BANCACHE", "Adding positive hit (" + type + ") for " + u->GetAddress());
+		ServerInstance->BanCache.AddHit(u->GetAddress(), this->type, banreason, (this->duration > 0 ? (this->expiry - ServerInstance->Time()) : 0));
 	}
 }
 
-bool KLine::Matches(User *u)
+bool KLine::Matches(User* u) const
 {
-	if (u->exempt)
+	LocalUser* lu = IS_LOCAL(u);
+	if (lu && lu->exempt)
 		return false;
 
-	if (InspIRCd::Match(u->ident, this->identmask, ascii_case_insensitive_map))
+	if (InspIRCd::Match(u->GetRealUser(), this->usermask, ascii_case_insensitive_map))
 	{
-		if (InspIRCd::MatchCIDR(u->host, this->hostmask, ascii_case_insensitive_map) ||
-		    InspIRCd::MatchCIDR(u->GetIPString(), this->hostmask, ascii_case_insensitive_map))
+		if (InspIRCd::MatchCIDR(u->GetRealHost(), this->hostmask, ascii_case_insensitive_map) ||
+			InspIRCd::MatchCIDR(u->GetAddress(), this->hostmask, ascii_case_insensitive_map))
 		{
 			return true;
 		}
@@ -566,18 +602,19 @@ bool KLine::Matches(User *u)
 
 void KLine::Apply(User* u)
 {
-	DefaultApply(u, "K", (this->identmask ==  "*") ? true : false);
+	DefaultApply(u, this->usermask ==  "*");
 }
 
-bool GLine::Matches(User *u)
+bool GLine::Matches(User* u) const
 {
-	if (u->exempt)
+	LocalUser* lu = IS_LOCAL(u);
+	if (lu && lu->exempt)
 		return false;
 
-	if (InspIRCd::Match(u->ident, this->identmask, ascii_case_insensitive_map))
+	if (InspIRCd::Match(u->GetRealUser(), this->usermask, ascii_case_insensitive_map))
 	{
-		if (InspIRCd::MatchCIDR(u->host, this->hostmask, ascii_case_insensitive_map) ||
-		    InspIRCd::MatchCIDR(u->GetIPString(), this->hostmask, ascii_case_insensitive_map))
+		if (InspIRCd::MatchCIDR(u->GetRealHost(), this->hostmask, ascii_case_insensitive_map) ||
+			InspIRCd::MatchCIDR(u->GetAddress(), this->hostmask, ascii_case_insensitive_map))
 		{
 			return true;
 		}
@@ -588,15 +625,15 @@ bool GLine::Matches(User *u)
 
 void GLine::Apply(User* u)
 {
-	DefaultApply(u, "G", (this->identmask == "*") ? true : false);
+	DefaultApply(u, this->usermask == "*");
 }
 
-bool ELine::Matches(User *u)
+bool ELine::Matches(User* u) const
 {
-	if (InspIRCd::Match(u->ident, this->identmask, ascii_case_insensitive_map))
+	if (InspIRCd::Match(u->GetRealUser(), this->usermask, ascii_case_insensitive_map))
 	{
-		if (InspIRCd::MatchCIDR(u->host, this->hostmask, ascii_case_insensitive_map) ||
-		    InspIRCd::MatchCIDR(u->GetIPString(), this->hostmask, ascii_case_insensitive_map))
+		if (InspIRCd::MatchCIDR(u->GetRealHost(), this->hostmask, ascii_case_insensitive_map) ||
+			InspIRCd::MatchCIDR(u->GetAddress(), this->hostmask, ascii_case_insensitive_map))
 		{
 			return true;
 		}
@@ -605,133 +642,97 @@ bool ELine::Matches(User *u)
 	return false;
 }
 
-bool ZLine::Matches(User *u)
+bool ZLine::Matches(User* u) const
 {
-	if (u->exempt)
+	LocalUser* lu = IS_LOCAL(u);
+	if (lu && lu->exempt)
 		return false;
 
-	if (InspIRCd::MatchCIDR(u->GetIPString(), this->ipaddr))
-		return true;
-	else
-		return false;
+	return InspIRCd::MatchCIDR(u->GetAddress(), this->ipaddr);
 }
 
 void ZLine::Apply(User* u)
 {
-	DefaultApply(u, "Z", true);
+	DefaultApply(u, true);
 }
 
-
-bool QLine::Matches(User *u)
+bool QLine::Matches(User* u) const
 {
-	if (InspIRCd::Match(u->nick, this->nick))
-		return true;
-
-	return false;
+	return InspIRCd::Match(u->nick, this->nick);
 }
 
 void QLine::Apply(User* u)
 {
-	/* Force to uuid on apply of qline, no need to disconnect any more :) */
-	u->ForceNickChange(u->uuid.c_str());
+	/* Force to uuid on apply of Q-line, no need to disconnect anymore :) */
+	u->WriteNumeric(RPL_SAVENICK, u->uuid, "Your nickname has been Q-lined.");
+	u->ChangeNick(u->uuid);
 }
 
-
-bool ZLine::Matches(const std::string &str)
+bool ZLine::Matches(const std::string& str) const
 {
-	if (InspIRCd::MatchCIDR(str, this->ipaddr))
-		return true;
-	else
-		return false;
+	return InspIRCd::MatchCIDR(str, this->ipaddr);
 }
 
-bool QLine::Matches(const std::string &str)
+bool QLine::Matches(const std::string& str) const
 {
-	if (InspIRCd::Match(str, this->nick))
-		return true;
-
-	return false;
+	return InspIRCd::Match(str, this->nick);
 }
 
-bool ELine::Matches(const std::string &str)
+bool ELine::Matches(const std::string& str) const
 {
-	return (InspIRCd::MatchCIDR(str, matchtext));
+	return InspIRCd::MatchCIDR(str, matchtext);
 }
 
-bool KLine::Matches(const std::string &str)
+bool KLine::Matches(const std::string& str) const
 {
-	return (InspIRCd::MatchCIDR(str.c_str(), matchtext));
+	return InspIRCd::MatchCIDR(str, matchtext);
 }
 
-bool GLine::Matches(const std::string &str)
+bool GLine::Matches(const std::string& str) const
 {
-	return (InspIRCd::MatchCIDR(str, matchtext));
+	return InspIRCd::MatchCIDR(str, matchtext);
 }
 
 void ELine::OnAdd()
 {
-	/* When adding one eline, only check the one eline */
-	for (LocalUserList::const_iterator u2 = ServerInstance->Users->local_users.begin(); u2 != ServerInstance->Users->local_users.end(); u2++)
+	/* When adding one E-line, only check the one E-line */
+	for (auto* u : ServerInstance->Users.GetLocalUsers())
 	{
-		User* u = (User*)(*u2);
 		if (this->Matches(u))
 			u->exempt = true;
 	}
 }
 
-void ELine::DisplayExpiry()
+void XLine::DisplayExpiry()
 {
-	ServerInstance->SNO->WriteToSnoMask('x',"Removing expired E-Line %s@%s (set by %s %ld seconds ago)",
-		identmask.c_str(),hostmask.c_str(),source.c_str(),(long)(ServerInstance->Time() - this->set_time));
+	ServerInstance->SNO.WriteToSnoMask('x', "Removing an expired {}{} on {} (set by {} {} ago): {}",
+		type, (type.length() <= 2 ? "-line" : ""), Displayable(), source,
+		Duration::ToString(ServerInstance->Time() - set_time), reason);
 }
 
-void QLine::DisplayExpiry()
+const std::string& ELine::Displayable() const
 {
-	ServerInstance->SNO->WriteToSnoMask('x',"Removing expired Q-Line %s (set by %s %ld seconds ago)",
-		nick.c_str(),source.c_str(),(long)(ServerInstance->Time() - this->set_time));
+	return matchtext;
 }
 
-void ZLine::DisplayExpiry()
+const std::string& KLine::Displayable() const
 {
-	ServerInstance->SNO->WriteToSnoMask('x',"Removing expired Z-Line %s (set by %s %ld seconds ago)",
-		ipaddr.c_str(),source.c_str(),(long)(ServerInstance->Time() - this->set_time));
+	return matchtext;
 }
 
-void KLine::DisplayExpiry()
+const std::string& GLine::Displayable() const
 {
-	ServerInstance->SNO->WriteToSnoMask('x',"Removing expired K-Line %s@%s (set by %s %ld seconds ago)",
-		identmask.c_str(),hostmask.c_str(),source.c_str(),(long)(ServerInstance->Time() - this->set_time));
+	return matchtext;
 }
 
-void GLine::DisplayExpiry()
+const std::string& ZLine::Displayable() const
 {
-	ServerInstance->SNO->WriteToSnoMask('x',"Removing expired G-Line %s@%s (set by %s %ld seconds ago)",
-		identmask.c_str(),hostmask.c_str(),source.c_str(),(long)(ServerInstance->Time() - this->set_time));
+	return ipaddr;
 }
 
-const char* ELine::Displayable()
+const std::string& QLine::Displayable() const
 {
-	return matchtext.c_str();
-}
-
-const char* KLine::Displayable()
-{
-	return matchtext.c_str();
-}
-
-const char* GLine::Displayable()
-{
-	return matchtext.c_str();
-}
-
-const char* ZLine::Displayable()
-{
-	return ipaddr.c_str();
-}
-
-const char* QLine::Displayable()
-{
-	return nick.c_str();
+	return nick;
 }
 
 bool KLine::IsBurstable()
@@ -763,12 +764,33 @@ bool XLineManager::UnregisterFactory(XLineFactory* xlf)
 	return true;
 }
 
-XLineFactory* XLineManager::GetFactory(const std::string &type)
+XLineFactory* XLineManager::GetFactory(const std::string& type)
 {
 	XLineFactMap::iterator n = line_factory.find(type);
 
 	if (n == line_factory.end())
-		return NULL;
+		return nullptr;
 
 	return n->second;
+}
+
+void XLineManager::ExpireRemovedConfigLines(const std::string& type, const insp::flat_set<std::string>& configlines)
+{
+	// Nothing to do.
+	if (lookup_lines.empty())
+		return;
+
+	ContainerIter xlines = lookup_lines.find(type);
+	if (xlines == lookup_lines.end())
+		return;
+
+	for (LookupIter xline = xlines->second.begin(); xline != xlines->second.end(); )
+	{
+		LookupIter cachedxline = xline++;
+		if (!cachedxline->second->from_config)
+			continue;
+
+		if (!configlines.count(cachedxline->second->Displayable()))
+			ExpireLine(xlines, cachedxline);
+	}
 }

@@ -1,9 +1,15 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
- *   Copyright (C) 2007-2008 Robin Burchell <robin+git@viroteck.net>
+ *   Copyright (C) 2019 linuxdaemon <linuxdaemon.irc@gmail.com>
+ *   Copyright (C) 2019 Matt Schatz <genius3000@g3k.solutions>
+ *   Copyright (C) 2017-2024 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2012, 2019 Robby <robby@chatbelgie.be>
+ *   Copyright (C) 2012 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2009 Daniel De Graaf <danieldg@inspircd.org>
+ *   Copyright (C) 2008 Robin Burchell <robin+git@viroteck.net>
  *   Copyright (C) 2007 Dennis Friis <peavey@inspircd.org>
- *   Copyright (C) 2004, 2006 Craig Edwards <craigedwards@brainbox.cc>
+ *   Copyright (C) 2006 Craig Edwards <brain@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -20,72 +26,104 @@
 
 
 #include "inspircd.h"
+#include "modules/callerid.h"
+#include "modules/exemption.h"
+#include "modules/extban.h"
+#include "numerichelper.h"
 
-/* $ModDesc: Provides channel mode +C to block CTCPs */
-
-class NoCTCP : public SimpleChannelModeHandler
+class ModuleNoCTCP final
+	: public Module
 {
- public:
-	NoCTCP(Module* Creator) : SimpleChannelModeHandler(Creator, "noctcp", 'C') { }
-};
+private:
+	CallerID::API calleridapi;
+	CheckExemption::EventProvider exemptionprov;
+	ExtBan::Acting extban;
+	SimpleChannelMode nc;
+	SimpleUserMode ncu;
 
-class ModuleNoCTCP : public Module
-{
-
-	NoCTCP nc;
-
- public:
-
+public:
 	ModuleNoCTCP()
-		: nc(this)
+		: Module(VF_VENDOR, "Adds channel mode C (noctcp) which allows channels to block messages which contain CTCPs and user mode T (u_noctcp) which allows users to block private messages that contain CTCPs.")
+		, calleridapi(this)
+		, exemptionprov(this)
+		, extban(this, "noctcp", 'C')
+		, nc(this, "noctcp", 'C')
+		, ncu(this, "u_noctcp", 'T')
 	{
 	}
 
-	void init()
+	ModResult OnUserPreMessage(User* user, MessageTarget& target, MessageDetails& details) override
 	{
-		ServerInstance->Modules->AddService(nc);
-		Implementation eventlist[] = { I_OnUserPreMessage, I_OnUserPreNotice, I_On005Numeric };
-		ServerInstance->Modules->Attach(eventlist, this, sizeof(eventlist)/sizeof(Implementation));
-	}
+		if (!IS_LOCAL(user))
+			return MOD_RES_PASSTHRU;
 
-	virtual ~ModuleNoCTCP()
-	{
-	}
+		std::string_view ctcpname;
+		if (!details.IsCTCP(ctcpname) || irc::equals(ctcpname, "ACTION"))
+			return MOD_RES_PASSTHRU;
 
-	virtual Version GetVersion()
-	{
-		return Version("Provides channel mode +C to block CTCPs", VF_VENDOR);
-	}
-
-	virtual ModResult OnUserPreMessage(User* user,void* dest,int target_type, std::string &text, char status, CUList &exempt_list)
-	{
-		return OnUserPreNotice(user,dest,target_type,text,status,exempt_list);
-	}
-
-	virtual ModResult OnUserPreNotice(User* user,void* dest,int target_type, std::string &text, char status, CUList &exempt_list)
-	{
-		if ((target_type == TYPE_CHANNEL) && (IS_LOCAL(user)))
+		switch (target.type)
 		{
-			Channel* c = (Channel*)dest;
-			if ((text.empty()) || (text[0] != '\001') || (!strncmp(text.c_str(),"\1ACTION ", 8)) || (text == "\1ACTION\1") || (text == "\1ACTION"))
-				return MOD_RES_PASSTHRU;
-
-			ModResult res = ServerInstance->OnCheckExemption(user,c,"noctcp");
-			if (res == MOD_RES_ALLOW)
-				return MOD_RES_PASSTHRU;
-
-			if (!c->GetExtBanStatus(user, 'C').check(!c->IsModeSet('C')))
+			case MessageTarget::TYPE_CHANNEL:
 			{
-				user->WriteNumeric(ERR_NOCTCPALLOWED, "%s %s :Can't send CTCP to channel (+C set)",user->nick.c_str(), c->name.c_str());
-				return MOD_RES_DENY;
+				if (user->HasPrivPermission("channels/ignore-noctcp"))
+					return MOD_RES_PASSTHRU;
+
+				auto* c = target.Get<Channel>();
+				for (const auto& [u, _] : c->GetUsers())
+				{
+					if (u->IsModeSet(ncu))
+						details.exemptions.insert(u);
+				}
+
+				ModResult res = exemptionprov.Check(user, c, "noctcp");
+				if (res == MOD_RES_ALLOW)
+					return MOD_RES_PASSTHRU;
+
+				if (c->IsModeSet(nc))
+				{
+					user->WriteNumeric(Numerics::CannotSendTo(c, "CTCPs", &nc));
+					return MOD_RES_DENY;
+				}
+
+				if (extban.GetStatus(user, c) == MOD_RES_DENY)
+				{
+					user->WriteNumeric(Numerics::CannotSendTo(c, "CTCPs", extban));
+					return MOD_RES_DENY;
+				}
+				break;
+			}
+			case MessageTarget::TYPE_USER:
+			{
+				auto* targetuser = target.Get<User>();
+				if (user->HasPrivPermission("users/ignore-noctcp"))
+					return MOD_RES_PASSTHRU;
+
+				if (calleridapi && calleridapi->IsOnAcceptList(user, targetuser))
+					return MOD_RES_PASSTHRU;
+
+				if (targetuser->IsModeSet(ncu))
+				{
+					// Don't send an error message if we're blocking an automatic CTCP reply.
+					if (details.type == MessageType::NOTICE)
+						user->WriteNumeric(Numerics::CannotSendTo(targetuser, "CTCPs", &ncu));
+					return MOD_RES_DENY;
+				}
+				break;
+			}
+			case MessageTarget::TYPE_SERVER:
+			{
+				if (user->HasPrivPermission("users/ignore-noctcp"))
+					return MOD_RES_PASSTHRU;
+
+				for (auto* u : ServerInstance->Users.GetLocalUsers())
+				{
+					if (u->IsModeSet(ncu))
+						details.exemptions.insert(u);
+				}
+				break;
 			}
 		}
 		return MOD_RES_PASSTHRU;
-	}
-
-	virtual void On005Numeric(std::string &output)
-	{
-		ServerInstance->AddExtBanChar('C');
 	}
 };
 

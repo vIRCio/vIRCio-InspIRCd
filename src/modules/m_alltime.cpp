@@ -1,9 +1,12 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
+ *   Copyright (C) 2019-2023 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2012, 2016 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
+ *   Copyright (C) 2009-2010 Daniel De Graaf <danieldg@inspircd.org>
  *   Copyright (C) 2007 Dennis Friis <peavey@inspircd.org>
- *   Copyright (C) 2007 Robin Burchell <robin+git@viroteck.net>
- *   Copyright (C) 2006 John Brooks <john.brooks@dereferenced.net>
+ *   Copyright (C) 2007 Craig Edwards <brain@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -20,62 +23,48 @@
 
 
 #include "inspircd.h"
+#include "timeutils.h"
 
-/* $ModDesc: Display timestamps from all servers connected to the network */
-
-class CommandAlltime : public Command
+class CommandAlltime final
+	: public Command
 {
- public:
-	CommandAlltime(Module* Creator) : Command(Creator, "ALLTIME", 0)
+public:
+	CommandAlltime(Module* Creator)
+		: Command(Creator, "ALLTIME", 0)
 	{
-		flags_needed = 'o';
-		translation.push_back(TR_END);
+		access_needed = CmdAccess::OPERATOR;
 	}
 
-	CmdResult Handle(const std::vector<std::string> &parameters, User *user)
+	CmdResult Handle(User* user, const Params& parameters) override
 	{
-		char fmtdate[64];
-		time_t now = ServerInstance->Time();
-		strftime(fmtdate, sizeof(fmtdate), "%Y-%m-%d %H:%M:%S", gmtime(&now));
+		const std::string fmtdate = Time::ToString(ServerInstance->Time(), "%Y-%m-%d %H:%M:%S", true);
 
-		std::string msg = ":" + ServerInstance->Config->ServerName + " NOTICE " + user->nick + " :System time is " + fmtdate + " (" + ConvToStr(ServerInstance->Time()) + ") on " + ServerInstance->Config->ServerName;
+		std::string msg = "System time is " + fmtdate + " (" + ConvToStr(ServerInstance->Time()) + ") on " + ServerInstance->Config->ServerName;
 
-		user->SendText(msg);
+		user->WriteRemoteNotice(msg);
 
 		/* we want this routed out! */
-		return CMD_SUCCESS;
+		return CmdResult::SUCCESS;
 	}
 
-	RouteDescriptor GetRouting(User* user, const std::vector<std::string>& parameters)
+	RouteDescriptor GetRouting(User* user, const Params& parameters) override
 	{
 		return ROUTE_OPT_BCAST;
 	}
 };
 
-
-class Modulealltime : public Module
+class Modulealltime final
+	: public Module
 {
+private:
 	CommandAlltime mycommand;
- public:
+
+public:
 	Modulealltime()
-		: mycommand(this)
+		: Module(VF_VENDOR | VF_OPTCOMMON, "Adds the /ALLTIME command which allows server operators to see the current UTC time on all of the servers on the network.")
+		, mycommand(this)
 	{
 	}
-
-	void init()
-	{
-		ServerInstance->Modules->AddService(mycommand);
-	}
-
-	virtual ~Modulealltime()
-	{
-	}
-
-	virtual Version GetVersion()
-	{
-		return Version("Display timestamps from all servers connected to the network", VF_OPTCOMMON | VF_VENDOR);
-	}
-
 };
 
 MODULE_INIT(Modulealltime)

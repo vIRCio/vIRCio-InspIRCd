@@ -1,0 +1,36 @@
+# Last updated: 2024-06-19
+#
+# Modules we can't legally ship: geo_maxmind, ssl_openssl
+# Modules which don't apply to Windows: sslrehashsignal
+# Modules without packages: ssl_gnutls
+
+[requires]
+argon2/20190702
+## libmaxminddb/1.10.0
+libmysqlclient/8.1.0
+libpq/15.5
+libpsl/0.21.1
+## openssl/3.3.2
+pcre2/10.44
+re2/20240702
+sqlite3/3.47.0
+yyjson/0.10.0
+
+[options]
+argon2:shared=True
+libmaxminddb:shared=True
+libmysqlclient:shared=True
+libpq:shared=True
+libpsl:shared=True
+openssl:shared=True
+pcre2:shared=True
+re2:shared=True
+sqlite3:shared=True
+yyjson:shared=True
+
+[imports]
+., *.dll -> extradll @ keep_path=False
+., *.lib -> extralib @ keep_path=False
+
+[generators]
+cmake

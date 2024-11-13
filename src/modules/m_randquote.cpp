@@ -1,11 +1,11 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
+ *   Copyright (C) 2013, 2019-2021, 2023 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
  *   Copyright (C) 2010 Daniel De Graaf <danieldg@inspircd.org>
- *   Copyright (C) 2007-2008 Robin Burchell <robin+git@viroteck.net>
  *   Copyright (C) 2007 Dennis Friis <peavey@inspircd.org>
- *   Copyright (C) 2003, 2006 Craig Edwards <craigedwards@brainbox.cc>
- *   Copyright (C) 2005 Craig McLure <craig@chatspike.net>
+ *   Copyright (C) 2006-2008 Craig Edwards <brain@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -21,80 +21,47 @@
  */
 
 
-/* $ModDesc: Provides random quotes on connect. */
-
 #include "inspircd.h"
 
-static FileReader *quotes = NULL;
-
-std::string prefix;
-std::string suffix;
-
-/** Handle /RANDQUOTE
- */
-class CommandRandquote : public Command
+class ModuleRandQuote final
+	: public Module
 {
- public:
-	CommandRandquote(Module* Creator) : Command(Creator,"RANDQUOTE", 0)
-	{
-	}
+private:
+	std::string prefix;
+	std::string suffix;
+	std::vector<std::string> quotes;
 
-	CmdResult Handle (const std::vector<std::string>& parameters, User *user)
-	{
-		int fsize = quotes->FileSize();
-		if (fsize)
-		{
-			std::string str = quotes->GetLine(ServerInstance->GenRandomInt(fsize));
-			if (!str.empty())
-				user->WriteServ("NOTICE %s :%s%s%s",user->nick.c_str(),prefix.c_str(),str.c_str(),suffix.c_str());
-		}
-
-		return CMD_SUCCESS;
-	}
-};
-
-class ModuleRandQuote : public Module
-{
- private:
-	CommandRandquote cmd;
- public:
+public:
 	ModuleRandQuote()
-		: cmd(this)
+		: Module(VF_VENDOR, "Allows random quotes to be sent to users when they connect to the server.")
 	{
 	}
 
-	void init()
+	void init() override
 	{
-		ConfigTag* conf = ServerInstance->Config->ConfValue("randquote");
-
-		std::string q_file = conf->getString("file","quotes");
+		const auto& conf = ServerInstance->Config->ConfValue("randquote");
 		prefix = conf->getString("prefix");
 		suffix = conf->getString("suffix");
 
-		quotes = new FileReader(q_file);
-		if (!quotes->Exists())
+		const std::string filestr = conf->getString("file", "quotes", 1);
+		auto file = ServerInstance->Config->ReadFile(filestr);
+		if (!file)
+			throw ModuleException(this, "Unable to read quotes from " + filestr + ": " + file.error);
+
+		std::vector<std::string> newquotes;
+		irc::sepstream linestream(file.contents, '\n');
+		for (std::string line; linestream.GetToken(line); )
+			newquotes.push_back(line);
+		std::swap(quotes, newquotes);
+	}
+
+	void OnUserConnect(LocalUser* user) override
+	{
+		if (!quotes.empty())
 		{
-			throw ModuleException("m_randquote: QuoteFile not Found!! Please check your config - module will not function.");
+			unsigned long random = ServerInstance->GenRandomInt(quotes.size());
+			user->WriteNotice(prefix + quotes[random] + suffix);
 		}
-		ServerInstance->Modules->AddService(cmd);
-		Implementation eventlist[] = { I_OnUserConnect };
-		ServerInstance->Modules->Attach(eventlist, this, sizeof(eventlist)/sizeof(Implementation));
-	}
-
-
-	virtual ~ModuleRandQuote()
-	{
-		delete quotes;
-	}
-
-	virtual Version GetVersion()
-	{
-		return Version("Provides random quotes on connect.",VF_VENDOR);
-	}
-
-	virtual void OnUserConnect(LocalUser* user)
-	{
-		cmd.Handle(std::vector<std::string>(), user);
 	}
 };
 

@@ -1,8 +1,12 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
+ *   Copyright (C) 2013, 2019, 2021-2023 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2013 Adam <Adam@anope.org>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
+ *   Copyright (C) 2009 Daniel De Graaf <danieldg@inspircd.org>
  *   Copyright (C) 2007 Dennis Friis <peavey@inspircd.org>
- *   Copyright (C) 2007 Craig Edwards <craigedwards@brainbox.cc>
+ *   Copyright (C) 2007 Craig Edwards <brain@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -18,50 +22,38 @@
  */
 
 
-#ifndef M_SPANNINGTREE_RESOLVERS_H
-#define M_SPANNINGTREE_RESOLVERS_H
+#pragma once
 
-#include "socket.h"
 #include "inspircd.h"
-#include "xline.h"
+#include "modules/dns.h"
 
 #include "utils.h"
 #include "link.h"
 
-/** Handle resolving of server IPs for the cache
- */
-class SecurityIPResolver : public Resolver
+// Handles resolving whitelisted hostnames for the inbound connection whitelist.
+class SecurityIPResolver final
+	: public DNS::Request
 {
- private:
-	reference<Link> MyLink;
-	SpanningTreeUtilities* Utils;
-	Module* mine;
-	std::string host;
-	QueryType query;
- public:
-	SecurityIPResolver(Module* me, SpanningTreeUtilities* U, const std::string &hostname, Link* x, bool &cached, QueryType qt);
-	void OnLookupComplete(const std::string &result, unsigned int ttl, bool cached);
-	void OnError(ResolverError e, const std::string &errormessage);
+private:
+	std::shared_ptr<Link> link;
+	bool CheckIPv4();
+
+public:
+	SecurityIPResolver(Module* mod, DNS::Manager* mgr, const std::string& hostname, const std::shared_ptr<Link>& l, DNS::QueryType qt);
+	void OnLookupComplete(const DNS::Query* r) override;
+	void OnError(const DNS::Query* q) override;
 };
 
-/** This class is used to resolve server hostnames during /connect and autoconnect.
- * As of 1.1, the resolver system is seperated out from BufferedSocket, so we must do this
- * resolver step first ourselves if we need it. This is totally nonblocking, and will
- * callback to OnLookupComplete or OnError when completed. Once it has completed we
- * will have an IP address which we can then use to continue our connection.
- */
-class ServernameResolver : public Resolver
+// Handles resolving server hostnames when making an outbound connection.
+class ServerNameResolver final
+	: public DNS::Request
 {
- private:
-	SpanningTreeUtilities* Utils;
-	QueryType query;
-	std::string host;
-	reference<Link> MyLink;
-	reference<Autoconnect> myautoconnect;
- public:
-	ServernameResolver(SpanningTreeUtilities* Util, const std::string &hostname, Link* x, bool &cached, QueryType qt, Autoconnect* myac);
-	void OnLookupComplete(const std::string &result, unsigned int ttl, bool cached);
-	void OnError(ResolverError e, const std::string &errormessage);
-};
+private:
+	std::shared_ptr<Autoconnect> autoconnect;
+	std::shared_ptr<Link> link;
 
-#endif
+public:
+	ServerNameResolver(DNS::Manager* mgr, const std::string& hostname, const std::shared_ptr<Link>& l, DNS::QueryType qt, const std::shared_ptr<Autoconnect>& a);
+	void OnLookupComplete(const DNS::Query* r) override;
+	void OnError(const DNS::Query* q) override;
+};

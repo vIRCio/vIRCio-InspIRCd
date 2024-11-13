@@ -1,7 +1,12 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
- *   Copyright (C) 2011 Adam <Adam@anope.org>
+ *   Copyright (C) 2018-2020, 2022-2023 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2012-2014 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
+ *   Copyright (C) 2009 Uli Schlachter <psychon@znc.in>
+ *   Copyright (C) 2009 Daniel De Graaf <danieldg@inspircd.org>
+ *   Copyright (C) 2008 Robin Burchell <robin+git@viroteck.net>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -18,67 +23,53 @@
 
 
 #include "inspircd.h"
-#include "socket.h"
-#include "xline.h"
-#include "socketengine.h"
-
-#include "main.h"
 #include "utils.h"
-#include "treeserver.h"
-#include "treesocket.h"
+#include "commands.h"
 
-bool TreeSocket::Whois(const std::string &prefix, parameterlist &params)
+CmdResult CommandIdle::HandleRemote(RemoteUser* issuer, Params& params)
 {
-	if (params.size() < 1)
-		return true;
-	User* u = ServerInstance->FindNick(prefix);
-	if (u)
+	/**
+	 * There are two forms of IDLE: request and reply. Requests have one parameter,
+	 * replies have more than one.
+	 *
+	 * If this is a request, 'issuer' did a /whois and its server wants to learn the
+	 * idle time of the user in params[0].
+	 *
+	 * If this is a reply, params[0] is the user who did the whois and params.back() is
+	 * the number of seconds 'issuer' has been idle.
+	 */
+
+	auto* target = ServerInstance->Users.FindUUID(params[0], true);
+	if (!target)
+		return CmdResult::FAILURE;
+
+	LocalUser* localtarget = IS_LOCAL(target);
+	if (!localtarget)
 	{
-		// an incoming request
-		if (params.size() == 1)
-		{
-			User* x = ServerInstance->FindNick(params[0]);
-			if ((x) && (IS_LOCAL(x)))
-			{
-				long idle = labs((long)((x->idle_lastmsg) - ServerInstance->Time()));
-				parameterlist par;
-				par.push_back(prefix);
-				par.push_back(ConvToStr(x->signon));
-				par.push_back(ConvToStr(idle));
-				// ours, we're done, pass it BACK
-				Utils->DoOneToOne(params[0], "IDLE", par, u->server);
-			}
-			else
-			{
-				// not ours pass it on
-				if (x)
-					Utils->DoOneToOne(prefix, "IDLE", params, x->server);
-			}
-		}
-		else if (params.size() == 3)
-		{
-			std::string who_did_the_whois = params[0];
-			User* who_to_send_to = ServerInstance->FindNick(who_did_the_whois);
-			if ((who_to_send_to) && (IS_LOCAL(who_to_send_to)) && (who_to_send_to->registered == REG_ALL))
-			{
-				// an incoming reply to a whois we sent out
-				std::string nick_whoised = prefix;
-				unsigned long signon = atoi(params[1].c_str());
-				unsigned long idle = atoi(params[2].c_str());
-				if ((who_to_send_to) && (IS_LOCAL(who_to_send_to)))
-				{
-					ServerInstance->DoWhois(who_to_send_to, u, signon, idle, nick_whoised.c_str());
-				}
-			}
-			else
-			{
-				// not ours, pass it on
-				if (who_to_send_to)
-					Utils->DoOneToOne(prefix, "IDLE", params, who_to_send_to->server);
-			}
-		}
+		// Forward to target's server
+		return CmdResult::SUCCESS;
 	}
-	return true;
+
+	if (params.size() >= 2)
+	{
+		ServerInstance->Parser.CallHandler("WHOIS", params, issuer);
+	}
+	else
+	{
+		// A server is asking us the idle time of our user
+		unsigned int idle;
+		if (localtarget->idle_lastmsg >= ServerInstance->Time())
+			// Possible case when our clock ticked backwards
+			idle = 0;
+		else
+			idle = ((unsigned int) (ServerInstance->Time() - localtarget->idle_lastmsg));
+
+		CmdBuilder reply(target, "IDLE");
+		reply.push(issuer->uuid);
+		reply.push(ConvToStr(target->signon));
+		reply.push(ConvToStr(idle));
+		reply.Unicast(issuer);
+	}
+
+	return CmdResult::SUCCESS;
 }
-
-

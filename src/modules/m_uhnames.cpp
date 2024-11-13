@@ -1,9 +1,13 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
- *   Copyright (C) 2009 Daniel De Graaf <danieldg@inspircd.org>
- *   Copyright (C) 2007-2008 Craig Edwards <craigedwards@brainbox.cc>
+ *   Copyright (C) 2013, 2019-2021, 2023 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2012, 2014-2015 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
+ *   Copyright (C) 2009-2010 Daniel De Graaf <danieldg@inspircd.org>
+ *   Copyright (C) 2009 Uli Schlachter <psychon@znc.in>
  *   Copyright (C) 2007 Dennis Friis <peavey@inspircd.org>
+ *   Copyright (C) 2007 Craig Edwards <brain@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -20,71 +24,30 @@
 
 
 #include "inspircd.h"
-#include "m_cap.h"
+#include "modules/cap.h"
+#include "modules/names.h"
 
-/* $ModDesc: Provides the UHNAMES facility. */
-
-class ModuleUHNames : public Module
+class ModuleUHNames final
+	: public Module
+	, public Names::EventListener
 {
- public:
-	GenericCap cap;
+private:
+	Cap::Capability cap;
 
-	ModuleUHNames() : cap(this, "userhost-in-names")
+public:
+	ModuleUHNames()
+		: Module(VF_VENDOR, "Provides the IRCv3 userhost-in-names client capability.")
+		, Names::EventListener(this)
+		, cap(this, "userhost-in-names")
 	{
 	}
 
-	void init()
+	ModResult OnNamesListItem(LocalUser* issuer, Membership* memb, std::string& prefixes, std::string& nick) override
 	{
-		Implementation eventlist[] = { I_OnEvent, I_OnPreCommand, I_OnNamesListItem, I_On005Numeric };
-		ServerInstance->Modules->Attach(eventlist, this, sizeof(eventlist)/sizeof(Implementation));
-	}
+		if (cap.IsEnabled(issuer))
+			nick = memb->user->GetMask();
 
-	~ModuleUHNames()
-	{
-	}
-
-	Version GetVersion()
-	{
-		return Version("Provides the UHNAMES facility.",VF_VENDOR);
-	}
-
-	void On005Numeric(std::string &output)
-	{
-		output.append(" UHNAMES");
-	}
-
-	ModResult OnPreCommand(std::string &command, std::vector<std::string> &parameters, LocalUser *user, bool validated, const std::string &original_line)
-	{
-		/* We don't actually create a proper command handler class for PROTOCTL,
-		 * because other modules might want to have PROTOCTL hooks too.
-		 * Therefore, we just hook its as an unvalidated command therefore we
-		 * can capture it even if it doesnt exist! :-)
-		 */
-		if (command == "PROTOCTL")
-		{
-			if ((parameters.size()) && (!strcasecmp(parameters[0].c_str(),"UHNAMES")))
-			{
-				cap.ext.set(user, 1);
-				return MOD_RES_DENY;
-			}
-		}
 		return MOD_RES_PASSTHRU;
-	}
-
-	void OnNamesListItem(User* issuer, Membership* memb, std::string &prefixes, std::string &nick)
-	{
-		if (!cap.ext.get(issuer))
-			return;
-
-		if (nick.empty())
-			return;
-
-		nick = memb->user->GetFullHost();
-	}
-
-	void OnEvent(Event& ev)
-	{
-		cap.HandleEvent(ev);
 	}
 };
 

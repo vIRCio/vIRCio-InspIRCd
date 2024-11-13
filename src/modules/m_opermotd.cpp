@@ -1,10 +1,12 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
- *   Copyright (C) 2007 Dennis Friis <peavey@inspircd.org>
- *   Copyright (C) 2005, 2007 Robin Burchell <robin+git@viroteck.net>
- *   Copyright (C) 2005-2006 Craig Edwards <craigedwards@brainbox.cc>
- *   Copyright (C) 2004 Christopher Hall <typobox43@gmail.com>
+ *   Copyright (C) 2013, 2019-2024 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2012, 2016 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
+ *   Copyright (C) 2009 Uli Schlachter <psychon@znc.in>
+ *   Copyright (C) 2007, 2009 Dennis Friis <peavey@inspircd.org>
+ *   Copyright (C) 2006 Craig Edwards <brain@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -22,98 +24,133 @@
 
 #include "inspircd.h"
 
-/* $ModDesc: Shows a message to opers after oper-up, adds /opermotd */
-
-/** Handle /OPERMOTD
- */
-class CommandOpermotd : public Command
+enum
 {
- public:
-	file_cache opermotd;
+	// From UnrealIRCd.
+	ERR_NOOPERMOTD = 425,
 
-	CommandOpermotd(Module* Creator) : Command(Creator,"OPERMOTD", 0, 1)
+	// From ircd-ratbox.
+	RPL_OMOTDSTART = 720,
+	RPL_OMOTD = 721,
+	RPL_ENDOFOMOTD = 722
+};
+
+typedef insp::flat_map<std::string, std::vector<std::string>> MOTDCache;
+
+class CommandOperMOTD final
+	: public Command
+{
+public:
+	std::string file;
+	MOTDCache motds;
+
+	CommandOperMOTD(Module* Creator)
+		: Command(Creator, "OPERMOTD")
 	{
-		flags_needed = 'o'; syntax = "[<servername>]";
+		access_needed = CmdAccess::OPERATOR;
+		syntax = { "[<servername>]" };
 	}
 
-	CmdResult Handle (const std::vector<std::string>& parameters, User* user)
+	CmdResult Handle(User* user, const Params& parameters) override
 	{
-		if ((parameters.empty()) || (parameters[0] == ServerInstance->Config->ServerName))
-			ShowOperMOTD(user);
-		return CMD_SUCCESS;
+		if (parameters.empty() || irc::equals(parameters[0], ServerInstance->Config->ServerName))
+			return ShowOperMOTD(user, true);
+		return CmdResult::SUCCESS;
 	}
 
-	RouteDescriptor GetRouting(User* user, const std::vector<std::string>& parameters)
+	RouteDescriptor GetRouting(User* user, const Params& parameters) override
 	{
-		if (!parameters.empty())
+		if ((!parameters.empty()) && (parameters[0].find('.') != std::string::npos))
 			return ROUTE_OPT_UCAST(parameters[0]);
 		return ROUTE_LOCALONLY;
 	}
 
-	void ShowOperMOTD(User* user)
+	CmdResult ShowOperMOTD(User* user, bool showmissing)
 	{
-		const std::string& servername = ServerInstance->Config->ServerName;
-		if (opermotd.empty())
+		if (!user->IsOper())
+			return CmdResult::SUCCESS; // WTF?
+
+		auto motd = motds.find(user->oper->GetConfig()->getString("motd", file, 1));
+		if (motd == motds.end())
 		{
-			user->SendText(":%s 455 %s :OPERMOTD file is missing", servername.c_str(), user->nick.c_str());
+			if (showmissing)
+				user->WriteRemoteNumeric(ERR_NOOPERMOTD, "There is no server operator MOTD.");
+			return CmdResult::SUCCESS;
+		}
+
+		user->WriteRemoteNumeric(RPL_OMOTDSTART, "Server operator MOTD:");
+		for (const auto& line : motd->second)
+			user->WriteRemoteNumeric(RPL_OMOTD, line);
+		user->WriteRemoteNumeric(RPL_ENDOFOMOTD, "End of server operator MOTD.");
+
+		return CmdResult::SUCCESS;
+	}
+};
+
+class ModuleOperMOTD final
+	: public Module
+{
+private:
+	CommandOperMOTD cmd;
+	bool onoper;
+
+	void ProcessMOTD(MOTDCache& newmotds, const std::shared_ptr<OperType>& oper, const char* type) const
+	{
+		// Don't process the file if it has already been processed.
+		const std::string motd = oper->GetConfig()->getString("motd", cmd.file);
+		if (motd.empty() || newmotds.find(motd) != newmotds.end())
+			return;
+
+		auto file = ServerInstance->Config->ReadFile(motd);
+		if (!file)
+		{
+			// We can't process the file if it doesn't exist.
+			ServerInstance->Logs.Normal(MODNAME, "Unable to read server operator motd for oper {} \"{}\" at {}: {}",
+				type, oper->GetName(), oper->GetConfig()->source.str(), file.error);
 			return;
 		}
 
-		user->SendText(":%s 375 %s :- IRC Operators Message of the Day", servername.c_str(), user->nick.c_str());
-
-		for (file_cache::const_iterator i = opermotd.begin(); i != opermotd.end(); ++i)
+		// Process the MOTD entry.
+		auto& newmotd = newmotds[motd];
+		irc::sepstream linestream(file.contents, '\n', true);
+		for (std::string line; linestream.GetToken(line); )
 		{
-			user->SendText(":%s 372 %s :- %s", servername.c_str(), user->nick.c_str(), i->c_str());
+			// Some clients can not handle receiving RPL_OMOTD with an empty
+			// trailing parameter so if a line is empty we replace it with
+			// a single space.
+			InspIRCd::ProcessColors(line);
+			newmotd.push_back(line.empty() ? " " : line);
 		}
+	}
 
-		user->SendText(":%s 376 %s :- End of OPERMOTD", servername.c_str(), user->nick.c_str());
+public:
+	ModuleOperMOTD()
+		: Module(VF_VENDOR | VF_OPTCOMMON, "Adds the /OPERMOTD command which adds a special message of the day for server operators.")
+		, cmd(this)
+	{
+	}
+
+	void OnPostOperLogin(User* user, bool automatic) override
+	{
+		if (IS_LOCAL(user) && user->oper->GetConfig()->getBool("automotd", onoper))
+			cmd.ShowOperMOTD(user, false);
+	}
+
+	void ReadConfig(ConfigStatus& status) override
+	{
+		// Compatibility with the v3 config.
+		const auto& tag = ServerInstance->Config->ConfValue("opermotd");
+		cmd.file = tag->getString("file", "opermotd", 1);
+		onoper = tag->getBool("onoper", true);
+
+		MOTDCache newmotds;
+		for (const auto& [_, account] : ServerInstance->Config->OperAccounts)
+			ProcessMOTD(newmotds, account, "account");
+		for (const auto& [_, type] : ServerInstance->Config->OperTypes)
+			ProcessMOTD(newmotds, type, "type");
+		cmd.motds.swap(newmotds);
+
 	}
 };
 
-
-class ModuleOpermotd : public Module
-{
-	CommandOpermotd cmd;
-	bool onoper;
- public:
-
-	ModuleOpermotd()
-		: cmd(this)
-	{
-	}
-
-	void init()
-	{
-		ServerInstance->Modules->AddService(cmd);
-		OnRehash(NULL);
-		Implementation eventlist[] = { I_OnRehash, I_OnOper };
-		ServerInstance->Modules->Attach(eventlist, this, sizeof(eventlist)/sizeof(Implementation));
-	}
-
-	virtual Version GetVersion()
-	{
-		return Version("Shows a message to opers after oper-up, adds /opermotd", VF_VENDOR | VF_OPTCOMMON);
-	}
-
-	virtual void OnOper(User* user, const std::string &opertype)
-	{
-		if (onoper && IS_LOCAL(user))
-			cmd.ShowOperMOTD(user);
-	}
-
-	virtual void OnRehash(User* user)
-	{
-		cmd.opermotd.clear();
-		ConfigTag* conf = ServerInstance->Config->ConfValue("opermotd");
-		onoper = conf->getBool("onoper", true);
-
-		FileReader f(conf->getString("file", "opermotd"));
-		for (int i=0, filesize = f.FileSize(); i < filesize; i++)
-			cmd.opermotd.push_back(f.GetLine(i));
-
-		if (conf->getBool("processcolors"))
-			InspIRCd::ProcessColors(cmd.opermotd);
-	}
-};
-
-MODULE_INIT(ModuleOpermotd)
+MODULE_INIT(ModuleOperMOTD)

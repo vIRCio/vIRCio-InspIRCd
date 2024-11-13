@@ -1,7 +1,13 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
+ *   Copyright (C) 2018, 2020-2023 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2013-2014 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
+ *   Copyright (C) 2009 Uli Schlachter <psychon@znc.in>
+ *   Copyright (C) 2009 Daniel De Graaf <danieldg@inspircd.org>
  *   Copyright (C) 2008 Robin Burchell <robin+git@viroteck.net>
+ *   Copyright (C) 2008 Craig Edwards <brain@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -18,84 +24,73 @@
 
 
 #include "inspircd.h"
+#include "timeutils.h"
 #include "xline.h"
 
-#include "treesocket.h"
 #include "treeserver.h"
 #include "utils.h"
+#include "commands.h"
 
-/* $ModDep: m_spanningtree/utils.h m_spanningtree/treeserver.h m_spanningtree/treesocket.h */
-
-bool TreeSocket::AddLine(const std::string &prefix, parameterlist &params)
+CmdResult CommandAddLine::Handle(User* usr, Params& params)
 {
-	if (params.size() < 6)
-	{
-		std::string servername = MyRoot->GetName();
-		ServerInstance->SNO->WriteToSnoMask('d', "%s sent me a malformed ADDLINE", servername.c_str());
-		return true;
-	}
-
 	XLineFactory* xlf = ServerInstance->XLines->GetFactory(params[0]);
-
-	std::string setter = "<unknown>";
-	User* usr = ServerInstance->FindNick(prefix);
-	if (usr)
-		setter = usr->nick;
-	else
-	{
-		TreeServer* t = Utils->FindServer(prefix);
-		if (t)
-			setter = t->GetName();
-	}
+	const std::string& setter = usr->nick;
 
 	if (!xlf)
 	{
-		ServerInstance->SNO->WriteToSnoMask('d',"%s sent me an unknown ADDLINE type (%s).",setter.c_str(),params[0].c_str());
-		return true;
+		ServerInstance->SNO.WriteToSnoMask('x', "{} sent me an unknown ADDLINE type ({}).", setter, params[0]);
+		return CmdResult::FAILURE;
 	}
 
-	long created = atol(params[3].c_str()), expires = atol(params[4].c_str());
-	if (created < 0 || expires < 0)
-		return true;
-
-	XLine* xl = NULL;
+	XLine* xl = nullptr;
 	try
 	{
-		xl = xlf->Generate(ServerInstance->Time(), expires, params[2], params[5], params[1]);
+		xl = xlf->Generate(ServerInstance->Time(), ConvToNum<unsigned long>(params[4]), params[2], params[5], params[1]);
 	}
-	catch (ModuleException &e)
+	catch (const ModuleException& e)
 	{
-		ServerInstance->SNO->WriteToSnoMask('d',"Unable to ADDLINE type %s from %s: %s", params[0].c_str(), setter.c_str(), e.GetReason());
-		return true;
+		ServerInstance->SNO.WriteToSnoMask('x', "Unable to ADDLINE type {} from {}: {}", params[0], setter, e.GetReason());
+		return CmdResult::FAILURE;
 	}
-	xl->SetCreateTime(created);
-	if (ServerInstance->XLines->AddLine(xl, NULL))
+	xl->SetCreateTime(ServerCommand::ExtractTS(params[3]));
+	if (ServerInstance->XLines->AddLine(xl, nullptr))
 	{
 		if (xl->duration)
 		{
-			std::string timestr = ServerInstance->TimeString(xl->expiry);
-			ServerInstance->SNO->WriteToSnoMask('X',"%s added %s%s on %s to expire on %s: %s",setter.c_str(),params[0].c_str(),params[0].length() == 1 ? "-line" : "",
-					params[1].c_str(), timestr.c_str(), params[5].c_str());
+			ServerInstance->SNO.WriteToSnoMask('X', "{} added a timed {}{} on {}, expires in {} (on {}): {}",
+				setter, params[0], params[0].length() <= 2 ? "-line" : "",
+				params[1], Duration::ToString(xl->duration),
+				Time::ToString(xl->expiry), params[5]);
 		}
 		else
 		{
-			ServerInstance->SNO->WriteToSnoMask('X',"%s added permanent %s%s on %s: %s",setter.c_str(),params[0].c_str(),params[0].length() == 1 ? "-line" : "",
-					params[1].c_str(),params[5].c_str());
+			ServerInstance->SNO.WriteToSnoMask('X', "{} added a permanent {}{} on {}: {}",
+				setter, params[0], params[0].length() <= 2 ? "-line" : "",
+				params[1], params[5]);
 		}
-		params[5] = ":" + params[5];
 
-		User* u = ServerInstance->FindNick(prefix);
-		Utils->DoOneToAllButSender(prefix, "ADDLINE", params, u ? u->server : prefix);
-		TreeServer *remoteserver = Utils->FindServer(u ? u->server : prefix);
+		TreeServer* remoteserver = TreeServer::Get(usr);
 
-		if (!remoteserver->bursting)
+		if (!remoteserver->IsBursting())
 		{
 			ServerInstance->XLines->ApplyLines();
 		}
+		return CmdResult::SUCCESS;
 	}
 	else
+	{
 		delete xl;
-
-	return true;
+		return CmdResult::FAILURE;
+	}
 }
 
+CommandAddLine::Builder::Builder(XLine* xline, User* user)
+	: CmdBuilder(user, "ADDLINE")
+{
+	push(xline->type);
+	push(xline->Displayable());
+	push(xline->source);
+	push_int(xline->set_time);
+	push_int(xline->duration);
+	push_last(xline->reason);
+}

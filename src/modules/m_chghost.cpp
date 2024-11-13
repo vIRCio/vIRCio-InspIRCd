@@ -1,9 +1,13 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
+ *   Copyright (C) 2013-2014, 2017, 2019-2023 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2012-2013, 2016 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
+ *   Copyright (C) 2009, 2012 Daniel De Graaf <danieldg@inspircd.org>
+ *   Copyright (C) 2008 Robin Burchell <robin+git@viroteck.net>
  *   Copyright (C) 2007 Dennis Friis <peavey@inspircd.org>
- *   Copyright (C) 2007 Robin Burchell <robin+git@viroteck.net>
- *   Copyright (C) 2004-2006 Craig Edwards <craigedwards@brainbox.cc>
+ *   Copyright (C) 2006 Craig Edwards <brain@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -20,109 +24,101 @@
 
 
 #include "inspircd.h"
+#include "numerichelper.h"
 
-/* $ModDesc: Provides support for the CHGHOST command */
-
-/** Handle /CHGHOST
- */
-class CommandChghost : public Command
+class CommandChghost final
+	: public Command
 {
- private:
-	char* hostmap;
- public:
-	CommandChghost(Module* Creator, char* hmap) : Command(Creator,"CHGHOST", 2), hostmap(hmap)
+public:
+	CharState hostmap;
+
+	CommandChghost(Module* Creator)
+		: Command(Creator, "CHGHOST", 2)
 	{
-		allow_empty_last_param = false;
-		flags_needed = 'o';
-		syntax = "<nick> <newhost>";
-		TRANSLATE3(TR_NICK, TR_TEXT, TR_END);
+		access_needed = CmdAccess::OPERATOR;
+		syntax = { "<nick> <host>" };
+		translation = { TR_NICK, TR_TEXT };
 	}
 
-	CmdResult Handle(const std::vector<std::string> &parameters, User *user)
+	CmdResult Handle(User* user, const Params& parameters) override
 	{
-		const char* x = parameters[1].c_str();
-
-		if (parameters[1].length() > 63)
+		if (parameters[1].length() > ServerInstance->Config->Limits.MaxHost)
 		{
-			user->WriteServ("NOTICE %s :*** CHGHOST: Host too long", user->nick.c_str());
-			return CMD_FAILURE;
+			user->WriteNotice("*** CHGHOST: Host too long");
+			return CmdResult::FAILURE;
 		}
 
-		for (; *x; x++)
+		for (const auto chr : parameters[1])
 		{
-			if (!hostmap[(unsigned char)*x])
+			if (!hostmap.test(static_cast<unsigned char>(chr)))
 			{
-				user->WriteServ("NOTICE "+user->nick+" :*** CHGHOST: Invalid characters in hostname");
-				return CMD_FAILURE;
+				user->WriteNotice("*** CHGHOST: Invalid characters in hostname");
+				return CmdResult::FAILURE;
 			}
 		}
 
-		User* dest = ServerInstance->FindNick(parameters[0]);
+		auto* dest = ServerInstance->Users.Find(parameters[0]);
 
-		// Allow services to change the host of unregistered users
-		if ((!dest) || ((dest->registered != REG_ALL) && (!ServerInstance->ULine(user->server))))
+		// Allow services to change the host of partially connected users.
+		if (!dest || (!dest->IsFullyConnected() && !user->server->IsService()))
 		{
-			user->WriteNumeric(ERR_NOSUCHNICK, "%s %s :No such nick/channel", user->nick.c_str(), parameters[0].c_str());
-			return CMD_FAILURE;
+			user->WriteNumeric(Numerics::NoSuchNick(parameters[0]));
+			return CmdResult::FAILURE;
 		}
 
 		if (IS_LOCAL(dest))
 		{
-			if ((dest->ChangeDisplayedHost(parameters[1].c_str())) && (!ServerInstance->ULine(user->server)))
+			dest->ChangeDisplayedHost(parameters[1]);
+			if (!user->server->IsService())
 			{
-				// fix by brain - ulines set hosts silently
-				ServerInstance->SNO->WriteGlobalSno('a', user->nick+" used CHGHOST to make the displayed host of "+dest->nick+" become "+dest->dhost);
+				ServerInstance->SNO.WriteGlobalSno('a', user->nick+" used CHGHOST to make the displayed host of "+dest->nick+" become "+dest->GetDisplayedHost());
 			}
 		}
 
-		return CMD_SUCCESS;
+		return CmdResult::SUCCESS;
 	}
 
-	RouteDescriptor GetRouting(User* user, const std::vector<std::string>& parameters)
+	RouteDescriptor GetRouting(User* user, const Params& parameters) override
 	{
-		User* dest = ServerInstance->FindNick(parameters[0]);
-		if (dest)
-			return ROUTE_OPT_UCAST(dest->server);
-		return ROUTE_LOCALONLY;
+		return ROUTE_OPT_UCAST(parameters[0]);
 	}
 };
 
-
-class ModuleChgHost : public Module
+class ModuleChgHost final
+	: public Module
 {
+private:
 	CommandChghost cmd;
-	char hostmap[256];
- public:
-	ModuleChgHost() : cmd(this, hostmap)
+
+public:
+	ModuleChgHost()
+		: Module(VF_VENDOR | VF_OPTCOMMON, "Adds the /CHGHOST command which allows server operators to change the displayed hostname of a user.")
+		, cmd(this)
 	{
 	}
 
-	void init()
+	void ReadConfig(ConfigStatus& status) override
 	{
-		OnRehash(NULL);
-		ServerInstance->Modules->AddService(cmd);
-		Implementation eventlist[] = { I_OnRehash };
-		ServerInstance->Modules->Attach(eventlist, this, sizeof(eventlist)/sizeof(Implementation));
+		const auto& tag = ServerInstance->Config->ConfValue("hostname");
+		const std::string hmap = tag->getString("charmap", "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz.-_/0123456789", 1);
+
+		CharState newhostmap;
+		for (const auto chr : hmap)
+		{
+			// A hostname can not contain NUL, LF, CR, or SPACE.
+			if (chr == 0x00 || chr == 0x0A || chr == 0x0D || chr == 0x20)
+				throw ModuleException(this, INSP_FORMAT("<hostname:charmap> can not contain character 0x{:02X} ({})", chr, chr));
+			newhostmap.set(static_cast<unsigned char>(chr));
+		}
+		std::swap(newhostmap, cmd.hostmap);
 	}
 
-	void OnRehash(User* user)
+	void GetLinkData(Module::LinkData& data, std::string& compatdata) override
 	{
-		std::string hmap = ServerInstance->Config->ConfValue("hostname")->getString("charmap", "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz.-_/0123456789");
-
-		memset(hostmap, 0, sizeof(hostmap));
-		for (std::string::iterator n = hmap.begin(); n != hmap.end(); n++)
-			hostmap[(unsigned char)*n] = 1;
+		for (size_t i = 0; i < cmd.hostmap.size(); ++i)
+			if (cmd.hostmap[i])
+				data["hostchars"].push_back(static_cast<unsigned char>(i));
 	}
-
-	~ModuleChgHost()
-	{
-	}
-
-	Version GetVersion()
-	{
-		return Version("Provides support for the CHGHOST command", VF_OPTCOMMON | VF_VENDOR);
-	}
-
 };
 
 MODULE_INIT(ModuleChgHost)

@@ -1,9 +1,12 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
+ *   Copyright (C) 2017, 2019-2024 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
+ *   Copyright (C) 2009 Daniel De Graaf <danieldg@inspircd.org>
+ *   Copyright (C) 2008 Robin Burchell <robin+git@viroteck.net>
  *   Copyright (C) 2007 Dennis Friis <peavey@inspircd.org>
- *   Copyright (C) 2007 Robin Burchell <robin+git@viroteck.net>
- *   Copyright (C) 2005 Craig Edwards <craigedwards@brainbox.cc>
+ *   Copyright (C) 2005-2006 Craig Edwards <brain@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -20,45 +23,29 @@
 
 
 #include "inspircd.h"
+#include "modules/ctctags.h"
+#include "numerichelper.h"
 
-/* $ModDesc: Forbids users from messaging each other. Users may still message opers and opers may message other opers. */
-
-
-class ModuleRestrictMsg : public Module
+class ModuleRestrictMsg final
+	: public Module
+	, public CTCTags::EventListener
 {
- private:
-	bool uline;
-
- public:
-
-	void init()
+private:
+	static ModResult HandleMessage(User* user, const MessageTarget& target)
 	{
-		OnRehash(NULL);
-		Implementation eventlist[] = { I_OnRehash, I_OnUserPreMessage, I_OnUserPreNotice };
-		ServerInstance->Modules->Attach(eventlist, this, sizeof(eventlist)/sizeof(Implementation));
-	}
-
-	void OnRehash(User*)
-	{
-		uline = ServerInstance->Config->ConfValue("restrictmsg")->getBool("uline", false);
-	}
-
-	virtual ModResult OnUserPreMessage(User* user,void* dest,int target_type, std::string &text, char status, CUList &exempt_list)
-	{
-		if ((target_type == TYPE_USER) && (IS_LOCAL(user)))
+		if ((target.type == MessageTarget::TYPE_USER) && (IS_LOCAL(user)))
 		{
-			User* u = (User*)dest;
+			const auto* u = target.Get<User>();
 
 			// message allowed if:
 			// (1) the sender is opered
 			// (2) the recipient is opered
-			// (3) the recipient is on a ulined server
+			// (3) the recipient is on a services server
 			// anything else, blocked.
-			if (IS_OPER(u) || IS_OPER(user) || (uline && ServerInstance->ULine(u->server)))
-			{
+			if (u->IsOper() || user->IsOper() || u->server->IsService())
 				return MOD_RES_PASSTHRU;
-			}
-			user->WriteNumeric(ERR_CANTSENDTOUSER, "%s %s :You are not permitted to send private messages to this user",user->nick.c_str(),u->nick.c_str());
+
+			user->WriteNumeric(Numerics::CannotSendTo(u, "You cannot send messages to this user."));
 			return MOD_RES_DENY;
 		}
 
@@ -66,18 +53,21 @@ class ModuleRestrictMsg : public Module
 		return MOD_RES_PASSTHRU;
 	}
 
-	virtual ModResult OnUserPreNotice(User* user,void* dest,int target_type, std::string &text, char status, CUList &exempt_list)
-	{
-		return this->OnUserPreMessage(user,dest,target_type,text,status,exempt_list);
-	}
-
-	virtual ~ModuleRestrictMsg()
+public:
+	ModuleRestrictMsg()
+		: Module(VF_VENDOR, "Prevents users who are not server operators from messaging each other.")
+		, CTCTags::EventListener(this)
 	{
 	}
 
-	virtual Version GetVersion()
+	ModResult OnUserPreMessage(User* user, MessageTarget& target, MessageDetails& details) override
 	{
-		return Version("Forbids users from messaging each other. Users may still message opers and opers may message other opers.",VF_VENDOR);
+		return HandleMessage(user, target);
+	}
+
+	ModResult OnUserPreTagMessage(User* user, MessageTarget& target, CTCTags::TagMessageDetails& details) override
+	{
+		return HandleMessage(user, target);
 	}
 };
 

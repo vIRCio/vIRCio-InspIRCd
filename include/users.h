@@ -1,12 +1,18 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
- *   Copyright (C) 2009 Daniel De Graaf <danieldg@inspircd.org>
- *   Copyright (C) 2007-2008 Robin Burchell <robin+git@viroteck.net>
- *   Copyright (C) 2008 Thomas Stagner <aquanight@inspircd.org>
- *   Copyright (C) 2003-2007 Craig Edwards <craigedwards@brainbox.cc>
- *   Copyright (C) 2007 Burlex <???@???>
- *   Copyright (C) 2007 Dennis Friis <peavey@inspircd.org>
+ *   Copyright (C) 2019 Matt Schatz <genius3000@g3k.solutions>
+ *   Copyright (C) 2012-2016, 2018 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2012-2013, 2016-2024 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2012, 2019 Robby <robby@chatbelgie.be>
+ *   Copyright (C) 2012 DjSlash <djslash@djslash.org>
+ *   Copyright (C) 2011 jackmcbarn <jackmcbarn@inspircd.org>
+ *   Copyright (C) 2009-2010 Daniel De Graaf <danieldg@inspircd.org>
+ *   Copyright (C) 2008 Thomas Stagner <aquanight@gmail.com>
+ *   Copyright (C) 2008 John Brooks <john@jbrooks.io>
+ *   Copyright (C) 2007, 2009 Dennis Friis <peavey@inspircd.org>
+ *   Copyright (C) 2006-2009 Robin Burchell <robin+git@viroteck.net>
+ *   Copyright (C) 2003-2008 Craig Edwards <brain@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -22,204 +28,290 @@
  */
 
 
-#ifndef USERS_H
-#define USERS_H
+#pragma once
 
 #include "socket.h"
-#include "inspsocket.h"
-#include "dns.h"
+#include "streamsocket.h"
 #include "mode.h"
 #include "membership.h"
 
-/** connect class types
- */
-enum ClassTypes {
-	/** connect:allow */
-	CC_ALLOW = 0,
-	/** connect:deny */
-	CC_DENY  = 1,
-	/** named connect block (for opers, etc) */
-	CC_NAMED = 2
-};
-
-/** RFC1459 channel modes
- */
-enum UserModes {
-	/** +s: Server notice mask */
-	UM_SNOMASK = 's' - 65,
-	/** +w: WALLOPS */
-	UM_WALLOPS = 'w' - 65,
-	/** +i: Invisible */
-	UM_INVISIBLE = 'i' - 65,
-	/** +o: Operator */
-	UM_OPERATOR = 'o' - 65
-};
-
-/** Registration state of a user, e.g.
- * have they sent USER, NICK, PASS yet?
- */
-enum RegistrationState {
-
-#ifndef _WIN32   // Burlex: This is already defined in win32, luckily it is still 0.
-	REG_NONE = 0,		/* Has sent nothing */
-#endif
-
-	REG_USER = 1,		/* Has sent USER */
-	REG_NICK = 2,		/* Has sent NICK */
-	REG_NICKUSER = 3, 	/* Bitwise combination of REG_NICK and REG_USER */
-	REG_ALL = 7	  	/* REG_NICKUSER plus next bit along */
-};
-
-enum UserType {
-	USERTYPE_LOCAL = 1,
-	USERTYPE_REMOTE = 2,
-	USERTYPE_SERVER = 3
-};
-
-/** Holds information relevent to &lt;connect allow&gt; and &lt;connect deny&gt; tags in the config file.
- */
-struct CoreExport ConnectClass : public refcountbase
+/** Represents \<connect> class tags from the server config */
+class CoreExport ConnectClass final
 {
-	reference<ConfigTag> config;
-	/** Type of line, either CC_ALLOW or CC_DENY
-	 */
-	char type;
+public:
+	/** An enumeration of possible types of connect class. */
+	enum Type
+		: uint8_t
+	{
+		/** The class defines who is allowed to connect to the server. */
+		ALLOW = 0,
 
-	/** True if this class uses fake lag to manage flood, false if it kills */
-	bool fakelag;
+		/** The class defines who is banned from connecting to the server. */
+		DENY = 1,
 
-	/** Connect class name
-	 */
+		/** The class is for server operators to be assigned to by name. */
+		NAMED = 2,
+	};
+
+	/** The synthesized (with all inheritance applied) config tag this class was read from. */
+	std::shared_ptr<ConfigTag> config;
+
+	/** The hosts that this user can connect from. */
+	std::vector<std::string> hosts;
+
+	/** The name of this connect class. */
 	std::string name;
 
-	/** Max time to register the connection in seconds
+	/** If non-empty then the password a user must specify in PASS to be assigned to this class. */
+	std::string password;
+
+	/** If non-empty then the hash algorithm that the password field is hashed with. */
+	std::string passwordhash;
+
+	/** If non-empty then the server ports which a user has to be connecting on. */
+	insp::flat_set<in_port_t> ports;
+
+	/** The type of class this. */
+	Type type;
+
+	/** Whether fake lag is used by this class. */
+	bool fakelag:1;
+
+	/** Whether to warn server operators about the limit for this class being reached. */
+	bool maxconnwarn:1;
+
+	/** Whether the DNS hostnames of users in this class should be resolved. */
+	bool resolvehostnames:1;
+
+	/** Whether this class is for a shared host where the username uniquely identifies users. */
+	bool uniqueusername:1;
+
+	/** Maximum rate of commands (units: millicommands per second). */
+	unsigned long commandrate = 1000UL;
+
+	/** The maximum number of bytes that users in this class can have in their send queue before they are disconnected. */
+	unsigned long hardsendqmax = 1048576UL;
+
+	/** The maximum number of users in this class that can connect to the local server from one host. */
+	unsigned long limit = 5000UL;
+
+	/** The maximum number of channels that users in this class can join. */
+	unsigned long maxchans = 20UL;
+
+	/** The maximum number of users in this class that can connect to the entire network from one host. */
+	unsigned long maxglobal = 3UL;
+
+	/** The maximum number of users that can be in this class on the local server. */
+	unsigned long maxlocal = 3UL;
+
+	/** The amount of penalty that a user in this class can have before the penalty system activates. */
+	unsigned long penaltythreshold = 20UL;
+
+	/** The number of seconds between keepalive checks for idle clients in this class. */
+	unsigned long pingtime = 120UL;
+
+	/** The maximum number of bytes that users in this class can have in their receive queue before they are disconnected. */
+	unsigned long recvqmax = 4096UL;
+
+	/** The number of seconds that connecting users have to fully connect within in this class. */
+	unsigned long connection_timeout = 90UL;
+
+	/** The maximum number of bytes that users in this class can have in their send queue before their commands stop being processed. */
+	unsigned long softsendqmax = 4096UL;
+
+	/** The number of users who are currently assigned to this class. */
+	unsigned long use_count = 0UL;
+
+	/** Creates a new connect class from a config tag. */
+	ConnectClass(const std::shared_ptr<ConfigTag>& tag, Type type, const std::vector<std::string>& masks);
+
+	/** Creates a new connect class with a parent from a config tag. */
+	ConnectClass(const std::shared_ptr<ConfigTag>& tag, Type type, const std::vector<std::string>& masks, const std::shared_ptr<ConnectClass>& parent);
+
+	/** Configures this connect class using the config from the specified tag. */
+	void Configure(const std::string& classname, const std::shared_ptr<ConfigTag>& tag);
+
+	/** Update the settings in this block to match the given class */
+	void Update(const std::shared_ptr<ConnectClass>& klass);
+
+	/** Retrieves the name of this connect class. */
+	const std::string& GetName() const { return name; }
+
+	/** Retrieves the hosts for this connect class. */
+	const std::vector<std::string>& GetHosts() const { return hosts; }
+};
+
+class CoreExport AwayState final
+{
+public:
+	/** The reason this user specified when they went away. */
+	std::string message;
+
+	/** The time at which this user went away. */
+	time_t time;
+
+	AwayState(const std::string& m, time_t t = 0);
+};
+
+/** Represents an \<opertype> from the server config. */
+class CoreExport OperType
+	: public insp::uncopiable
+{
+protected:
+	friend class OperAccount;
+
+	/** Oper-only channel modes that an oper of this type can use. */
+	ModeParser::ModeStatus chanmodes;
+
+	/** Oper-only commands that an oper of this type can use. */
+	TokenList commands;
+
+	/** The config tag this oper type was created from. */
+	std::shared_ptr<ConfigTag> config;
+
+	/** The name of this oper type. */
+	std::string name;
+
+	/** Oper privileges that an oper of this type has. */
+	TokenList privileges;
+
+	/** Oper snomasks that an oper of this type can use. */
+	ModeParser::ModeStatus snomasks;
+
+	/** Oper-only user modes that an oper of this type can use. */
+	ModeParser::ModeStatus usermodes;
+
+	/** Merges the specified config tag into this oper type's config.
+	 * @param tag The config tag to merge in.
 	 */
-	unsigned int registration_timeout;
+	void MergeTag(const std::shared_ptr<ConfigTag>& tag);
 
-	/** Host mask for this line
+public:
+	/** Creates a new oper type with the specified name and config tag.
+	 * @param n The name of the oper type.
+	 * @param t The tag to configure the oper type from.
 	 */
-	std::string host;
+	OperType(const std::string& n, const std::shared_ptr<ConfigTag>& t);
 
-	/** Number of seconds between pings for this line
+	/** Configures this oper type with settings from the specified tag.
+	 * @param tag The tag to configure from.
+	 * @param merge Whether to merge this tag into the synthetic tag.
 	 */
-	unsigned int pingtime;
+	void Configure(const std::shared_ptr<ConfigTag>& tag, bool merge);
 
-	/** Maximum size of sendq for users in this class (bytes)
-	 * Users cannot send commands if they go over this limit
+	/** Retrieves the config tag this oper type was created from. */
+	const auto& GetConfig() const { return config; }
+
+	/** Retrieves the name of this oper type. */
+	const auto& GetName() const { return name; }
+
+	/** Retrieves the commands that this oper type has access to.
+	 * @param all Whether to return all commands even if they don't currently exist.
 	 */
-	unsigned long softsendqmax;
+	std::string GetCommands(bool all = false) const;
 
-	/** Maximum size of sendq for users in this class (bytes)
-	 * Users are killed if they go over this limit
+	/** Retrieves the modes that this oper type has access to.
+	 * @param mt The type of mode to retrieve.
+	 * @param all Whether to return all commands even if they don't currently exist.
 	 */
-	unsigned long hardsendqmax;
+	std::string GetModes(ModeType mt, bool all = false) const;
 
-	/** Maximum size of recvq for users in this class (bytes)
+	/** Retrieves the privileges that this oper type has access to. */
+	std::string GetPrivileges() const { return privileges.ToString(); }
+
+	/** Retrieves the snomasks that this oper type has access to.
+	 * @param all Whether to return all snomasks even if they don't currently exist.
 	 */
-	unsigned long recvqmax;
+	std::string GetSnomasks(bool all = false) const;
 
-	/** Seconds worth of penalty before penalty system activates
+	/** Determines if this oper type can use the specified command.
+	 * @param cmd The command to check for.
 	 */
-	unsigned int penaltythreshold;
+	bool CanUseCommand(const std::string& cmd) const;
 
-	/** Maximum rate of commands (units: millicommands per second) */
-	unsigned int commandrate;
-
-	/** Local max when connecting by this connection class
+	/** Determines if this oper type can use the specified command.
+	 * @param cmd The command to check for.
 	 */
-	unsigned long maxlocal;
+	inline bool CanUseCommand(const Command* cmd) const { return CanUseCommand(cmd->name); }
 
-	/** Global max when connecting by this connection class
+	/** Determines if this oper type can use the specified mode.
+	 * @param mt The type of mode to check for.
+	 * @param chr The mode character to check for.
 	 */
-	unsigned long maxglobal;
+	bool CanUseMode(ModeType mt, unsigned char chr) const;
 
-	/** True if max connections for this class is hit and a warning is wanted
+	/** Determines if this oper type can use the specified mode.
+	 * @param mh The mode to check for.
 	 */
-	bool maxconnwarn;
+	inline bool CanUseMode(const ModeHandler* mh) const { return CanUseMode(mh->GetModeType(), mh->GetModeChar()); }
 
-	/** Max channels for this class
+	/** Determines if this oper type can use the specified snomask.
+	 * @param chr The snomask to check for.
 	 */
-	unsigned int maxchans;
+	bool CanUseSnomask(unsigned char chr) const;
 
-	/** How many users may be in this connect class before they are refused?
-	 * (0 = no limit = default)
+	/** Determines if this oper type has the specified privilege.
+	 * @param priv The privilege to check for.
 	 */
-	unsigned long limit;
+	bool HasPrivilege(const std::string& priv) const;
+};
 
-	/** Create a new connect class with no settings.
-	 */
-	ConnectClass(ConfigTag* tag, char type, const std::string& mask);
-	/** Create a new connect class with inherited settings.
-	 */
-	ConnectClass(ConfigTag* tag, char type, const std::string& mask, const ConnectClass& parent);
+#ifdef _WIN32
+# undef STRICT // Defined by Windows SDK.
+#endif
 
-	/** Update the settings in this block to match the given block */
-	void Update(const ConnectClass* newSettings);
-
-	const std::string& GetName() { return name; }
-	const std::string& GetHost() { return host; }
-
-	/** Returns the registration timeout
-	 */
-	time_t GetRegTimeout()
+/** Represents an \<oper> from the server config. */
+class CoreExport OperAccount
+	: public OperType
+{
+protected:
+	/** Possible states for whether an oper account can be automatically logged into. */
+	enum class AutoLogin
+		: uint8_t
 	{
-		return (registration_timeout ? registration_timeout : 90);
-	}
+		/** Users can automatically log in to this account if they match all fields and their nick matches the account name. */
+		STRICT,
 
-	/** Returns the ping frequency
+		/** Users can automatically log in to this account if they match all fields. */
+		RELAXED,
+
+		/** Users can not automatically log in to this account. */
+		NEVER,
+	};
+
+	/** Whether this oper account can be automatically logged into. */
+	AutoLogin autologin;
+
+	/** Whether the account can be logged into without a password. */
+	bool nopassword;
+
+	/** The password to used to log into this oper account. */
+	std::string password;
+
+	/** The algorithm to used to hash the password of this oper account. */
+	std::string passwordhash;
+
+	/** The name of the underlying oper type. */
+	std::string type;
+
+public:
+	/** Creates a new oper account with the specified name, oper type, and config tag.
+	 * @param n The name of the oper account.
+	 * @param o The oper type that this account inherits settings from.
+	 * @param t The tag to configure the oper account from.
 	 */
-	unsigned int GetPingTime()
-	{
-		return (pingtime ? pingtime : 120);
-	}
+	OperAccount(const std::string& n, const std::shared_ptr<OperType>& o, const std::shared_ptr<ConfigTag>& t);
 
-	/** Returns the maximum sendq value (soft limit)
-	 * Note that this is in addition to internal OS buffers
+	/** Check whether this user can attempt to automatically log in to this account. */
+	bool CanAutoLogin(LocalUser* user) const;
+
+	/** Check the specified password against the one from this oper account's password.
+	 * @param pw The password to check.
 	 */
-	unsigned long GetSendqSoftMax()
-	{
-		return (softsendqmax ? softsendqmax : 4096);
-	}
+	bool CheckPassword(const std::string& pw) const;
 
-	/** Returns the maximum sendq value (hard limit)
-	 */
-	unsigned long GetSendqHardMax()
-	{
-		return (hardsendqmax ? hardsendqmax : 0x100000);
-	}
-
-	/** Returns the maximum recvq value
-	 */
-	unsigned long GetRecvqMax()
-	{
-		return (recvqmax ? recvqmax : 4096);
-	}
-
-	/** Returns the penalty threshold value
-	 */
-	unsigned int GetPenaltyThreshold()
-	{
-		return penaltythreshold ? penaltythreshold : (fakelag ? 10 : 20);
-	}
-
-	unsigned int GetCommandRate()
-	{
-		return commandrate ? commandrate : 1000;
-	}
-
-	/** Return the maximum number of local sessions
-	 */
-	unsigned long GetMaxLocal()
-	{
-		return maxlocal;
-	}
-
-	/** Returns the maximum number of global sessions
-	 */
-	unsigned long GetMaxGlobal()
-	{
-		return maxglobal;
-	}
+	/** Retrieves the name of the underlying oper type. */
+	const auto& GetType() const { return type; }
 };
 
 /** Holds all information about a user
@@ -227,58 +319,125 @@ struct CoreExport ConnectClass : public refcountbase
  * connection is stored here primarily, from the user's socket ID (file descriptor) through to the
  * user's nickname and hostname.
  */
-class CoreExport User : public Extensible
+class CoreExport User
+	: public Extensible
 {
- private:
-	/** Cached nick!ident@dhost value using the displayed hostname
+private:
+	/** Cached value for GetAddress. */
+	std::string cached_address;
+
+	/** Cached value for GetUserAddress. */
+	std::string cached_useraddress;
+
+	/** Cached value for GetUserHost. */
+	std::string cached_userhost;
+
+	/** Cached value for GetRealUserHost. */
+	std::string cached_realuserhost;
+
+	/** Cached value for GetMask. */
+	std::string cached_mask;
+
+	/** Cached value for GetRealMask. */
+	std::string cached_realmask;
+
+	/** If set then the hostname which is displayed to users. */
+	std::string displayhost;
+
+	/** The real hostname of this user. */
+	std::string realhost;
+
+	/** The real name of this user. */
+	std::string realname;
+
+	/** If set then the username which is displayed to users. */
+	std::string displayuser;
+
+	/** The real username of this user from USER or an ident loookup. */
+	std::string realuser;
+
+	/** The user's mode list.
+	 * Much love to the STL for giving us an easy to use bitset, saving us RAM.
+	 * if (modes[modeid]) is set, then the mode is set.
+	 * For example, to work out if mode +i is set, we check the field
+	 * User::modes[invisiblemode->modeid] == true.
 	 */
-	std::string cached_fullhost;
+	ModeParser::ModeStatus modes;
 
-	/** Cached ident@ip value using the real IP address
+public:
+	/** To execute a function for each local neighbor of a user, inherit from this class and
+	 * pass an instance of it to User::ForEachNeighbor().
 	 */
-	std::string cached_hostip;
+	class ForEachNeighborHandler
+	{
+	public:
+		/** Method to execute for each local neighbor of a user.
+		 * Derived classes must implement this.
+		 * @param user Current neighbor
+		 */
+		virtual void Execute(LocalUser* user) = 0;
+	};
 
-	/** Cached ident@realhost value using the real hostname
+	/** Represents the state of a connection to the server. */
+	enum ConnectionState
+		: uint8_t
+	{
+		/** The user has not sent any commands. */
+		CONN_NONE = 0,
+
+		/** The user has sent the NICK command. */
+		CONN_NICK = 1,
+
+		/** The user has sent the USER command. */
+		CONN_USER = 2,
+
+		/** The user has sent both the NICK and USER commands and is waiting to be fully connected. */
+		CONN_NICKUSER = CONN_NICK | CONN_USER,
+
+		/** The user has sent both the NICK and USER commands and is fully connected */
+		CONN_FULL = 7,
+	};
+
+	/** An enumeration of all possible types of user. */
+	enum Type
+		: uint8_t
+	{
+		/** The user is connected to the local server. */
+		TYPE_LOCAL = 0,
+
+		/** The user is connected to a remote server. */
+		TYPE_REMOTE = 1,
+
+		/** The user is a server pseudo-user. */
+		TYPE_SERVER = 2,
+	};
+
+	/** List of Memberships for this user
 	 */
-	std::string cached_makehost;
+	typedef insp::intrusive_list<Membership> ChanList;
 
-	/** Cached nick!ident@realhost value using the real hostname
-	 */
-	std::string cached_fullrealhost;
+	/** A list of memberships to consider when discovering the neighbors of a user. */
+	typedef std::vector<Membership*> NeighborList;
 
-	/** Set by GetIPString() to avoid constantly re-grabbing IP via sockets voodoo.
-	 */
-	std::string cachedip;
+	/** A list of exceptions to the memberships that are considered when discovering the neighbours of a user. */
+	typedef std::unordered_map<User*, bool> NeighborExceptions;
 
- public:
-
-	/** Hostname of connection.
-	 * This should be valid as per RFC1035.
-	 */
-	std::string host;
-
-	/** Time that the object was instantiated (used for TS calculation etc)
-	*/
-	time_t age;
+	/** The time at which this user's nickname was last changed. */
+	time_t nickchanged;
 
 	/** Time the connection was created, set in the constructor. This
-	 * may be different from the time the user's classbase object was
+	 * may be different from the time the user's Cullable object was
 	 * created.
 	 */
-	time_t signon;
-
-	/** Time that the connection last sent a message, used to calculate idle time
-	 */
-	time_t idle_lastmsg;
+	time_t signon = 0;
 
 	/** Client address that the user is connected from.
-	 * Do not modify this value directly, use SetClientIP() to change it.
+	 * Do not modify this value directly, use ChangeRemoteAddress() to change it.
 	 * Port is not valid for remote users.
 	 */
 	irc::sockets::sockaddrs client_sa;
 
 	/** The users nickname.
-	 * An invalid nickname indicates an unregistered connection prior to the NICK command.
 	 * Use InspIRCd::IsNick() to validate nicknames.
 	 */
 	std::string nick;
@@ -288,32 +447,6 @@ class CoreExport User : public Extensible
 	 */
 	const std::string uuid;
 
-	/** The users ident reply.
-	 * Two characters are added to the user-defined limit to compensate for the tilde etc.
-	 */
-	std::string ident;
-
-	/** The host displayed to non-opers (used for cloaking etc).
-	 * This usually matches the value of User::host.
-	 */
-	std::string dhost;
-
-	/** The users full name (GECOS).
-	 */
-	std::string fullname;
-
-	/** The user's mode list.
-	 * NOT a null terminated string.
-	 * Also NOT an array.
-	 * Much love to the STL for giving us an easy to use bitset, saving us RAM.
-	 * if (modes[modeletter-65]) is set, then the mode is
-	 * set, for example, to work out if mode +s is set, we  check the field
-	 * User::modes['s'-65] != 0.
-	 * The following RFC characters o, w, s, i have constants defined via an
-	 * enum, such as UM_SERVERNOTICE and UM_OPETATOR.
-	 */
-	std::bitset<64> modes;
-
 	/** What snomasks are set on this user.
 	 * This functions the same as the above modes.
 	 */
@@ -321,48 +454,427 @@ class CoreExport User : public Extensible
 
 	/** Channels this user is on
 	 */
-	UserChanList chans;
+	ChanList chans;
 
 	/** The server the user is connected to.
 	 */
-	const std::string server;
+	Server* server;
 
-	/** The user's away message.
-	 * If this string is empty, the user is not marked as away.
-	 */
-	std::string awaymsg;
+	/** If non-empty then the away state of this user. */
+	std::optional<AwayState> away;
 
-	/** Time the user last went away.
-	 * This is ONLY RELIABLE if user IS_AWAY()!
-	 */
-	time_t awaytime;
+	/** If non-null then the oper account this user is logged in to. */
+	std::shared_ptr<OperAccount> oper;
 
-	/** The oper type they logged in as, if they are an oper.
-	 */
-	reference<OperInfo> oper;
-
-	/** Used by User to indicate the registration status of the connection
-	 * It is a bitfield of the REG_NICK, REG_USER and REG_ALL bits to indicate
-	 * the connection state.
-	 */
-	unsigned int registered:3;
-
-	/** True when DNS lookups are completed.
-	 * The UserResolver classes res_forward and res_reverse will
-	 * set this value once they complete.
-	 */
-	unsigned int dns_done:1;
-
-	/** Whether or not to send an snotice about this user's quitting
-	 */
-	unsigned int quietquit:1;
+	/** The connection state of the user. */
+	unsigned int connected:3;
 
 	/** If this is set to true, then all socket operations for the user
 	 * are dropped into the bit-bucket.
-	 * This value is set by QuitUser, and is not needed seperately from that call.
+	 * This value is set by QuitUser, and is not needed separately from that call.
 	 * Please note that setting this value alone will NOT cause the user to quit.
 	 */
 	unsigned int quitting:1;
+
+	/** Whether the username field uniquely identifies this user on their origin host. */
+	bool uniqueusername:1;
+
+	/** What type of user is this? */
+	const uint8_t usertype:2;
+
+	/** Retrieves the username which should be included in bans for this user. */
+	const std::string& GetBanUser(bool real) const;
+
+	/** Retrieves this user's hostname.
+	 * @param uncloak If true then return the real hostname; otherwise, the display hostname.
+	 */
+	inline const std::string& GetHost(bool uncloak) const
+	{
+		return uncloak ? GetRealHost() : GetDisplayedHost();
+	}
+
+	/** Retrieves this user's username.
+	 * @param uncloak If true then return the real username; otherwise, the display username.
+	 */
+	inline const std::string& GetUser(bool uncloak) const
+	{
+		return uncloak ? GetRealUser() : GetDisplayedUser();
+	}
+
+	/** Retrieves this user's displayed hostname. */
+	inline const std::string& GetDisplayedHost() const
+	{
+		return displayhost.empty() ? realhost : displayhost;
+	}
+
+	/** Retrieves this user's displayed username. */
+	inline const std::string& GetDisplayedUser() const
+	{
+		return displayuser.empty() ? realuser : displayuser;
+	}
+
+	/** Retrieves this user's real hostname. */
+	inline const std::string& GetRealHost() const { return realhost; }
+
+	/** Retrieves this user's real username. */
+	inline const std::string& GetRealUser() const { return realuser; }
+
+	/** Retrieves this user's real name. */
+	inline const std::string& GetRealName() const { return realname; }
+
+	/** Get CIDR mask, using default range, for this user
+	 */
+	irc::sockets::cidr_mask GetCIDRMask() const;
+
+	/** Retrieves the remote address (IPv4, IPv6, UNIX socket path) as a string.
+	 * If this method has not been called before then it will be cached.
+	 */
+	virtual const std::string& GetAddress();
+
+	/*** Retrieves the user@address mask for the user as a string.
+	 * If this method has not been called before then it will be cached.
+	 */
+	virtual const std::string& GetUserAddress();
+
+	/*** Retrieves the user@dhost mask for the user as a string.
+	 * If this method has not been called before then it will be cached.
+	 */
+	virtual const std::string& GetUserHost();
+
+	/*** Retrieves the user@rhost mask for the user as a string.
+	 * If this method has not been called before then it will be cached.
+	 */
+	virtual const std::string& GetRealUserHost();
+
+	/*** Retrieves the nick!user@dhost mask for the user as a string.
+	 * If this method has not been called before then it will be cached.
+	 */
+	virtual const std::string& GetMask();
+
+	/*** Retrieves the nick!user@dhost mask for the user as a string.
+	 * If this method has not been called before then it will be cached.
+	 */
+	virtual const std::string& GetRealMask();
+
+	/** Changes the remote socket address for this user.
+	 * @param sa The new socket address.
+	 */
+	virtual void ChangeRemoteAddress(const irc::sockets::sockaddrs& sa);
+
+	/** Constructor
+	 * @throw CoreException if the UID allocated to the user already exists
+	 */
+	User(const std::string& uid, Server* srv, Type objtype);
+
+	/** This clears any cached results that are used for GetFullRealHost() etc.
+	 * The results of these calls are cached as generating them can be generally expensive.
+	 */
+	void InvalidateCache();
+
+	/** Returns whether this user is currently away or not. If true,
+	 * further information can be found in away->message and away->time
+	 * @return True if the user is away, false otherwise
+	 */
+	inline bool IsAway() const { return away.has_value(); }
+
+	/** Returns whether this user is an oper or not. If true,
+	 * oper information can be obtained from User::oper
+	 * @return True if the user is an oper, false otherwise
+	 */
+	bool IsOper() const { return !!oper; }
+
+	/** Returns true if a notice mask is set
+	 * @param sm A notice mask character to check
+	 * @return True if the notice mask is set
+	 */
+	bool IsNoticeMaskSet(unsigned char sm) const;
+
+	/** Get the mode letters of modes set on the user as a string.
+	 * @param includeparams True to get the parameters of the modes as well. Defaults to false.
+	 * @return Mode letters of modes set on the user and optionally the parameters of those modes, if any.
+	 * The returned string always begins with a '+' character. If the user has no modes set, "+" is returned.
+	 */
+	std::string GetModeLetters(bool includeparams = false) const;
+
+	/** Returns true if a specific mode is set
+	 * @param m The user mode
+	 * @return True if the mode is set
+	 */
+	bool IsModeSet(unsigned char m) const;
+	bool IsModeSet(const ModeHandler* mh) const;
+	bool IsModeSet(const ModeHandler& mh) const { return IsModeSet(&mh); }
+	bool IsModeSet(const UserModeReference& moderef) const;
+
+	/** Set a specific usermode to on or off
+	 * @param mh The user mode
+	 * @param value On or off setting of the mode
+	 */
+	void SetMode(const ModeHandler* mh, bool value);
+	void SetMode(const ModeHandler& mh, bool value) { SetMode(&mh, value); }
+
+	/** Returns true or false for if a user can execute a privileged oper command.
+	 * This is done by looking up their oper type from User::oper, then referencing
+	 * this to their oper classes and checking the commands they can execute.
+	 * @param command A command (should be all CAPS)
+	 * @return True if this user can execute the command
+	 */
+	inline bool HasCommandPermission(const std::string& command) const { return IsOper() && oper->CanUseCommand(command); }
+
+	/** Returns true if a user has a given permission.
+	 * This is used to check whether or not users may perform certain actions which admins may not wish to give to
+	 * all operators, yet are not commands. An example might be oper override, mass messaging (/notice $*), etc.
+	 *
+	 * @param privstr The priv to check, e.g. "users/override/topic". These are loaded free-form from the config file.
+	 * @return True if this user has the permission in question.
+	 */
+	inline bool HasPrivPermission(const std::string& privstr) const { return IsOper() && oper->HasPrivilege(privstr); }
+
+	/** Returns true or false if a user can set a privileged user or channel mode.
+	 * This is done by looking up their oper type from User::oper, then referencing
+	 * this to their oper classes, and checking the modes they can set.
+	 * @param mh Mode to check
+	 * @return True if the user can set or unset this mode.
+	 */
+	inline bool HasModePermission(const ModeHandler* mh) const { return IsOper() && oper->CanUseMode(mh); }
+
+	/** Determines whether this user can set the specified snomask.
+	 * @param chr The server notice mask character to look up.
+	 * @return True if the user can set the specified snomask; otherwise, false.
+	 */
+	inline bool HasSnomaskPermission(char chr) const { return IsOper() && oper->CanUseSnomask(chr); }
+
+	/** Logs this user into the specified server operator account.
+	 * @param account The account to log this user in to.
+	 * @param automatic Whether this is an automatic login attempt.
+	 * @param force Whether to ignore any checks from OnPreOperLogin.
+	 * @return True if the user is logged into successfully; otherwise, false.
+	 */
+	bool OperLogin(const std::shared_ptr<OperAccount>& account, bool automatic = false, bool force = false);
+
+	/** Logs this user out of their server operator account. Does nothing to non-operators. */
+	void OperLogout();
+
+	/** Write to all users that can see this user (including this user in the list if include_self is true), appending CR/LF
+	 * @param protoev Protocol event to send, may contain any number of messages.
+	 * @param include_self Should the message be sent back to the author?
+	 */
+	void WriteCommonRaw(ClientProtocol::Event& protoev, bool include_self = true);
+
+	/** Sends a server notice to this user.
+	 * @param text The message to send.
+	 */
+	void WriteNotice(const std::string& text);
+
+	/** Sends a server notice to this user.
+	 * @param text A format string to format and then send.
+	 * @param p One or more arguments to format the string with.
+	 */
+	template <typename... Param>
+	void WriteNotice(const char* text, Param&&... p)
+	{
+		WriteNotice(fmt::vformat(text, fmt::make_format_args(p...)));
+	}
+
+	/** Sends a server notice from the local server to the user.
+	 * @param text The message to send.
+	 */
+	virtual void WriteRemoteNotice(const std::string& text);
+
+	/** Sends a server notice to this user.
+	 * @param text A format string to format and then send.
+	 * @param p One or more arguments to format the string with.
+	 */
+	template <typename... Param>
+	void WriteRemoteNotice(const char* text, Param&&... p)
+	{
+		WriteRemoteNotice(fmt::vformat(text, fmt::make_format_args(p...)));
+	}
+
+	/** Sends a notice to this user.
+	 * @param numeric The numeric to send.
+	 */
+	void WriteNumeric(const Numeric::Numeric& numeric);
+
+	/** Sends a notice to this user.
+	 * @param numeric The numeric code to send.
+	 * @param p One or more parameters to the numeric.
+	 */
+	template <typename... Param>
+	void WriteNumeric(unsigned int numeric, Param&&... p)
+	{
+		Numeric::Numeric n(numeric);
+		n.push(std::forward<Param>(p)...);
+		WriteNumeric(n);
+	}
+
+	/** Sends a notice from the local server to this user.
+	 * @param numeric The numeric to send.
+	 */
+	virtual void WriteRemoteNumeric(const Numeric::Numeric& numeric);
+
+	/** Sends a notice from the local server to this user.
+	 * @param numeric The numeric code to send.
+	 * @param p One or more parameters to the numeric.
+	 */
+	template <typename... Param>
+	void WriteRemoteNumeric(unsigned int numeric, Param&&... p)
+	{
+		Numeric::Numeric n(numeric);
+		n.push(std::forward<Param>(p)...);
+		WriteRemoteNumeric(n);
+	}
+
+	/** Execute a function once for each local neighbor of this user. By default, the neighbors of a user are the users
+	 * who have at least one common channel with the user. Modules are allowed to alter the set of neighbors freely.
+	 * This function is used for example to send something conditionally to neighbors, or to send different messages
+	 * to different users depending on their oper status.
+	 * @param handler Function object to call, inherited from ForEachNeighborHandler.
+	 * @param include_self True to include this user in the set of neighbors, false otherwise.
+	 * Modules may override this. Has no effect if this user is not local.
+	 */
+	uint64_t ForEachNeighbor(ForEachNeighborHandler& handler, bool include_self = true);
+
+	/** Return true if the user shares at least one channel with another user
+	 * @param other The other user to compare the channel list against
+	 * @return True if the given user shares at least one channel with this user
+	 */
+	bool SharesChannelWith(User* other) const;
+
+	/** Change the displayed hostname of this user.
+	 * @param newhost The new displayed hostname of this user.
+	 */
+	void ChangeDisplayedHost(const std::string& newhost);
+
+	/** Change the real hostname of this user.
+	 * @param newhost The new real hostname of this user.
+	 * @param resetdisplay Whether to reset the display host to this value.
+	 */
+	void ChangeRealHost(const std::string& newhost, bool resetdisplay);
+
+	/** Change the displayed username of this user.
+	 * @param newuser The new displayed username of this user.
+	 */
+	void ChangeDisplayedUser(const std::string& newuser);
+
+	/** Change the real username of this user.
+	 * @param newuser The new real username of this user.
+	 * @param resetdisplay Whether to reset the display username to this value.
+	 */
+	void ChangeRealUser(const std::string& newuser, bool resetdisplay);
+
+	/** Change the real name of this user.
+	 * @param newreal The new real name of this user.
+	 */
+	void ChangeRealName(const std::string& newreal);
+
+	/** Change a user's nick
+	 * @param newnick The new nick. If equal to the users uuid, the nick change always succeeds.
+	 * @param newts The time at which this nick change happened.
+	 * @return True if the change succeeded
+	 */
+	bool ChangeNick(const std::string& newnick, time_t newts = 0);
+
+	/** Remove this user from all channels they are on, and delete any that are now empty.
+	 * This is used by QUIT, and will not send part messages!
+	 */
+	void PurgeEmptyChannels();
+
+	/** @copydoc Cullable::Cull */
+	Cullable::Result Cull() override;
+
+	/** Determines whether this user is fully connected to the server .*/
+	inline bool IsFullyConnected() const { return connected == CONN_FULL; }
+};
+
+class CoreExport UserIOHandler final
+	: public StreamSocket
+{
+private:
+	size_t checked_until = 0;
+public:
+	LocalUser* const user;
+	UserIOHandler(LocalUser* me)
+		: StreamSocket(StreamSocket::SS_USER)
+		, user(me)
+	{
+	}
+	void OnDataReady() override;
+	bool OnChangeLocalSocketAddress(const irc::sockets::sockaddrs& sa) override;
+	bool OnChangeRemoteSocketAddress(const irc::sockets::sockaddrs& sa) override;
+	void OnError(BufferedSocketError error) override;
+
+	/** Adds to the user's write buffer.
+	 * You may add any amount of text up to this users sendq value, if you exceed the
+	 * sendq value, the user will be removed, and further buffer adds will be dropped.
+	 * @param data The data to add to the write buffer
+	 */
+	void AddWriteBuf(const std::string& data);
+};
+
+class CoreExport LocalUser final
+	: public User
+	, public insp::intrusive_list_node<LocalUser>
+{
+private:
+	/** The connect class this user is in. */
+	std::shared_ptr<ConnectClass> connectclass;
+
+	/** Message list, can be passed to the two parameter Send(). */
+	static ClientProtocol::MessageList sendmsglist;
+
+	/** Add a serialized message to the send queue of the user.
+	 * @param serialized Bytes to add.
+	 */
+	void Write(const ClientProtocol::SerializedMessage& serialized);
+
+	/** Send a protocol event to the user, consisting of one or more messages.
+	 * @param protoev Event to send, may contain any number of messages.
+	 * @param msglist Message list used temporarily internally to pass to hooks and store messages
+	 * before Write().
+	 */
+	void Send(ClientProtocol::Event& protoev, ClientProtocol::MessageList& msglist);
+
+public:
+	LocalUser(int fd, const irc::sockets::sockaddrs& client, const irc::sockets::sockaddrs& server);
+
+	Cullable::Result Cull() override;
+
+	UserIOHandler eh;
+
+	/** Serializer to use when communicating with the user
+	 */
+	ClientProtocol::Serializer* serializer = nullptr;
+
+	/** Stats counter for bytes inbound
+	 */
+	unsigned int bytes_in = 0;
+
+	/** Stats counter for bytes outbound
+	 */
+	unsigned int bytes_out = 0;
+
+	/** Stats counter for commands inbound
+	 */
+	unsigned int cmds_in = 0;
+
+	/** Stats counter for commands outbound
+	 */
+	unsigned int cmds_out = 0;
+
+	/** Password specified by the user when they connected (if any).
+	 * This is stored even if the \<connect> block doesnt need a password, so that
+	 * modules may check it.
+	 */
+	std::string password;
+
+	/** Get the connect class which this user belongs to.
+	 * @return A pointer to this user's connect class.
+	 */
+	const std::shared_ptr<ConnectClass>& GetClass() const { return connectclass; }
+
+	/** Server address and port that this user is connected to.
+	 */
+	irc::sockets::sockaddrs server_sa;
 
 	/** Recursion fix: user is out of SendQ and will be quit as soon as possible.
 	 * This can't be handled normally because QuitUser itself calls Write on other
@@ -370,598 +882,147 @@ class CoreExport User : public Extensible
 	 */
 	unsigned int quitting_sendq:1;
 
-	/** This is true if the user matched an exception (E:Line). It is used to save time on ban checks.
-	 */
-	unsigned int exempt:1;
-
 	/** has the user responded to their previous ping?
 	 */
 	unsigned int lastping:1;
 
-	/** What type of user is this? */
-	const unsigned int usertype:2;
-
-	/** Get client IP string from sockaddr, using static internal buffer
-	 * @return The IP string
-	 */
-	const char* GetIPString();
-
-	/** Get CIDR mask, using default range, for this user
-	 */
-	irc::sockets::cidr_mask GetCIDRMask();
-
-	/** Sets the client IP for this user
-	 * @return true if the conversion was successful
-	 */
-	virtual bool SetClientIP(const char* sip, bool recheck_eline = true);
-
-	virtual void SetClientIP(const irc::sockets::sockaddrs& sa, bool recheck_eline = true);
-
-	/** Constructor
-	 * @throw CoreException if the UID allocated to the user already exists
-	 */
-	User(const std::string &uid, const std::string& srv, int objtype);
-
-	/** Check if the user matches a G or K line, and disconnect them if they do.
-	 * @param doZline True if ZLines should be checked (if IP has changed since initial connect)
-	 * Returns true if the user matched a ban, false else.
-	 */
-	bool CheckLines(bool doZline = false);
-
-	/** Returns the full displayed host of the user
-	 * This member function returns the hostname of the user as seen by other users
-	 * on the server, in nick!ident\@host form.
-	 * @return The full masked host of the user
-	 */
-	virtual const std::string& GetFullHost();
-
-	/** Returns the full real host of the user
-	 * This member function returns the hostname of the user as seen by other users
-	 * on the server, in nick!ident\@host form. If any form of hostname cloaking is in operation,
-	 * e.g. through a module, then this method will ignore it and return the true hostname.
-	 * @return The full real host of the user
-	 */
-	virtual const std::string& GetFullRealHost();
-
-	/** This clears any cached results that are used for GetFullRealHost() etc.
-	 * The results of these calls are cached as generating them can be generally expensive.
-	 */
-	void InvalidateCache();
-
-	/** Create a displayable mode string for this users snomasks
-	 * @return The notice mask character sequence
-	 */
-	const char* FormatNoticeMasks();
-
-	/** Process a snomask modifier string, e.g. +abc-de
-	 * @param sm A sequence of notice mask characters
-	 * @return The cleaned mode sequence which can be output,
-	 * e.g. in the above example if masks c and e are not
-	 * valid, this function will return +ab-d
-	 */
-	std::string ProcessNoticeMasks(const char *sm);
-
-	/** Returns true if a notice mask is set
-	 * @param sm A notice mask character to check
-	 * @return True if the notice mask is set
-	 */
-	bool IsNoticeMaskSet(unsigned char sm);
-
-	/** Changed a specific notice mask value
-	 * @param sm The server notice mask to change
-	 * @param value An on/off value for this mask
-	 */
-	void SetNoticeMask(unsigned char sm, bool value);
-
-	/** Create a displayable mode string for this users umodes
-	 * @param showparameters The mode string
-	 */
-	const char* FormatModes(bool showparameters = false);
-
-	/** Returns true if a specific mode is set
-	 * @param m The user mode
-	 * @return True if the mode is set
-	 */
-	bool IsModeSet(unsigned char m);
-
-	/** Set a specific usermode to on or off
-	 * @param m The user mode
-	 * @param value On or off setting of the mode
-	 */
-	void SetMode(unsigned char m, bool value);
-
-	/** Returns true or false for if a user can execute a privilaged oper command.
-	 * This is done by looking up their oper type from User::oper, then referencing
-	 * this to their oper classes and checking the commands they can execute.
-	 * @param command A command (should be all CAPS)
-	 * @return True if this user can execute the command
-	 */
-	virtual bool HasPermission(const std::string &command);
-
-	/** Returns true if a user has a given permission.
-	 * This is used to check whether or not users may perform certain actions which admins may not wish to give to
-	 * all operators, yet are not commands. An example might be oper override, mass messaging (/notice $*), etc.
-	 *
-	 * @param privstr The priv to chec, e.g. "users/override/topic". These are loaded free-form from the config file.
-	 * @param noisy If set to true, the user is notified that they do not have the specified permission where applicable. If false, no notification is sent.
-	 * @return True if this user has the permission in question.
-	 */
-	virtual bool HasPrivPermission(const std::string &privstr, bool noisy = false);
-
-	/** Returns true or false if a user can set a privileged user or channel mode.
-	 * This is done by looking up their oper type from User::oper, then referencing
-	 * this to their oper classes, and checking the modes they can set.
-	 * @param mode The mode the check
-	 * @param type ModeType (MODETYPE_CHANNEL or MODETYPE_USER).
-	 * @return True if the user can set or unset this mode.
-	 */
-	virtual bool HasModePermission(unsigned char mode, ModeType type);
-
-	/** Creates a wildcard host.
-	 * Takes a buffer to use and fills the given buffer with the host in the format *!*\@hostname
-	 * @return The wildcarded hostname in *!*\@host form
-	 */
-	char* MakeWildHost();
-
-	/** Creates a usermask with real host.
-	 * Takes a buffer to use and fills the given buffer with the hostmask in the format user\@host
-	 * @return the usermask in the format user\@host
-	 */
-	const std::string& MakeHost();
-
-	/** Creates a usermask with real ip.
-	 * Takes a buffer to use and fills the given buffer with the ipmask in the format user\@ip
-	 * @return the usermask in the format user\@ip
-	 */
-	const std::string& MakeHostIP();
-
-	/** Add the user to WHOWAS system
-	 */
-	void AddToWhoWas();
-
-	/** Oper up the user using the given opertype.
-	 * This will also give the +o usermode.
-	 */
-	void Oper(OperInfo* info);
-
-	/** Force a nickname change.
-	 * If the nickname change fails (for example, because the nick in question
-	 * already exists) this function will return false, and you must then either
-	 * output an error message, or quit the user for nickname collision.
-	 * @param newnick The nickname to change to
-	 * @return True if the nickchange was successful.
-	 */
-	inline bool ForceNickChange(const char* newnick) { return ChangeNick(newnick, true); }
-
-	/** Oper down.
-	 * This will clear the +o usermode and unset the user's oper type
-	 */
-	void UnOper();
-
-	/** Write text to this user, appending CR/LF. Works on local users only.
-	 * @param text A std::string to send to the user
-	 */
-	virtual void Write(const std::string &text);
-
-	/** Write text to this user, appending CR/LF.
-	 * Works on local users only.
-	 * @param text The format string for text to send to the user
-	 * @param ... POD-type format arguments
-	 */
-	virtual void Write(const char *text, ...) CUSTOM_PRINTF(2, 3);
-
-	/** Write text to this user, appending CR/LF and prepending :server.name
-	 * Works on local users only.
-	 * @param text A std::string to send to the user
-	 */
-	void WriteServ(const std::string& text);
-
-	/** Write text to this user, appending CR/LF and prepending :server.name
-	 * Works on local users only.
-	 * @param text The format string for text to send to the user
-	 * @param ... POD-type format arguments
-	 */
-	void WriteServ(const char* text, ...) CUSTOM_PRINTF(2, 3);
-
-	void WriteNumeric(unsigned int numeric, const char* text, ...) CUSTOM_PRINTF(3, 4);
-
-	void WriteNumeric(unsigned int numeric, const std::string &text);
-
-	/** Write text to this user, appending CR/LF and prepending :nick!user\@host of the user provided in the first parameter.
-	 * @param user The user to prepend the :nick!user\@host of
-	 * @param text A std::string to send to the user
-	 */
-	void WriteFrom(User *user, const std::string &text);
-
-	/** Write text to this user, appending CR/LF and prepending :nick!user\@host of the user provided in the first parameter.
-	 * @param user The user to prepend the :nick!user\@host of
-	 * @param text The format string for text to send to the user
-	 * @param ... POD-type format arguments
-	 */
-	void WriteFrom(User *user, const char* text, ...) CUSTOM_PRINTF(3, 4);
-
-	/** Write text to the user provided in the first parameter, appending CR/LF, and prepending THIS user's :nick!user\@host.
-	 * @param dest The user to route the message to
-	 * @param data A std::string to send to the user
+	/** This is true if the user matched an exception (E-line). It is used to save time on ban checks.
 	 */
-	void WriteTo(User *dest, const std::string &data);
+	unsigned int exempt:1;
 
-	/** Write text to the user provided in the first parameter, appending CR/LF, and prepending THIS user's :nick!user\@host.
-	 * @param dest The user to route the message to
-	 * @param data The format string for text to send to the user
-	 * @param ... POD-type format arguments
-	 */
-	void WriteTo(User *dest, const char *data, ...) CUSTOM_PRINTF(3, 4);
-
-	/** Write to all users that can see this user (including this user in the list if include_self is true), appending CR/LF
-	 * @param line A std::string to send to the users
-	 * @param include_self Should the message be sent back to the author?
-	 */
-	void WriteCommonRaw(const std::string &line, bool include_self = true);
-
-	/** Write to all users that can see this user (including this user in the list), appending CR/LF
-	 * @param text The format string for text to send to the users
-	 * @param ... POD-type format arguments
-	 */
-	void WriteCommon(const char* text, ...) CUSTOM_PRINTF(2, 3);
-
-	/** Write to all users that can see this user (not including this user in the list), appending CR/LF
-	 * @param text The format string for text to send to the users
-	 * @param ... POD-type format arguments
-	 */
-	void WriteCommonExcept(const char* text, ...) CUSTOM_PRINTF(2, 3);
-
-	/** Write a quit message to all common users, as in User::WriteCommonExcept but with a specific
-	 * quit message for opers only.
-	 * @param normal_text Normal user quit message
-	 * @param oper_text Oper only quit message
-	 */
-	void WriteCommonQuit(const std::string &normal_text, const std::string &oper_text);
-
-	/** Dump text to a user target, splitting it appropriately to fit
-	 * @param LinePrefix text to prefix each complete line with
-	 * @param TextStream the text to send to the user
-	 */
-	void SendText(const std::string &LinePrefix, std::stringstream &TextStream);
-
-	/** Write to the user, routing the line if the user is remote.
-	 */
-	virtual void SendText(const std::string& line) = 0;
-
-	/** Write to the user, routing the line if the user is remote.
-	 */
-	void SendText(const char* text, ...) CUSTOM_PRINTF(2, 3);
-
-	/** Return true if the user shares at least one channel with another user
-	 * @param other The other user to compare the channel list against
-	 * @return True if the given user shares at least one channel with this user
-	 */
-	bool SharesChannelWith(User *other);
-
-	/** Send fake quit/join messages for host or ident cycle.
-	 * Run this after the item in question has changed.
-	 * You should not need to use this function, call ChangeDisplayedHost instead
-	 *
-	 * @param quitline The entire QUIT line, including the source using the old value
-	 */
-	void DoHostCycle(const std::string &quitline);
-
-	/** Change the displayed host of a user.
-	 * ALWAYS use this function, rather than writing User::dhost directly,
-	 * as this triggers module events allowing the change to be syncronized to
-	 * remote servers. This will also emulate a QUIT and rejoin (where configured)
-	 * before setting their host field.
-	 * @param host The new hostname to set
-	 * @return True if the change succeeded, false if it didn't
-	 */
-	bool ChangeDisplayedHost(const char* host);
-
-	/** Change the ident (username) of a user.
-	 * ALWAYS use this function, rather than writing User::ident directly,
-	 * as this correctly causes the user to seem to quit (where configured)
-	 * before setting their ident field.
-	 * @param newident The new ident to set
-	 * @return True if the change succeeded, false if it didn't
-	 */
-	bool ChangeIdent(const char* newident);
-
-	/** Change a users realname field.
-	 * ALWAYS use this function, rather than writing User::fullname directly,
-	 * as this triggers module events allowing the change to be syncronized to
-	 * remote servers.
-	 * @param gecos The user's new realname
-	 * @return True if the change succeeded, false if otherwise
-	 */
-	bool ChangeName(const char* gecos);
-
-	/** Change a user's nick
-	 * @param newnick The new nick
-	 * @param force True if the change is being forced (should not be blocked by modes like +N)
-	 * @return True if the change succeeded
-	 */
-	bool ChangeNick(const std::string& newnick, bool force = false);
-
-	/** Send a command to all local users from this user
-	 * The command given must be able to send text with the
-	 * first parameter as a servermask (e.g. $*), so basically
-	 * you should use PRIVMSG or NOTICE.
-	 * @param command the command to send
-	 * @param text The text format string to send
-	 * @param ... Format arguments
-	 */
-	void SendAll(const char* command, const char* text, ...) CUSTOM_PRINTF(3, 4);
-
-	/** Compile a channel list for this user.  Used internally by WHOIS
-	 * @param source The user to prepare the channel list for
-	 * @param spy Whether to return the spy channel list rather than the normal one
-	 * @return This user's channel list
-	 */
-	std::string ChannelList(User* source, bool spy);
-
-	/** Split the channel list in cl which came from dest, and spool it to this user
-	 * Used internally by WHOIS
-	 * @param dest The user the original channel list came from
-	 * @param cl The  channel list as a string obtained from User::ChannelList()
-	 */
-	void SplitChanList(User* dest, const std::string &cl);
-
-	/** Remove this user from all channels they are on, and delete any that are now empty.
-	 * This is used by QUIT, and will not send part messages!
-	 */
-	void PurgeEmptyChannels();
-
-	/** Get the connect class which this user belongs to. NULL for remote users.
-	 * @return A pointer to this user's connect class.
-	 */
-	virtual ConnectClass* GetClass();
-
-	/** Default destructor
-	 */
-	virtual ~User();
-	virtual CullResult cull();
-};
-
-class CoreExport UserIOHandler : public StreamSocket
-{
- public:
-	LocalUser* const user;
-	UserIOHandler(LocalUser* me) : user(me) {}
-	void OnDataReady();
-	void OnError(BufferedSocketError error);
-
-	/** Adds to the user's write buffer.
-	 * You may add any amount of text up to this users sendq value, if you exceed the
-	 * sendq value, the user will be removed, and further buffer adds will be dropped.
-	 * @param data The data to add to the write buffer
-	 */
-	void AddWriteBuf(const std::string &data);
-};
-
-typedef unsigned int already_sent_t;
-
-class CoreExport LocalUser : public User, public InviteBase
-{
- public:
-	LocalUser(int fd, irc::sockets::sockaddrs* client, irc::sockets::sockaddrs* server);
-	CullResult cull();
-
-	UserIOHandler eh;
-
-	/** Position in UserManager::local_users
-	 */
-	LocalUserList::iterator localuseriter;
-
-	/** Stats counter for bytes inbound
-	 */
-	unsigned int bytes_in;
-
-	/** Stats counter for bytes outbound
-	 */
-	unsigned int bytes_out;
-
-	/** Stats counter for commands inbound
-	 */
-	unsigned int cmds_in;
-
-	/** Stats counter for commands outbound
-	 */
-	unsigned int cmds_out;
-
-	/** Password specified by the user when they registered (if any).
-	 * This is stored even if the \<connect> block doesnt need a password, so that
-	 * modules may check it.
-	 */
-	std::string password;
-
-	/** Contains a pointer to the connect class a user is on from
-	 */
-	reference<ConnectClass> MyClass;
-
-	ConnectClass* GetClass();
-
-	/** Call this method to find the matching \<connect> for a user, and to check them against it.
-	 */
-	void CheckClass();
-
-	/** Server address and port that this user is connected to.
-	 */
-	irc::sockets::sockaddrs server_sa;
-
-	/**
-	 * @return The port number of this user.
-	 */
-	int GetServerPort();
+	/** The time at which this user should be pinged next. */
+	time_t nextping = 0;
 
-	/** Used by PING checking code
+	/** Time that the connection last sent a message, used to calculate idle time
 	 */
-	time_t nping;
+	time_t idle_lastmsg = 0;
 
 	/** This value contains how far into the penalty threshold the user is.
 	 * This is used either to enable fake lag or for excess flood quits
 	 */
-	unsigned int CommandFloodPenalty;
+	unsigned int CommandFloodPenalty = 0;
 
-	static already_sent_t already_sent_id;
-	already_sent_t already_sent;
+	uint64_t already_sent = 0;
 
-	/** Stored reverse lookup from res_forward. Should not be used after resolution.
+	/** Check if the user matches a G- or K-line, and disconnect them if they do.
+	 * @param doZline True if Z-lines should be checked (if IP has changed since initial connect)
+	 * Returns true if the user matched a ban, false else.
 	 */
-	std::string stored_host;
-
-	/** Starts a DNS lookup of the user's IP.
-	 * This will cause two UserResolver classes to be instantiated.
-	 * When complete, these objects set User::dns_done to true.
-	 */
-	void StartDNSLookup();
+	bool CheckLines(bool doZline = false);
 
 	/** Use this method to fully connect a user.
-	 * This will send the message of the day, check G/K/E lines, etc.
+	 * This will send the message of the day, check G/K/E-lines, etc.
 	 */
 	void FullConnect();
 
-	/** Set the connect class to which this user belongs to.
-	 * @param explicit_name Set this string to tie the user to a specific class name. Otherwise, the class is fitted by checking \<connect> tags from the configuration file.
-	 * @return A reference to this user's current connect class.
+	/** @copydoc User::ChangeRemoteAddress */
+	void ChangeRemoteAddress(const irc::sockets::sockaddrs& sa) override;
+
+	/** Change the connect class for this user.
+	 * @param klass The connect class the user should be assigned to.
+	 * @param force Whether the connect class was explicitly picked (e.g. via <oper:class>).
 	 */
-	void SetClass(const std::string &explicit_name = "");
+	void ChangeConnectClass(const std::shared_ptr<ConnectClass>& klass, bool force);
 
-	bool SetClientIP(const char* sip, bool recheck_eline = true);
-
-	void SetClientIP(const irc::sockets::sockaddrs& sa, bool recheck_eline = true);
-
-	void SendText(const std::string& line);
-	void Write(const std::string& text);
-	void Write(const char*, ...) CUSTOM_PRINTF(2, 3);
-
-	/** Returns the list of channels this user has been invited to but has not yet joined.
-	 * @return A list of channels the user is invited to
+	/** Find a new connect class for this user.
+	 * @param keepexisting If no connect class can be found should they keep their existing one if
+	 *                     they have one.
+	 * @return True if an allow-type connect class was found for the user. Otherwise, false.
 	 */
-	InviteList& GetInviteList();
+	bool FindConnectClass(bool keepexisting = false);
 
-	/** Returns true if a user is invited to a channel.
-	 * @param channel A channel name to look up
-	 * @return True if the user is invited to the given channel
+	/** Send a NOTICE message from the local server to the user.
+	 * The message will be sent even if the user is connected to a remote server.
+	 * @param text Text to send
 	 */
-	bool IsInvited(const irc::string &channel);
+	void WriteRemoteNotice(const std::string& text) override;
 
-	/** Adds a channel to a users invite list (invites them to a channel)
-	 * @param channel A channel name to add
-	 * @param timeout When the invite should expire (0 == never)
+	/** Change nick to uuid, unset CONN_NICK and send a nickname overruled numeric.
+	 * This is called when another user (either local or remote) needs the nick of this user and this user
+	 * isn't fully connected.
 	 */
-	void InviteTo(const irc::string &channel, time_t timeout);
+	void OverruleNick();
 
-	/** Removes a channel from a users invite list.
-	 * This member function is called on successfully joining an invite only channel
-	 * to which the user has previously been invited, to clear the invitation.
-	 * @param channel The channel to remove the invite to
+	/** Send a protocol event to the user, consisting of one or more messages.
+	 * @param protoev Event to send, may contain any number of messages.
 	 */
-	void RemoveInvite(const irc::string &channel);
+	void Send(ClientProtocol::Event& protoev);
 
-	void RemoveExpiredInvites();
-
-	/** Returns true or false for if a user can execute a privilaged oper command.
-	 * This is done by looking up their oper type from User::oper, then referencing
-	 * this to their oper classes and checking the commands they can execute.
-	 * @param command A command (should be all CAPS)
-	 * @return True if this user can execute the command
+	/** Send a single message to the user.
+	 * @param protoevprov Protocol event provider.
+	 * @param msg Message to send.
 	 */
-	bool HasPermission(const std::string &command);
-
-	/** Returns true if a user has a given permission.
-	 * This is used to check whether or not users may perform certain actions which admins may not wish to give to
-	 * all operators, yet are not commands. An example might be oper override, mass messaging (/notice $*), etc.
-	 *
-	 * @param privstr The priv to chec, e.g. "users/override/topic". These are loaded free-form from the config file.
-	 * @param noisy If set to true, the user is notified that they do not have the specified permission where applicable. If false, no notification is sent.
-	 * @return True if this user has the permission in question.
-	 */
-	bool HasPrivPermission(const std::string &privstr, bool noisy = false);
-
-	/** Returns true or false if a user can set a privileged user or channel mode.
-	 * This is done by looking up their oper type from User::oper, then referencing
-	 * this to their oper classes, and checking the modes they can set.
-	 * @param mode The mode the check
-	 * @param type ModeType (MODETYPE_CHANNEL or MODETYPE_USER).
-	 * @return True if the user can set or unset this mode.
-	 */
-	bool HasModePermission(unsigned char mode, ModeType type);
+	void Send(ClientProtocol::EventProvider& protoevprov, ClientProtocol::Message& msg);
 };
 
-class CoreExport RemoteUser : public User
+class RemoteUser
+	: public User
 {
- public:
-	RemoteUser(const std::string& uid, const std::string& srv) : User(uid, srv, USERTYPE_REMOTE)
+public:
+	RemoteUser(const std::string& uid, Server* srv)
+		: User(uid, srv, TYPE_REMOTE)
 	{
 	}
-	virtual void SendText(const std::string& line);
 };
 
-class CoreExport FakeUser : public User
+class CoreExport FakeUser final
+	: public User
 {
- public:
-	FakeUser(const std::string &uid, const std::string& srv) : User(uid, srv, USERTYPE_SERVER)
-	{
-		nick = srv;
-	}
+public:
+	/** Creates a new fake user with the specified sid and server details.
+	 * @param sid A server id in the format [0-9][A-Z0-9][A-Z0-9].
+	 * @param srv The server instance to configure this fake user from.
+	 */
+	FakeUser(const std::string& sid, Server* srv);
 
-	virtual CullResult cull();
-	virtual void SendText(const std::string& line);
-	virtual const std::string& GetFullHost();
-	virtual const std::string& GetFullRealHost();
+	/** Creates a new fake user with the specified sid, server name, and server description.
+	 * @param sid A server id in the format [0-9][A-Z0-9][A-Z0-9].
+	 * @param sname The name of the server.
+	 * @param sdesc The description of the server.
+	 */
+	FakeUser(const std::string& sid, const std::string& sname, const std::string& sdesc);
+
+	/** @copydoc Cullable::Cull. */
+	Cullable::Result Cull() override;
+
+	/** @copydoc User::GetMask. */
+	const std::string& GetMask() override;
+
+	/** @copydoc User::GetRealMask. */
+	const std::string& GetRealMask() override;
 };
 
 /* Faster than dynamic_cast */
 /** Is a local user */
 inline LocalUser* IS_LOCAL(User* u)
 {
-	return u->usertype == USERTYPE_LOCAL ? static_cast<LocalUser*>(u) : NULL;
+	return (u != nullptr && u->usertype == User::TYPE_LOCAL) ? static_cast<LocalUser*>(u) : nullptr;
 }
 /** Is a remote user */
 inline RemoteUser* IS_REMOTE(User* u)
 {
-	return u->usertype == USERTYPE_REMOTE ? static_cast<RemoteUser*>(u) : NULL;
+	return (u != nullptr && u->usertype == User::TYPE_REMOTE) ? static_cast<RemoteUser*>(u) : nullptr;
 }
 /** Is a server fakeuser */
 inline FakeUser* IS_SERVER(User* u)
 {
-	return u->usertype == USERTYPE_SERVER ? static_cast<FakeUser*>(u) : NULL;
+	return (u != nullptr && u->usertype == User::TYPE_SERVER) ? static_cast<FakeUser*>(u) : nullptr;
 }
-/** Is an oper */
-#define IS_OPER(x) (x->oper)
-/** Is away */
-#define IS_AWAY(x) (!x->awaymsg.empty())
 
-/** Derived from Resolver, and performs user forward/reverse lookups.
- */
-class CoreExport UserResolver : public Resolver
+inline bool User::IsModeSet(const ModeHandler* mh) const
 {
- private:
-	/** UUID we are looking up */
-	std::string uuid;
-	/** True if the lookup is forward, false if is a reverse lookup
-	 */
-	bool fwd;
- public:
-	/** Create a resolver.
-	 * @param user The user to begin lookup on
-	 * @param to_resolve The IP or host to resolve
-	 * @param qt The query type
-	 * @param cache Modified by the constructor if the result was cached
-	 */
-	UserResolver(LocalUser* user, std::string to_resolve, QueryType qt, bool &cache);
+	return ((mh->GetId() != ModeParser::MODEID_MAX) && (modes[mh->GetId()]));
+}
 
-	/** Called on successful lookup
-	 * @param result Result string
-	 * @param ttl Time to live for result
-	 * @param cached True if the result was found in the cache
-	 */
-	void OnLookupComplete(const std::string &result, unsigned int ttl, bool cached);
+inline bool User::IsModeSet(const UserModeReference& moderef) const
+{
+	if (!moderef)
+		return false;
+	return IsModeSet(*moderef);
+}
 
-	/** Called on failed lookup
-	 * @param e Error code
-	 * @param errormessage Error message string
-	 */
-	void OnError(ResolverError e, const std::string &errormessage);
-};
-
-#endif
+inline void User::SetMode(const ModeHandler* mh, bool value)
+{
+	if (mh && mh->GetId() != ModeParser::MODEID_MAX)
+		modes[mh->GetId()] = value;
+}

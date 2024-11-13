@@ -1,10 +1,13 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
- *   Copyright (C) 2009 Daniel De Graaf <danieldg@inspircd.org>
+ *   Copyright (C) 2018-2023 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
+ *   Copyright (C) 2012 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2009-2010 Daniel De Graaf <danieldg@inspircd.org>
+ *   Copyright (C) 2009 Uli Schlachter <psychon@znc.in>
  *   Copyright (C) 2007 Dennis Friis <peavey@inspircd.org>
- *   Copyright (C) 2007 Robin Burchell <robin+git@viroteck.net>
- *   Copyright (C) 2004, 2006 Craig Edwards <craigedwards@brainbox.cc>
+ *   Copyright (C) 2006 Craig Edwards <brain@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -21,67 +24,84 @@
 
 
 #include "inspircd.h"
+#include "modules/extban.h"
 
-/* $ModDesc: Provides support for oper-only chans via the +O channel mode */
-
-class OperChans : public SimpleChannelModeHandler
+enum
 {
- public:
-	/* This is an oper-only mode */
-	OperChans(Module* Creator) : SimpleChannelModeHandler(Creator, "operonly", 'O')
+	// From UnrealIRCd.
+	ERR_CANTJOINOPERSONLY = 520
+};
+
+class OperAccountExtBan final
+	: public ExtBan::MatchingBase
+{
+public:
+	OperAccountExtBan(Module* Creator)
+		: ExtBan::MatchingBase(Creator, "oper", 'o')
 	{
-		oper = true;
+	}
+
+	bool IsMatch(User* user, Channel* channel, const std::string& text) override
+	{
+		// If the user is not an oper they can't match this.
+		if (!user->IsOper())
+			return false;
+
+		// Replace spaces with underscores as they're prohibited in mode parameters.
+		std::string opername(user->oper->GetName());
+		std::replace(opername.begin(), opername.end(), ' ', '_');
+		return InspIRCd::Match(opername, text);
 	}
 };
 
-class ModuleOperChans : public Module
+class OperTypeExtBan final
+	: public ExtBan::MatchingBase
 {
-	OperChans oc;
- public:
-	ModuleOperChans() : oc(this)
+public:
+	OperTypeExtBan(Module* Creator)
+		: ExtBan::MatchingBase(Creator, "opertype", 'O')
 	{
 	}
 
-	void init()
+	bool IsMatch(User* user, Channel* channel, const std::string& text) override
 	{
-		ServerInstance->Modules->AddService(oc);
-		Implementation eventlist[] = { I_OnCheckBan, I_On005Numeric, I_OnUserPreJoin };
-		ServerInstance->Modules->Attach(eventlist, this, sizeof(eventlist)/sizeof(Implementation));
+		// If the user is not an oper they can't match this.
+		if (!user->IsOper())
+			return false;
+
+		// Replace spaces with underscores as they're prohibited in mode parameters.
+		std::string opername(user->oper->GetType());
+		std::replace(opername.begin(), opername.end(), ' ', '_');
+		return InspIRCd::Match(opername, text);
+	}
+};
+
+class ModuleOperChans final
+	: public Module
+{
+private:
+	SimpleChannelMode oc;
+	OperAccountExtBan operaccount;
+	OperTypeExtBan opertype;
+
+public:
+	ModuleOperChans()
+		: Module(VF_VENDOR, "Adds channel mode O (operonly) which prevents non-server operators from joining the channel.")
+		, oc(this, "operonly", 'O', true)
+		, operaccount(this)
+		, opertype(this)
+	{
 	}
 
-	ModResult OnUserPreJoin(User* user, Channel* chan, const char* cname, std::string &privs, const std::string &keygiven)
+	ModResult OnUserPreJoin(LocalUser* user, Channel* chan, const std::string& cname, std::string& privs, const std::string& keygiven, bool override) override
 	{
-		if (chan && chan->IsModeSet('O') && !IS_OPER(user))
+		if (!override && chan && chan->IsModeSet(oc) && !user->IsOper())
 		{
-			user->WriteNumeric(ERR_CANTJOINOPERSONLY, "%s %s :Only IRC operators may join %s (+O is set)",
-				user->nick.c_str(), chan->name.c_str(), chan->name.c_str());
+			user->WriteNumeric(ERR_CANTJOINOPERSONLY, chan->name, INSP_FORMAT("Only server operators may join {} (+{} is set)",
+				chan->name, oc.GetModeChar()));
 			return MOD_RES_DENY;
 		}
 		return MOD_RES_PASSTHRU;
-	}
-
-	ModResult OnCheckBan(User *user, Channel *c, const std::string& mask)
-	{
-		if ((mask.length() > 2) && (mask[0] == 'O') && (mask[1] == ':'))
-		{
-			if (IS_OPER(user) && InspIRCd::Match(user->oper->name, mask.substr(2)))
-				return MOD_RES_DENY;
-		}
-		return MOD_RES_PASSTHRU;
-	}
-
-	void On005Numeric(std::string &output)
-	{
-		ServerInstance->AddExtBanChar('O');
-	}
-
-	~ModuleOperChans()
-	{
-	}
-
-	Version GetVersion()
-	{
-		return Version("Provides support for oper-only chans via the +O channel mode and 'O' extban", VF_VENDOR);
 	}
 };
 

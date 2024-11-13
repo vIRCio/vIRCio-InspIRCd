@@ -1,7 +1,11 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
- *   Copyright (C) 2008 Craig Edwards <craigedwards@brainbox.cc>
+ *   Copyright (C) 2022-2024 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2021 Herman <GermanAizek@yandex.ru>
+ *   Copyright (C) 2013 ChrisTX <xpipe@hotmail.de>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
+ *   Copyright (C) 2008 Craig Edwards <brain@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -17,14 +21,9 @@
  */
 
 
-#include "inspircd_config.h"
 #include "inspircd.h"
-#include "exitcodes.h"
+
 #include <windows.h>
-#include <cstdlib>
-#include <cstring>
-#include <cstdio>
-#include <iostream>
 
 static SERVICE_STATUS_HANDLE g_ServiceStatusHandle;
 static SERVICE_STATUS g_ServiceStatus;
@@ -32,13 +31,13 @@ static bool g_bRunningAsService;
 
 struct Service_Data {
 	DWORD argc;
-	LPSTR *argv;
+	LPSTR* argv;
 };
 
 static Service_Data g_ServiceData;
 
 /** The main part of inspircd runs within this thread function. This allows the service part to run
- * seperately on its own and to be able to kill the worker thread when its time to quit.
+ * separately on its own and to be able to kill the worker thread when its time to quit.
  */
 DWORD WINAPI WorkerThread(LPVOID param)
 {
@@ -59,14 +58,14 @@ void SetServiceRunning()
 		throw CWin32Exception();
 }
 
-/* In windows we hook this to InspIRCd::Exit() */
+/* In windows we hook this to InspIRCd::Exit(EXIT_FAILURE) */
 void SetServiceStopped(DWORD dwStatus)
 {
 	if (!g_bRunningAsService)
 		return;
 
 	g_ServiceStatus.dwCurrentState = SERVICE_STOPPED;
-	if(dwStatus != EXIT_STATUS_NOERROR)
+	if(dwStatus != EXIT_SUCCESS)
 	{
 		g_ServiceStatus.dwServiceSpecificExitCode = dwStatus;
 		g_ServiceStatus.dwWin32ExitCode = ERROR_SERVICE_SPECIFIC_ERROR;
@@ -92,7 +91,7 @@ VOID ServiceCtrlHandler(DWORD controlCode)
 }
 
 /** This callback is called by windows when the service is started */
-VOID ServiceMain(DWORD argc, LPCSTR *argv)
+VOID ServiceMain(DWORD argc, LPCSTR* argv)
 {
 	g_ServiceStatusHandle = RegisterServiceCtrlHandler(TEXT("InspIRCd"), (LPHANDLER_FUNCTION)ServiceCtrlHandler);
 	if( !g_ServiceStatusHandle )
@@ -109,7 +108,7 @@ VOID ServiceMain(DWORD argc, LPCSTR *argv)
 		return;
 
 	char szModuleName[MAX_PATH];
-	if(GetModuleFileNameA(NULL, szModuleName, MAX_PATH))
+	if(GetModuleFileNameA(nullptr, szModuleName, MAX_PATH))
 	{
 		if(!argc)
 			argc = 1;
@@ -117,7 +116,7 @@ VOID ServiceMain(DWORD argc, LPCSTR *argv)
 		g_ServiceData.argc = argc;
 
 		// Note: since this memory is going to stay allocated for the rest of the execution,
-		//		 it doesn't make sense to free it, as it's going to be "freed" on process termination
+		// it doesn't make sense to free it, as it's going to be "freed" on process termination
 		try {
 			g_ServiceData.argv = new char*[argc];
 
@@ -132,11 +131,11 @@ VOID ServiceMain(DWORD argc, LPCSTR *argv)
 				strcpy_s(g_ServiceData.argv[i], allocsize, argv[i]);
 			}
 
-			*(strrchr(szModuleName, '\\') + 1) = NULL;
+			*(strrchr(szModuleName, '\\') + 1) = '\0';
 			SetCurrentDirectoryA(szModuleName);
 
-			HANDLE hThread = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)WorkerThread, NULL, 0, NULL);
-			if (hThread != NULL)
+			HANDLE hThread = CreateThread(nullptr, 0, (LPTHREAD_START_ROUTINE)WorkerThread, nullptr, 0, nullptr);
+			if (hThread != nullptr)
 			{
 				WaitForSingleObject(hThread, INFINITE);
 				CloseHandle(hThread);
@@ -164,7 +163,7 @@ void InstallService()
 
 	try {
 		TCHAR tszBinaryPath[MAX_PATH];
-		if(!GetModuleFileName(NULL, tszBinaryPath, _countof(tszBinaryPath)))
+		if(!GetModuleFileName(nullptr, tszBinaryPath, _countof(tszBinaryPath)))
 		{
 			throw CWin32Exception();
 		}
@@ -175,8 +174,8 @@ void InstallService()
 			throw CWin32Exception();
 		}
 
-		InspServiceHandle = CreateService(SCMHandle, TEXT("InspIRCd"),TEXT("InspIRCd Daemon"), SERVICE_CHANGE_CONFIG, SERVICE_WIN32_OWN_PROCESS,
-			SERVICE_AUTO_START, SERVICE_ERROR_NORMAL, tszBinaryPath, 0, 0, 0, TEXT("NT AUTHORITY\\NetworkService"), NULL);
+		InspServiceHandle = CreateService(SCMHandle, TEXT("InspIRCd"), TEXT("InspIRCd Daemon"), SERVICE_CHANGE_CONFIG, SERVICE_WIN32_OWN_PROCESS,
+			SERVICE_AUTO_START, SERVICE_ERROR_NORMAL, tszBinaryPath, 0, 0, 0, TEXT("NT AUTHORITY\\NetworkService"), nullptr);
 
 		if (!InspServiceHandle)
 		{
@@ -192,9 +191,9 @@ void InstallService()
 
 		CloseServiceHandle(InspServiceHandle);
 		CloseServiceHandle(SCMHandle);
-		std::cout << "Service installed." << std::endl;
+		fmt::println("Service installed.");
 	}
-	catch(CWin32Exception e)
+	catch(const CWin32Exception& e)
 	{
 		if(InspServiceHandle)
 			CloseServiceHandle(InspServiceHandle);
@@ -202,7 +201,7 @@ void InstallService()
 		if(SCMHandle)
 			CloseServiceHandle(SCMHandle);
 
-		std::cout << "Service installation failed: " << e.what() << std::endl;
+		fmt::println("Service installation failed: {}", e.what());
 	}
 }
 
@@ -213,7 +212,7 @@ void UninstallService()
 
 	try
 	{
-		SCMHandle = OpenSCManager(NULL, SERVICES_ACTIVE_DATABASE, DELETE);
+		SCMHandle = OpenSCManager(nullptr, SERVICES_ACTIVE_DATABASE, DELETE);
 		if (!SCMHandle)
 			throw CWin32Exception();
 
@@ -228,9 +227,9 @@ void UninstallService()
 
 		CloseServiceHandle(InspServiceHandle);
 		CloseServiceHandle(SCMHandle);
-		std::cout << "Service removed." << std::endl;
+		fmt::println("Service removed.");
 	}
-	catch(CWin32Exception e)
+	catch(const CWin32Exception& e)
 	{
 		if(InspServiceHandle)
 			CloseServiceHandle(InspServiceHandle);
@@ -238,7 +237,7 @@ void UninstallService()
 		if(SCMHandle)
 			CloseServiceHandle(SCMHandle);
 
-		std::cout << "Service deletion failed: " << e.what() << std::endl;
+		fmt::println("Service deletion failed: {}", e.what());
 	}
 }
 
@@ -253,20 +252,20 @@ int main(int argc, char* argv[])
 			if(!_stricmp(argv[i], "--installservice"))
 			{
 				InstallService();
-				return 0;
+				return EXIT_SUCCESS;
 			}
 			if(!_stricmp(argv[i], "--uninstallservice") || !_stricmp(argv[i], "--removeservice"))
 			{
 				UninstallService();
-				return 0;
+				return EXIT_SUCCESS;
 			}
 		}
 	}
 
 	SERVICE_TABLE_ENTRY serviceTable[] =
 	{
-		{ TEXT("InspIRCd"), (LPSERVICE_MAIN_FUNCTION)ServiceMain },
-		{ NULL, NULL }
+		{ (LPSTR)"InspIRCd", (LPSERVICE_MAIN_FUNCTION)ServiceMain },
+		{ nullptr, nullptr }
 	};
 
 	g_bRunningAsService = true;
@@ -280,8 +279,8 @@ int main(int argc, char* argv[])
 		}
 		else
 		{
-			return EXIT_STATUS_INTERNAL;
+			return EXIT_FAILURE;
 		}
 	}
-	return 0;
+	return EXIT_SUCCESS;
 }

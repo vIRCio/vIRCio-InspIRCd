@@ -1,7 +1,12 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
- *   Copyright (C) 2008 Craig Edwards <craigedwards@brainbox.cc>
+ *   Copyright (C) 2013, 2021 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2013, 2015 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
+ *   Copyright (C) 2007 Robin Burchell <robin+git@viroteck.net>
+ *   Copyright (C) 2007 Dennis Friis <peavey@inspircd.org>
+ *   Copyright (C) 2007 Craig Edwards <brain@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -17,25 +22,14 @@
  */
 
 
-#ifndef M_SPANNINGTREE_CACHETIMER_H
-#define M_SPANNINGTREE_CACHETIMER_H
+#pragma once
 
-#include "timer.h"
-
-class ModuleSpanningTree;
-class SpanningTreeUtilities;
-
-/** Create a timer which recurs every second, we inherit from Timer.
- * Timer is only one-shot however, so at the end of each Tick() we simply
- * insert another of ourselves into the pending queue :)
+/** Timer that fires when we need to refresh the IP cache of servers
  */
-class CacheRefreshTimer : public Timer
+class CacheRefreshTimer final
+	: public Timer
 {
- private:
-	SpanningTreeUtilities *Utils;
- public:
-	CacheRefreshTimer(SpanningTreeUtilities* Util);
-	virtual void Tick(time_t TIME);
+public:
+	CacheRefreshTimer();
+	bool Tick() override;
 };
-
-#endif

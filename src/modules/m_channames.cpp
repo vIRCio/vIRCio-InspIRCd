@@ -1,6 +1,11 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
+ *   Copyright (C) 2021 Dominic Hamon
+ *   Copyright (C) 2019-2023 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2013 Daniel Vassdal <shutter@canternet.org>
+ *   Copyright (C) 2012-2014 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
  *   Copyright (C) 2009-2010 Daniel De Graaf <danieldg@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
@@ -19,83 +24,72 @@
 
 #include "inspircd.h"
 
-/* $ModDesc: Implements config tags which allow changing characters allowed in channel names */
+static CharState allowedmap;
 
-static std::bitset<256> allowedmap;
-
-class NewIsChannelHandler : public HandlerBase2<bool, const char*, size_t>
+class NewIsChannelHandler final
 {
- public:
-	NewIsChannelHandler() { }
-	virtual ~NewIsChannelHandler() { }
-	virtual bool Call(const char*, size_t);
+public:
+	static bool Call(const std::string_view&);
 };
 
-bool NewIsChannelHandler::Call(const char* c, size_t max)
+bool NewIsChannelHandler::Call(const std::string_view& channame)
 {
-		/* check for no name - don't check for !*chname, as if it is empty, it won't be '#'! */
-		if (!c || *c++ != '#')
-			return false;
+	if (channame.empty() || channame.length() > ServerInstance->Config->Limits.MaxChannel || !ServerInstance->Channels.IsPrefix(channame[0]))
+		return false;
 
-		while (*c && --max)
-		{
-			unsigned int i = *c++ & 0xFF;
-			if (!allowedmap[i])
-				return false;
-		}
-		// a name of exactly max length will have max = 1 here; the null does not trigger --max
-		return max;
-}
-
-class ModuleChannelNames : public Module
-{
- private:
-	NewIsChannelHandler myhandler;
-	caller2<bool, const char*, size_t> rememberer;
-	bool badchan;
-
- public:
-	ModuleChannelNames() : rememberer(ServerInstance->IsChannel), badchan(false)
+	for (const auto chr : channame)
 	{
+		if (!allowedmap[static_cast<unsigned char>(chr)])
+			return false;
 	}
 
-	void init()
+	return true;
+}
+
+class ModuleChannelNames final
+	: public Module
+{
+	std::function<bool(const std::string_view&)> rememberer;
+	bool badchan = false;
+	ChanModeReference permchannelmode;
+
+public:
+	ModuleChannelNames()
+		: Module(VF_VENDOR, "Allows the server administrator to define what characters are allowed in channel names.")
+		, rememberer(ServerInstance->Channels.IsChannel)
+		, permchannelmode(this, "permanent")
 	{
-		ServerInstance->IsChannel = &myhandler;
-		Implementation eventlist[] = { I_OnRehash, I_OnUserKick };
-		ServerInstance->Modules->Attach(eventlist, this, sizeof(eventlist)/sizeof(Implementation));
-		OnRehash(NULL);
 	}
 
 	void ValidateChans()
 	{
-		badchan = true;
-		std::vector<Channel*> chanvec;
-		for (chan_hash::const_iterator i = ServerInstance->chanlist->begin(); i != ServerInstance->chanlist->end(); ++i)
-		{
-			if (!ServerInstance->IsChannel(i->second->name.c_str(), MAXBUF))
-				chanvec.push_back(i->second);
-		}
-		std::vector<Channel*>::reverse_iterator c2 = chanvec.rbegin();
-		while (c2 != chanvec.rend())
-		{
-			Channel* c = *c2++;
-			if (c->IsModeSet('P') && c->GetUserCounter())
-			{
-				std::vector<std::string> modes;
-				modes.push_back(c->name);
-				modes.push_back("-P");
+		Modes::ChangeList removepermchan;
 
-				ServerInstance->SendGlobalMode(modes, ServerInstance->FakeClient);
+		badchan = true;
+		const ChannelMap& chans = ServerInstance->Channels.GetChans();
+		for (ChannelMap::const_iterator i = chans.begin(); i != chans.end(); )
+		{
+			Channel* c = i->second;
+			// Move iterator before we begin kicking
+			++i;
+			if (ServerInstance->Channels.IsChannel(c->name))
+				continue; // The name of this channel is still valid
+
+			if (c->IsModeSet(permchannelmode) && !c->GetUsers().empty())
+			{
+				removepermchan.clear();
+				removepermchan.push_remove(*permchannelmode);
+				ServerInstance->Modes.Process(ServerInstance->FakeClient, c, nullptr, removepermchan);
 			}
-			const UserMembList* users = c->GetUsers();
-			for(UserMembCIter j = users->begin(); j != users->end(); )
+
+			Channel::MemberMap& users = c->userlist;
+			for (Channel::MemberMap::iterator j = users.begin(); j != users.end(); )
 			{
 				if (IS_LOCAL(j->first))
 				{
 					// KickUser invalidates the iterator
-					UserMembCIter it = j++;
-					c->KickUser(ServerInstance->FakeClient, it->first, "Channel name no longer valid");
+					Channel::MemberMap::iterator it = j++;
+					c->KickUser(ServerInstance->FakeClient, it, "Channel name no longer valid");
 				}
 				else
 					++j;
@@ -104,9 +98,9 @@ class ModuleChannelNames : public Module
 		badchan = false;
 	}
 
-	virtual void OnRehash(User* user)
+	void ReadConfig(ConfigStatus& status) override
 	{
-		ConfigTag* tag = ServerInstance->Config->ConfValue("channames");
+		const auto& tag = ServerInstance->Config->ConfValue("channames");
 		std::string denyToken = tag->getString("denyrange");
 		std::string allowToken = tag->getString("allowrange");
 
@@ -118,42 +112,40 @@ class ModuleChannelNames : public Module
 		allowedmap.set();
 
 		irc::portparser denyrange(denyToken, false);
-		int denyno = -1;
+		long denyno = -1;
 		while (0 != (denyno = denyrange.GetToken()))
-			allowedmap[denyno & 0xFF] = false;
+			allowedmap[denyno & UCHAR_MAX] = false;
 
 		irc::portparser allowrange(allowToken, false);
-		int allowno = -1;
+		long allowno = -1;
 		while (0 != (allowno = allowrange.GetToken()))
-			allowedmap[allowno & 0xFF] = true;
+			allowedmap[allowno & UCHAR_MAX] = true;
 
 		allowedmap[0x07] = false; // BEL
 		allowedmap[0x20] = false; // ' '
 		allowedmap[0x2C] = false; // ','
 
+		ServerInstance->Channels.IsChannel = NewIsChannelHandler::Call;
 		ValidateChans();
 	}
 
-	virtual void OnUserKick(User* source, Membership* memb, const std::string &reason, CUList& except_list)
+	void OnUserKick(User* source, Membership* memb, const std::string& reason, CUList& except_list) override
 	{
 		if (badchan)
 		{
-			const UserMembList* users = memb->chan->GetUsers();
-			for(UserMembCIter i = users->begin(); i != users->end(); i++)
-				if (i->first != memb->user)
-					except_list.insert(i->first);
+			for (const auto& [user, _] : memb->chan->GetUsers())
+			{
+				if (user != memb->user)
+					except_list.insert(user);
+			}
 		}
 	}
 
-	virtual ~ModuleChannelNames()
+	Cullable::Result Cull() override
 	{
-		ServerInstance->IsChannel = rememberer;
+		ServerInstance->Channels.IsChannel = rememberer;
 		ValidateChans();
-	}
-
-	virtual Version GetVersion()
-	{
-		return Version("Implements config tags which allow changing characters allowed in channel names", VF_VENDOR);
+		return Module::Cull();
 	}
 };
 

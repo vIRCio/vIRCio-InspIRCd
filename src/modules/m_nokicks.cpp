@@ -1,10 +1,14 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
- *   Copyright (C) 2009 Daniel De Graaf <danieldg@inspircd.org>
- *   Copyright (C) 2004, 2008 Craig Edwards <craigedwards@brainbox.cc>
+ *   Copyright (C) 2019-2021, 2023-2024 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2019 Matt Schatz <genius3000@g3k.solutions>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
+ *   Copyright (C) 2012 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2009-2010 Daniel De Graaf <danieldg@inspircd.org>
+ *   Copyright (C) 2009 Uli Schlachter <psychon@znc.in>
  *   Copyright (C) 2007 Dennis Friis <peavey@inspircd.org>
- *   Copyright (C) 2007 Robin Burchell <robin+git@viroteck.net>
+ *   Copyright (C) 2006 Craig Edwards <brain@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -21,57 +25,35 @@
 
 
 #include "inspircd.h"
+#include "modules/extban.h"
 
-/* $ModDesc: Provides channel mode +Q to prevent kicks on the channel. */
-
-class NoKicks : public SimpleChannelModeHandler
+class ModuleNoKicks final
+	: public Module
 {
- public:
-	NoKicks(Module* Creator) : SimpleChannelModeHandler(Creator, "nokick", 'Q') { }
-};
+private:
+	ExtBan::Acting extban;
+	SimpleChannelMode nk;
 
-class ModuleNoKicks : public Module
-{
-	NoKicks nk;
-
- public:
+public:
 	ModuleNoKicks()
-		: nk(this)
+		: Module(VF_VENDOR, "Adds channel mode Q (nokick) which prevents privileged users from using the /KICK command.")
+		, extban(this, "nokick", 'Q')
+		, nk(this, "nokick", 'Q')
 	{
 	}
 
-	void init()
+	ModResult OnUserPreKick(User* source, Membership* memb, const std::string& reason) override
 	{
-		ServerInstance->Modules->AddService(nk);
-		Implementation eventlist[] = { I_OnUserPreKick, I_On005Numeric };
-		ServerInstance->Modules->Attach(eventlist, this, sizeof(eventlist)/sizeof(Implementation));
-	}
-
-	void On005Numeric(std::string &output)
-	{
-		ServerInstance->AddExtBanChar('Q');
-	}
-
-	ModResult OnUserPreKick(User* source, Membership* memb, const std::string &reason)
-	{
-		if (!memb->chan->GetExtBanStatus(source, 'Q').check(!memb->chan->IsModeSet('Q')))
+		bool modeset = memb->chan->IsModeSet(nk);
+		if (!extban.GetStatus(source, memb->chan).check(!modeset))
 		{
 			// Can't kick with Q in place, not even opers with override, and founders
-			source->WriteNumeric(ERR_CHANOPRIVSNEEDED, "%s %s :Can't kick user %s from channel (+Q set)",source->nick.c_str(), memb->chan->name.c_str(), memb->user->nick.c_str());
+			source->WriteNumeric(ERR_RESTRICTED, memb->chan->name, INSP_FORMAT("Can't kick user {} from channel ({})",
+				memb->user->nick, modeset ? INSP_FORMAT("+{} is set", nk.GetModeChar()) : "you're extbanned"));
 			return MOD_RES_DENY;
 		}
 		return MOD_RES_PASSTHRU;
 	}
-
-	~ModuleNoKicks()
-	{
-	}
-
-	Version GetVersion()
-	{
-		return Version("Provides channel mode +Q to prevent kicks on the channel.", VF_VENDOR);
-	}
 };
-
 
 MODULE_INIT(ModuleNoKicks)

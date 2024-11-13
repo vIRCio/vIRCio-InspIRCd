@@ -1,14 +1,16 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
- *   Copyright (C) 2009-2010 Daniel De Graaf <danieldg@inspircd.org>
- *   Copyright (C) 2009 Uli Schlachter <psychon@znc.in>
- *   Copyright (C) 2007-2009 Robin Burchell <robin+git@viroteck.net>
+ *   Copyright (C) 2020 satmd <satmd@satmd.de>
+ *   Copyright (C) 2017 B00mX0r <b00mx0r@aureus.pw>
+ *   Copyright (C) 2013-2015 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2013, 2019-2024 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2013 Daniel Vassdal <shutter@canternet.org>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
+ *   Copyright (C) 2009 Daniel De Graaf <danieldg@inspircd.org>
+ *   Copyright (C) 2008 Robin Burchell <robin+git@viroteck.net>
  *   Copyright (C) 2007-2008 Dennis Friis <peavey@inspircd.org>
- *   Copyright (C) 2008 Pippijn van Steenhoven <pip88nl@gmail.com>
- *   Copyright (C) 2008 Geoff Bricker <geoff.bricker@gmail.com>
- *   Copyright (C) 2004-2006 Craig Edwards <craigedwards@brainbox.cc>
- *   Copyright (C) 2006 Oliver Lupton <oliverlupton@gmail.com>
+ *   Copyright (C) 2006, 2008 Craig Edwards <brain@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -25,68 +27,147 @@
 
 
 #include "inspircd.h"
+#include "extension.h"
+#include "modules/invite.h"
+#include "modules/isupport.h"
 
-/* $ModDesc: Provides support for allowing opers to override certain things. */
-
-class ModuleOverride : public Module
+class UnsetTimer final
+	: public Timer
 {
-	bool RequireKey;
-	bool NoisyOverride;
+private:
+	ModeHandler& overridemode;
+	LocalUser* user;
 
-	static bool IsOverride(unsigned int userlevel, const std::string& modeline)
+public:
+	UnsetTimer(LocalUser* u, unsigned long timeout, ModeHandler& om)
+		: Timer(timeout, false)
+		, overridemode(om)
+		, user(u)
 	{
-		for (std::string::const_iterator i = modeline.begin(); i != modeline.end(); ++i)
-		{
-			ModeHandler* mh = ServerInstance->Modes->FindMode(*i, MODETYPE_CHANNEL);
-			if (!mh)
-				continue;
+		ServerInstance->Timers.AddTimer(this);
+	}
 
-			if (mh->GetLevelRequired() > userlevel)
+	bool Tick() override
+	{
+		if (!user->quitting && user->IsModeSet(overridemode))
+		{
+			Modes::ChangeList changelist;
+			changelist.push_remove(&overridemode);
+			ServerInstance->Modes.Process(ServerInstance->FakeClient, nullptr, user, changelist);
+		}
+		return false;
+	}
+};
+
+class Override final
+	: public SimpleUserMode
+{
+public:
+	SimpleExtItem<UnsetTimer> ext;
+	unsigned long timeout;
+
+	Override(Module* Creator)
+		: SimpleUserMode(Creator, "override", 'O', true)
+		, ext(Creator, "override-timer", ExtensionType::USER)
+	{
+	}
+
+	bool OnModeChange(User* source, User* dest, Channel* channel, Modes::Change& change) override
+	{
+		bool res = SimpleUserMode::OnModeChange(source, dest, channel, change);
+		if (change.adding && res && IS_LOCAL(dest) && timeout)
+			ext.Set(dest, new UnsetTimer(IS_LOCAL(dest), timeout, *this));
+		return res;
+	}
+};
+
+class ModuleOverride final
+	: public Module
+	, public ISupport::EventListener
+{
+private:
+	bool requirekey;
+	bool noisyoverride;
+	Override ou;
+	ChanModeReference topiclock;
+	ChanModeReference inviteonly;
+	ChanModeReference key;
+	ChanModeReference limit;
+	Invite::API invapi;
+
+	static bool IsOverride(ModeHandler::Rank userlevel, const Modes::ChangeList::List& list)
+	{
+		for (const auto& change : list)
+		{
+			if (change.mh->GetLevelRequired(change.adding) > userlevel)
 				return true;
 		}
 		return false;
 	}
 
- public:
-
-	void init()
+	ModResult HandleJoinOverride(LocalUser* user, Channel* chan, const std::string& keygiven, const char* bypasswhat, const char* mode) const
 	{
-		// read our config options (main config file)
-		OnRehash(NULL);
-		ServerInstance->SNO->EnableSnomask('v', "OVERRIDE");
-		Implementation eventlist[] = { I_OnRehash, I_OnPreMode, I_On005Numeric, I_OnUserPreJoin, I_OnUserPreKick, I_OnPreTopicChange };
-		ServerInstance->Modules->Attach(eventlist, this, sizeof(eventlist)/sizeof(Implementation));
+		if (requirekey && keygiven != "override")
+		{
+			// Can't join normally -- must use a special key to bypass restrictions
+			user->WriteNotice("*** You may not join normally. You must join with a key of 'override' to oper override.");
+			return MOD_RES_PASSTHRU;
+		}
+
+		if (noisyoverride)
+			chan->WriteRemoteNotice(INSP_FORMAT("{} used oper override to bypass {}", user->nick, bypasswhat));
+		ServerInstance->SNO.WriteGlobalSno('v', user->nick+" used oper override to bypass " + mode + " on " + chan->name);
+		return MOD_RES_ALLOW;
 	}
 
-	void OnRehash(User* user)
+public:
+	ModuleOverride()
+		: Module(VF_VENDOR, "Allows server operators to be given privileges that allow them to ignore various channel-level restrictions.")
+		, ISupport::EventListener(this)
+		, ou(this)
+		, topiclock(this, "topiclock")
+		, inviteonly(this, "inviteonly")
+		, key(this, "key")
+		, limit(this, "limit")
+		, invapi(this)
 	{
-		// re-read our config options on a rehash
-		ConfigTag* tag = ServerInstance->Config->ConfValue("override");
-		NoisyOverride = tag->getBool("noisy");
-		RequireKey = tag->getBool("requirekey");
 	}
 
-	void On005Numeric(std::string &output)
+	void init() override
 	{
-		output.append(" OVERRIDE");
+		ServerInstance->SNO.EnableSnomask('v', "OVERRIDE");
+	}
+
+	void ReadConfig(ConfigStatus& status) override
+	{
+		// re-read our config options
+		const auto& tag = ServerInstance->Config->ConfValue("override");
+		noisyoverride = tag->getBool("noisy");
+		requirekey = tag->getBool("requirekey");
+		ou.timeout = tag->getDuration("timeout", 0);
+	}
+
+	void OnBuildISupport(ISupport::TokenMap& tokens) override
+	{
+		tokens["OVERRIDE"] = ConvToStr(ou.GetModeChar());
 	}
 
 	bool CanOverride(User* source, const char* token)
 	{
-		std::string tokenlist = source->oper->getConfig("override");
+		// The oper override umode (+O) is not set
+		if (!source->IsModeSet(ou))
+			return false;
 
-		// its defined or * is set, return its value as a boolean for if the token is set
-		return ((tokenlist.find(token, 0) != std::string::npos) || (tokenlist.find("*", 0) != std::string::npos));
+		return TokenList(source->oper->GetConfig()->getString("override")).Contains(token);
 	}
 
-
-	ModResult OnPreTopicChange(User *source, Channel *channel, const std::string &topic)
+	ModResult OnPreTopicChange(User* source, Channel* channel, const std::string& topic) override
 	{
-		if (IS_LOCAL(source) && IS_OPER(source) && CanOverride(source, "TOPIC"))
+		if (IS_LOCAL(source) && source->IsOper() && CanOverride(source, "TOPIC"))
 		{
-			if (!channel->HasUser(source) || (channel->IsModeSet('t') && channel->GetPrefixValue(source) < HALFOP_VALUE))
+			if (!channel->HasUser(source) || (channel->IsModeSet(topiclock) && channel->GetPrefixValue(source) < HALFOP_VALUE))
 			{
-				ServerInstance->SNO->WriteGlobalSno('v',source->nick+" used oper override to change a topic on "+channel->name);
+				ServerInstance->SNO.WriteGlobalSno('v', source->nick + " used oper override to change a topic on " + channel->name);
 			}
 
 			// Explicit allow
@@ -96,121 +177,86 @@ class ModuleOverride : public Module
 		return MOD_RES_PASSTHRU;
 	}
 
-	ModResult OnUserPreKick(User* source, Membership* memb, const std::string &reason)
+	ModResult OnUserPreKick(User* source, Membership* memb, const std::string& reason) override
 	{
-		if (IS_OPER(source) && CanOverride(source,"KICK"))
+		if (source->IsOper() && CanOverride(source, "KICK"))
 		{
 			// If the kicker's status is less than the target's,			or	the kicker's status is less than or equal to voice
-			if ((memb->chan->GetPrefixValue(source) < memb->getRank()) || (memb->chan->GetPrefixValue(source) <= VOICE_VALUE) ||
-			    (memb->chan->GetPrefixValue(source) == HALFOP_VALUE && memb->getRank() == HALFOP_VALUE))
+			if ((memb->chan->GetPrefixValue(source) < memb->GetRank()) || (memb->chan->GetPrefixValue(source) <= VOICE_VALUE) ||
+				(memb->chan->GetPrefixValue(source) == HALFOP_VALUE && memb->GetRank() == HALFOP_VALUE))
 			{
-				ServerInstance->SNO->WriteGlobalSno('v',source->nick+" used oper override to kick "+memb->user->nick+" on "+memb->chan->name+" ("+reason+")");
+				ServerInstance->SNO.WriteGlobalSno('v', source->nick + " used oper override to kick " + memb->user->nick + " on " + memb->chan->name + " (" + reason + ")");
 				return MOD_RES_ALLOW;
 			}
 		}
 		return MOD_RES_PASSTHRU;
 	}
 
-	ModResult OnPreMode(User* source,User* dest,Channel* channel, const std::vector<std::string>& parameters)
+	ModResult OnPreMode(User* source, User* dest, Channel* channel, Modes::ChangeList& modes) override
 	{
-		if (!source || !channel)
+		if (!channel)
 			return MOD_RES_PASSTHRU;
-		if (!IS_OPER(source) || !IS_LOCAL(source))
+		if (!source->IsOper() || !IS_LOCAL(source))
 			return MOD_RES_PASSTHRU;
 
-		unsigned int mode = channel->GetPrefixValue(source);
+		const Modes::ChangeList::List& list = modes.getlist();
+		ModeHandler::Rank mode = channel->GetPrefixValue(source);
 
-		if (!IsOverride(mode, parameters[1]))
+		if (!IsOverride(mode, list))
 			return MOD_RES_PASSTHRU;
 
 		if (CanOverride(source, "MODE"))
 		{
-			std::string msg = source->nick+" overriding modes:";
-			for(unsigned int i=0; i < parameters.size(); i++)
-				msg += " " + parameters[i];
-			ServerInstance->SNO->WriteGlobalSno('v',msg);
+			std::string msg = source->nick + " used oper override to set modes on " + channel->name + ": ";
+
+			// Construct a MODE string in the old format for sending it as a snotice
+			std::string params;
+			char pm = 0;
+			for (const auto& item : list)
+			{
+				if (!item.param.empty())
+					params.append(1, ' ').append(item.param);
+
+				char wanted_pm = (item.adding ? '+' : '-');
+				if (wanted_pm != pm)
+				{
+					pm = wanted_pm;
+					msg += pm;
+				}
+
+				msg += item.mh->GetModeChar();
+			}
+			msg += params;
+			ServerInstance->SNO.WriteGlobalSno('v', msg);
 			return MOD_RES_ALLOW;
 		}
 		return MOD_RES_PASSTHRU;
 	}
 
-	ModResult OnUserPreJoin(User* user, Channel* chan, const char* cname, std::string &privs, const std::string &keygiven)
+	ModResult OnUserPreJoin(LocalUser* user, Channel* chan, const std::string& cname, std::string& privs, const std::string& keygiven, bool override) override
 	{
-		if (IS_LOCAL(user) && IS_OPER(user))
+		if (user->IsOper() && !override)
 		{
 			if (chan)
 			{
-				if (chan->IsModeSet('i') && (CanOverride(user,"INVITE")))
+				if (chan->IsModeSet(inviteonly) && (CanOverride(user, "INVITE")))
 				{
-					irc::string x(chan->name.c_str());
-					if (!IS_LOCAL(user)->IsInvited(x))
-					{
-						if (RequireKey && keygiven != "override")
-						{
-							// Can't join normally -- must use a special key to bypass restrictions
-							user->WriteServ("NOTICE %s :*** You may not join normally. You must join with a key of 'override' to oper override.", user->nick.c_str());
-							return MOD_RES_PASSTHRU;
-						}
-
-						if (NoisyOverride)
-							chan->WriteChannelWithServ(ServerInstance->Config->ServerName, "NOTICE %s :%s used oper override to bypass invite-only", cname, user->nick.c_str());
-						ServerInstance->SNO->WriteGlobalSno('v', user->nick+" used oper override to bypass +i on "+std::string(cname));
-					}
+					if (!invapi->IsInvited(user, chan))
+						return HandleJoinOverride(user, chan, keygiven, "invite-only", "+i");
 					return MOD_RES_ALLOW;
 				}
 
-				if (chan->IsModeSet('k') && (CanOverride(user,"KEY")) && keygiven != chan->GetModeParameter('k'))
-				{
-					if (RequireKey && keygiven != "override")
-					{
-						// Can't join normally -- must use a special key to bypass restrictions
-						user->WriteServ("NOTICE %s :*** You may not join normally. You must join with a key of 'override' to oper override.", user->nick.c_str());
-						return MOD_RES_PASSTHRU;
-					}
+				if (chan->IsModeSet(key) && (CanOverride(user, "KEY")) && keygiven != chan->GetModeParameter(key))
+					return HandleJoinOverride(user, chan, keygiven, "the channel key", "+k");
 
-					if (NoisyOverride)
-						chan->WriteChannelWithServ(ServerInstance->Config->ServerName, "NOTICE %s :%s used oper override to bypass the channel key", cname, user->nick.c_str());
-					ServerInstance->SNO->WriteGlobalSno('v', user->nick+" used oper override to bypass +k on "+std::string(cname));
-					return MOD_RES_ALLOW;
-				}
+				if (chan->IsModeSet(limit) && (chan->GetUsers().size() >= ConvToNum<size_t>(chan->GetModeParameter(limit))) && (CanOverride(user, "LIMIT")))
+					return HandleJoinOverride(user, chan, keygiven, "the channel limit", "+l");
 
-				if (chan->IsModeSet('l') && (chan->GetUserCounter() >= ConvToInt(chan->GetModeParameter('l'))) && (CanOverride(user,"LIMIT")))
-				{
-					if (RequireKey && keygiven != "override")
-					{
-						// Can't join normally -- must use a special key to bypass restrictions
-						user->WriteServ("NOTICE %s :*** You may not join normally. You must join with a key of 'override' to oper override.", user->nick.c_str());
-						return MOD_RES_PASSTHRU;
-					}
-
-					if (NoisyOverride)
-						chan->WriteChannelWithServ(ServerInstance->Config->ServerName, "NOTICE %s :%s used oper override to bypass the channel limit", cname, user->nick.c_str());
-					ServerInstance->SNO->WriteGlobalSno('v', user->nick+" used oper override to bypass +l on "+std::string(cname));
-					return MOD_RES_ALLOW;
-				}
-
-				if (chan->IsBanned(user) && CanOverride(user,"BANWALK"))
-				{
-					if (RequireKey && keygiven != "override")
-					{
-						// Can't join normally -- must use a special key to bypass restrictions
-						user->WriteServ("NOTICE %s :*** You may not join normally. You must join with a key of 'override' to oper override.", user->nick.c_str());
-						return MOD_RES_PASSTHRU;
-					}
-
-					if (NoisyOverride)
-						chan->WriteChannelWithServ(ServerInstance->Config->ServerName, "NOTICE %s :%s used oper override to bypass channel ban", cname, user->nick.c_str());
-					ServerInstance->SNO->WriteGlobalSno('v',"%s used oper override to bypass channel ban on %s", user->nick.c_str(), cname);
-					return MOD_RES_ALLOW;
-				}
+				if (chan->IsBanned(user) && CanOverride(user, "BANWALK"))
+					return HandleJoinOverride(user, chan, keygiven, "channel ban", "channel ban");
 			}
 		}
 		return MOD_RES_PASSTHRU;
-	}
-
-	Version GetVersion()
-	{
-		return Version("Provides support for allowing opers to override certain things",VF_VENDOR);
 	}
 };
 

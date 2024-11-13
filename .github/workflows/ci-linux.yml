@@ -1,0 +1,74 @@
+name: Ubuntu CI
+on:
+  pull_request:
+  push:
+  schedule:
+    - cron: '0 0 * * 0'
+jobs:
+  build:
+    if: "!contains(github.event.head_commit.message, '[skip ubuntu ci]')"
+    runs-on: ubuntu-22.04
+    env:
+      CXX: ${{ matrix.compiler }}
+      INSPIRCD_DEBUG: 3
+      INSPIRCD_VERBOSE: 1
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update --assume-yes
+          sudo apt-get install --assume-yes --no-install-recommends \
+            clang \
+            g++ \
+            git \
+            libargon2-dev \
+            libgnutls28-dev \
+            libldap2-dev \
+            libmaxminddb-dev \
+            libmysqlclient-dev \
+            libpcre2-dev \
+            libpq-dev \
+            libpsl-dev \
+            libre2-dev \
+            libsqlite3-dev \
+            libssl-dev \
+            make \
+            pkg-config \
+            rapidjson-dev
+
+      - name: Run configure
+        run: |
+          ./configure --enable-extras "argon2 geo_maxmind ldap log_json log_syslog mysql pgsql regex_pcre2 regex_posix regex_re2 sqlite3 ssl_gnutls ssl_openssl sslrehashsignal"
+          ./configure --development --disable-auto-extras --socketengine ${{ matrix.socketengine }}
+
+      - name: Build core
+        run: |
+          INSPIRCD_TARGET=inspircd make --jobs $(($(getconf _NPROCESSORS_ONLN) + 1))
+
+      - name: Build core modules
+        run: |
+          INSPIRCD_TARGET=coremods make --jobs $(($(getconf _NPROCESSORS_ONLN) + 1))
+
+      - name: Build modules
+        run: |
+          INSPIRCD_TARGET=modules make --jobs $(($(getconf _NPROCESSORS_ONLN) + 1))
+
+      - name: Install
+        run: |
+          make install
+
+      - name: Run
+        run: |
+          touch ${{ github.workspace }}/run/conf/inspircd.conf
+          ${{ github.workspace }}/run/inspircd start
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler:
+          - clang++
+          - g++
+        socketengine:
+          - epoll
+          - poll
+          - select

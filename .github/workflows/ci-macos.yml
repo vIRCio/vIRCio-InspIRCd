@@ -1,0 +1,76 @@
+name: macOS CI
+on:
+  pull_request:
+  push:
+  schedule:
+    - cron: '0 0 * * 0'
+jobs:
+  build:
+    if: "!contains(github.event.head_commit.message, '[skip macos ci]')"
+    runs-on: macos-14
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: 1
+      HOMEBREW_NO_INSTALL_CLEANUP: 1
+      HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: 1
+      INSPIRCD_DEBUG: 3
+      INSPIRCD_VERBOSE: 1
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare the build environment
+        run: |
+          echo "CPPFLAGS=-I$(brew --prefix)/include" >> $GITHUB_ENV
+          echo "LDFLAGS=-L$(brew --prefix)/lib" >> $GITHUB_ENV
+
+      - name: Install dependencies
+        run: |
+          brew update || true
+          for PACKAGE in pkg-config argon2 gnutls libmaxminddb libpq libpsl mysql-client openssl openldap pcre2 re2 sqlite yyjson
+          do
+            brew install $PACKAGE || brew upgrade $PACKAGE
+
+            BREW_PREFIX=$(brew --prefix $PACKAGE)
+            if [ -d "$BREW_PREFIX/bin" ]
+            then
+              export PATH="$PATH:$BREW_PREFIX/bin"
+            fi
+            if [ -d "$BREW_PREFIX/lib/pkgconfig" ]
+            then
+              export PKG_CONFIG_PATH="$PKG_CONFIG_PATH:$BREW_PREFIX/lib/pkgconfig"
+            fi
+          done
+          echo "PATH=$PATH" >> $GITHUB_ENV
+          echo "PKG_CONFIG_PATH=$PKG_CONFIG_PATH" >> $GITHUB_ENV
+
+      - name: Run configure
+        run: |
+          ./configure --enable-extras "argon2 geo_maxmind ldap log_json log_syslog mysql pgsql regex_pcre2 regex_posix regex_re2 sqlite3 ssl_gnutls ssl_openssl sslrehashsignal"
+          ./configure --development --disable-auto-extras --socketengine ${{ matrix.socketengine }}
+
+      - name: Build core
+        run: |
+          INSPIRCD_TARGET=inspircd make --jobs $(($(sysctl -n hw.activecpu) + 1))
+
+      - name: Build core modules
+        run: |
+          INSPIRCD_TARGET=coremods make --jobs $(($(sysctl -n hw.activecpu) + 1))
+
+      - name: Build modules
+        run: |
+          INSPIRCD_TARGET=modules make --jobs $(($(sysctl -n hw.activecpu) + 1))
+
+      - name: Install
+        run: |
+          make install
+
+      - name: Run
+        run: |
+          touch ${{ github.workspace }}/run/conf/inspircd.conf
+          ${{ github.workspace }}/run/inspircd start
+    strategy:
+      fail-fast: false
+      matrix:
+        socketengine:
+          - kqueue
+          - poll
+          - select

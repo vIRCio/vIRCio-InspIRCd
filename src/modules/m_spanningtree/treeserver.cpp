@@ -1,10 +1,15 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
+ *   Copyright (C) 2021 Dominic Hamon
+ *   Copyright (C) 2018-2024 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2017 B00mX0r <b00mx0r@aureus.pw>
+ *   Copyright (C) 2013-2016 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
  *   Copyright (C) 2009 Daniel De Graaf <danieldg@inspircd.org>
- *   Copyright (C) 2007-2008 Craig Edwards <craigedwards@brainbox.cc>
  *   Copyright (C) 2008 Robin Burchell <robin+git@viroteck.net>
  *   Copyright (C) 2007 Dennis Friis <peavey@inspircd.org>
+ *   Copyright (C) 2007 Craig Edwards <brain@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -21,56 +26,49 @@
 
 
 #include "inspircd.h"
-#include "socket.h"
 #include "xline.h"
 #include "main.h"
-#include "../spanningtree.h"
 
 #include "utils.h"
 #include "treeserver.h"
-
-/* $ModDep: m_spanningtree/utils.h m_spanningtree/treeserver.h */
 
 /** We use this constructor only to create the 'root' item, Utils->TreeRoot, which
  * represents our own server. Therefore, it has no route, no parent, and
  * no socket associated with it. Its version string is our own local version.
  */
-TreeServer::TreeServer(SpanningTreeUtilities* Util, std::string Name, std::string Desc, const std::string &id)
-	: ServerName(Name.c_str()), ServerDesc(Desc), Utils(Util), ServerUser(ServerInstance->FakeClient)
+TreeServer::TreeServer()
+	: Server(ServerInstance->Config->ServerId, ServerInstance->Config->ServerName, ServerInstance->Config->ServerDesc)
+	, pingtimer(this)
+	, ServerUser(ServerInstance->FakeClient)
+	, age(ServerInstance->Time())
+	, UserCount(ServerInstance->Users.LocalUserCount())
+	, customversion(ServerInstance->Config->CustomVersion)
+	, rawbranch(INSPIRCD_BRANCH)
+	, rawversion(INSPIRCD_VERSION)
 {
-	age = ServerInstance->Time();
-	bursting = false;
-	Parent = NULL;
-	VersionString.clear();
-	ServerUserCount = ServerOperCount = 0;
-	VersionString = ServerInstance->GetVersionString();
-	Route = NULL;
-	Socket = NULL; /* Fix by brain */
-	StartBurst = rtt = 0;
-	Warned = Hidden = false;
 	AddHashEntry();
-	SetID(id);
 }
 
 /** When we create a new server, we call this constructor to initialize it.
  * This constructor initializes the server's Route and Parent, and sets up
- * its ping counters so that it will be pinged one minute from now.
+ * the ping timer for the server.
  */
-TreeServer::TreeServer(SpanningTreeUtilities* Util, std::string Name, std::string Desc, const std::string &id, TreeServer* Above, TreeSocket* Sock, bool Hide)
-	: Parent(Above), ServerName(Name.c_str()), ServerDesc(Desc), Socket(Sock), Utils(Util), ServerUser(new FakeUser(id, Name)), Hidden(Hide)
+TreeServer::TreeServer(const std::string& Name, const std::string& Desc, const std::string& Sid, TreeServer* Above, TreeSocket* Sock, bool Hide)
+	: Server(Sid, Name, Desc)
+	, Parent(Above)
+	, Socket(Sock)
+	, behind_bursting(Parent->behind_bursting)
+	, pingtimer(this)
+	, ServerUser(new FakeUser(id, this))
+	, age(ServerInstance->Time())
+	, rawbranch("unknown")
+	, rawversion("unknown")
+	, Hidden(Hide)
 {
-	age = ServerInstance->Time();
-	bursting = true;
-	VersionString.clear();
-	ServerUserCount = ServerOperCount = 0;
-	SetNextPingTime(ServerInstance->Time() + Utils->PingFreq);
-	SetPingFlag();
-	Warned = false;
-	rtt = 0;
+	ServerInstance->Logs.Debug(MODNAME, "New server {} behind_bursting {}", GetName(), behind_bursting);
+	CheckService();
 
-	long ts = ServerInstance->Time() * 1000 + (ServerInstance->Time_ns() / 1000000);
-	this->StartBurst = ts;
-	ServerInstance->Logs->Log("m_spanningtree",DEBUG, "Started bursting at time %lu", ts);
+	ServerInstance->Timers.AddTimer(&pingtimer);
 
 	/* find the 'route' for this server (e.g. the one directly connected
 	 * to the local server, which we can use to reach it)
@@ -119,251 +117,191 @@ TreeServer::TreeServer(SpanningTreeUtilities* Util, std::string Name, std::strin
 	 * be referenced by its server name. The AddHashEntry()
 	 * call below automatically inserts each TreeServer class
 	 * into the hash_map as it is created. There is a similar
-	 * maintainance call in the destructor to tidy up deleted
+	 * maintenance call in the destructor to tidy up deleted
 	 * servers.
 	 */
 
 	this->AddHashEntry();
+	Parent->Children.push_back(this);
 
-	SetID(id);
+	Utils->Creator->linkeventprov.Call(&ServerProtocol::LinkEventListener::OnServerLink, this);
 }
 
-const std::string& TreeServer::GetID()
+void TreeServer::BeginBurst(uint64_t startms)
 {
-	return sid;
+	behind_bursting++;
+
+	uint64_t now = ServerInstance->Time() * 1000 + (ServerInstance->Time_ns() / 1000000);
+	// If the start time is in the future (clocks are not synced) then use current time
+	if ((!startms) || (startms > now))
+		startms = now;
+	this->StartBurst = startms;
+	ServerInstance->Logs.Debug(MODNAME, "Server {} started bursting at time {} behind_bursting {}", GetId(), startms, behind_bursting);
 }
 
 void TreeServer::FinishBurstInternal()
 {
-	this->bursting = false;
-	SetNextPingTime(ServerInstance->Time() + Utils->PingFreq);
-	SetPingFlag();
-	for(unsigned int q=0; q < ChildCount(); q++)
-	{
-		TreeServer* child = GetChild(q);
+	// Check is needed because some older servers don't send the bursting state of a server, so servers
+	// introduced during a netburst may later send ENDBURST which would normally decrease this counter
+	if (behind_bursting > 0)
+		behind_bursting--;
+	ServerInstance->Logs.Debug(MODNAME, "FinishBurstInternal() {} behind_bursting {}", GetName(), behind_bursting);
+
+	for (auto* child : Children)
 		child->FinishBurstInternal();
-	}
 }
 
 void TreeServer::FinishBurst()
 {
-	FinishBurstInternal();
 	ServerInstance->XLines->ApplyLines();
-	long ts = ServerInstance->Time() * 1000 + (ServerInstance->Time_ns() / 1000000);
+	uint64_t ts = ServerInstance->Time() * 1000 + (ServerInstance->Time_ns() / 1000000);
 	unsigned long bursttime = ts - this->StartBurst;
-	ServerInstance->SNO->WriteToSnoMask(Parent == Utils->TreeRoot ? 'l' : 'L', "Received end of netburst from \2%s\2 (burst time: %lu %s)",
-		ServerName.c_str(), (bursttime > 10000 ? bursttime / 1000 : bursttime), (bursttime > 10000 ? "secs" : "msecs"));
-	AddServerEvent(Utils->Creator, ServerName.c_str());
+	ServerInstance->SNO.WriteToSnoMask(Parent == Utils->TreeRoot ? 'l' : 'L', "Received end of netburst from \002{}\002 (burst time: {} {})",
+		GetName(), (bursttime > 10000 ? bursttime / 1000 : bursttime), (bursttime > 10000 ? "secs" : "msecs"));
+	Utils->Creator->linkeventprov.Call(&ServerProtocol::LinkEventListener::OnServerBurst, this);
+
+	StartBurst = 0;
+	FinishBurstInternal();
 }
 
-void TreeServer::SetID(const std::string &id)
+void TreeServer::SQuitChild(TreeServer* server, const std::string& reason, bool error)
 {
-	ServerInstance->Logs->Log("m_spanningtree",DEBUG, "Setting SID to " + id);
-	sid = id;
-	Utils->sidlist[sid] = this;
-}
+	stdalgo::erase(Children, server);
 
-int TreeServer::QuitUsers(const std::string &reason)
-{
-	const char* reason_s = reason.c_str();
-	std::vector<User*> time_to_die;
-	for (user_hash::iterator n = ServerInstance->Users->clientlist->begin(); n != ServerInstance->Users->clientlist->end(); n++)
+	if (IsRoot())
 	{
-		if (n->second->server == ServerName)
+		// Server split from us, generate a SQUIT message and broadcast it
+		ServerInstance->SNO.WriteGlobalSno('l', "Server \002" + server->GetName() + "\002 split: " + reason);
+		CmdBuilder("SQUIT").push(server->GetId()).push_last(reason).Broadcast();
+	}
+	else
+	{
+		ServerInstance->SNO.WriteToSnoMask('L', "Server \002" + server->GetName() + "\002 split from server \002" + GetName() + "\002 with reason: " + reason);
+	}
+
+	unsigned int num_lost_servers = 0;
+	server->SQuitInternal(num_lost_servers, error);
+
+	const std::string quitreason = GetName() + " " + server->GetName();
+	size_t num_lost_users = QuitUsers(quitreason);
+
+	ServerInstance->SNO.WriteToSnoMask(IsRoot() ? 'l' : 'L', "Netsplit complete, lost \002{}\002 user{} on \002{}\002 server{}.",
+		num_lost_users, num_lost_users != 1 ? "s" : "", num_lost_servers, num_lost_servers != 1 ? "s" : "");
+
+	// No-op if the socket is already closed (i.e. it called us)
+	if (server->IsLocal())
+		server->GetSocket()->Close();
+
+	// Add the server to the cull list, the servers behind it are handled by Cull() and the destructor
+	ServerInstance->GlobalCulls.AddItem(server);
+}
+
+void TreeServer::SQuitInternal(unsigned int& num_lost_servers, bool error)
+{
+	// Don't squit a server which is already dead.
+	if (isdead)
+		return;
+
+	ServerInstance->Logs.Debug(MODNAME, "Server {} lost in split", GetName());
+
+	for (auto* server : Children)
+		server->SQuitInternal(num_lost_servers, error);
+
+	// Mark server as dead
+	isdead = true;
+	num_lost_servers++;
+	RemoveHash();
+
+	if (!Utils->Creator->dying)
+		Utils->Creator->linkeventprov.Call(&ServerProtocol::LinkEventListener::OnServerSplit, this, error);
+}
+
+size_t TreeServer::QuitUsers(const std::string& reason)
+{
+	std::string publicreason = Utils->HideSplits ? "*.net *.split" : reason;
+
+	const UserMap& users = ServerInstance->Users.GetUsers();
+	size_t original_size = users.size();
+	for (UserMap::const_iterator i = users.begin(); i != users.end(); )
+	{
+		User* user = i->second;
+		// Increment the iterator now because QuitUser() removes the user from the container
+		++i;
+		TreeServer* server = TreeServer::Get(user);
+		if (server->IsDead())
+			ServerInstance->Users.QuitUser(user, publicreason, &reason);
+	}
+	return original_size - users.size();
+}
+
+void TreeServer::CheckService()
+{
+	service = silentservice = false;
+
+	for (const auto& [_, tag] : ServerInstance->Config->ConfTags("services", ServerInstance->Config->ConfTags("uline")))
+	{
+		std::string server = tag->getString("server");
+		if (irc::equals(server, GetName()))
 		{
-			time_to_die.push_back(n->second);
+			if (this->IsRoot())
+			{
+				ServerInstance->Logs.Warning(MODNAME, "Servers should not mark themselves as a service (at " + tag->source.str() + ")");
+				return;
+			}
+
+			service = true;
+			silentservice = tag->getBool("silent");
+			break;
 		}
 	}
-	for (std::vector<User*>::iterator n = time_to_die.begin(); n != time_to_die.end(); n++)
-	{
-		User* a = (User*)*n;
-		if (!IS_LOCAL(a))
-		{
-			if (this->Utils->quiet_bursts)
-				a->quietquit = true;
-
-			if (ServerInstance->Config->HideSplits)
-				ServerInstance->Users->QuitUser(a, "*.net *.split", reason_s);
-			else
-				ServerInstance->Users->QuitUser(a, reason_s);
-		}
-	}
-	return time_to_die.size();
 }
 
-/** This method is used to add the structure to the
- * hash_map for linear searches. It is only called
+/** This method is used to add the server to the
+ * maps for linear searches. It is only called
  * by the constructors.
  */
 void TreeServer::AddHashEntry()
 {
-	server_hash::iterator iter = Utils->serverlist.find(this->ServerName.c_str());
-	if (iter == Utils->serverlist.end())
-		Utils->serverlist[this->ServerName.c_str()] = this;
+	Utils->serverlist[GetName()] = this;
+	Utils->sidlist[GetId()] = this;
 }
 
-/** This method removes the reference to this object
- * from the hash_map which is used for linear searches.
- * It is only called by the default destructor.
- */
-void TreeServer::DelHashEntry()
+Cullable::Result TreeServer::Cull()
 {
-	server_hash::iterator iter = Utils->serverlist.find(this->ServerName.c_str());
-	if (iter != Utils->serverlist.end())
-		Utils->serverlist.erase(iter);
-}
+	// Recursively cull all servers that are under us in the tree
+	for (auto* server : Children)
+		server->Cull();
 
-/** These accessors etc should be pretty self-
- * explanitory.
- */
-TreeServer* TreeServer::GetRoute()
-{
-	return Route;
-}
-
-std::string TreeServer::GetName()
-{
-	return ServerName.c_str();
-}
-
-const std::string& TreeServer::GetDesc()
-{
-	return ServerDesc;
-}
-
-const std::string& TreeServer::GetVersion()
-{
-	return VersionString;
-}
-
-void TreeServer::SetNextPingTime(time_t t)
-{
-	this->NextPing = t;
-	LastPingWasGood = false;
-}
-
-time_t TreeServer::NextPingTime()
-{
-	return NextPing;
-}
-
-bool TreeServer::AnsweredLastPing()
-{
-	return LastPingWasGood;
-}
-
-void TreeServer::SetPingFlag()
-{
-	LastPingWasGood = true;
-}
-
-unsigned int TreeServer::GetUserCount()
-{
-	return ServerUserCount;
-}
-
-void TreeServer::SetUserCount(int diff)
-{
-	ServerUserCount += diff;
-}
-
-void TreeServer::SetOperCount(int diff)
-{
-	ServerOperCount += diff;
-}
-
-unsigned int TreeServer::GetOperCount()
-{
-	return ServerOperCount;
-}
-
-TreeSocket* TreeServer::GetSocket()
-{
-	return Socket;
-}
-
-TreeServer* TreeServer::GetParent()
-{
-	return Parent;
-}
-
-void TreeServer::SetVersion(const std::string &Version)
-{
-	VersionString = Version;
-}
-
-unsigned int TreeServer::ChildCount()
-{
-	return Children.size();
-}
-
-TreeServer* TreeServer::GetChild(unsigned int n)
-{
-	if (n < Children.size())
-	{
-		/* Make sure they  cant request
-		 * an out-of-range object. After
-		 * all we know what these programmer
-		 * types are like *grin*.
-		 */
-		return Children[n];
-	}
-	else
-	{
-		return NULL;
-	}
-}
-
-void TreeServer::AddChild(TreeServer* Child)
-{
-	Children.push_back(Child);
-}
-
-bool TreeServer::DelChild(TreeServer* Child)
-{
-	std::vector<TreeServer*>::iterator it = std::find(Children.begin(), Children.end(), Child);
-	if (it != Children.end())
-	{
-		Children.erase(it);
-		return true;
-	}
-	return false;
-}
-
-/** Removes child nodes of this node, and of that node, etc etc.
- * This is used during netsplits to automatically tidy up the
- * server tree. It is slow, we don't use it for much else.
- */
-bool TreeServer::Tidy()
-{
-	while (1)
-	{
-		std::vector<TreeServer*>::iterator a = Children.begin();
-		if (a == Children.end())
-			return true;
-		TreeServer* s = *a;
-		s->Tidy();
-		s->cull();
-		Children.erase(a);
-		delete s;
-	}
-}
-
-CullResult TreeServer::cull()
-{
-	if (ServerUser != ServerInstance->FakeClient)
-		ServerUser->cull();
-	return classbase::cull();
+	if (!IsRoot())
+		ServerUser->Cull();
+	return Cullable::Cull();
 }
 
 TreeServer::~TreeServer()
 {
-	/* We'd better tidy up after ourselves, eh? */
-	this->DelHashEntry();
-	if (ServerUser != ServerInstance->FakeClient)
-		delete ServerUser;
+	// Recursively delete all servers that are under us in the tree first
+	for (const auto* child : Children)
+		delete child;
 
-	server_hash::iterator iter = Utils->sidlist.find(GetID());
-	if (iter != Utils->sidlist.end())
-		Utils->sidlist.erase(iter);
+	// Delete server user unless it's us
+	if (!IsRoot())
+		delete ServerUser;
+}
+
+void TreeServer::RemoveHash()
+{
+	Utils->sidlist.erase(GetId());
+	Utils->serverlist.erase(GetName());
+}
+
+void TreeServer::SendMetadata(const std::string& key, const std::string& data) const
+{
+	if (GetRoute() && GetRoute()->GetSocket())
+		GetRoute()->GetSocket()->WriteLine(CommandMetadata::Builder(key, data));
+}
+
+void TreeServer::SendMetadata(const Extensible* ext, const std::string& key, const std::string& data) const
+{
+	if (GetRoute() && GetRoute()->GetSocket())
+		GetRoute()->GetSocket()->WriteLine(CommandMetadata::Builder(ext, key, data));
 }

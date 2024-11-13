@@ -1,13 +1,14 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
+ *   Copyright (C) 2018-2023 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2018 A_D
+ *   Copyright (C) 2012-2015 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
+ *   Copyright (C) 2009 Uli Schlachter <psychon@znc.in>
  *   Copyright (C) 2009 Daniel De Graaf <danieldg@inspircd.org>
- *   Copyright (C) 2008 Pippijn van Steenhoven <pip88nl@gmail.com>
  *   Copyright (C) 2007 Dennis Friis <peavey@inspircd.org>
- *   Copyright (C) 2006-2007 Robin Burchell <robin+git@viroteck.net>
- *   Copyright (C) 2006 John Brooks <john.brooks@dereferenced.net>
- *   Copyright (C) 2006 Craig Edwards <craigedwards@brainbox.cc>
- *   Copyright (C) 2006 Oliver Lupton <oliverlupton@gmail.com>
+ *   Copyright (C) 2006 Craig Edwards <brain@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -24,136 +25,148 @@
 
 
 #include "inspircd.h"
+#include "extension.h"
+#include "modules/invite.h"
+#include "numerichelper.h"
 
-/* $ModDesc: Provides channel mode +J (delay rejoin after kick) */
-
-typedef std::map<std::string, time_t> delaylist;
-
-/** Handles channel mode +J
- */
-class KickRejoin : public ModeHandler
+class KickRejoinData final
 {
- public:
-	unsigned int max;
-	SimpleExtItem<delaylist> ext;
-	KickRejoin(Module* Creator)
-		: ModeHandler(Creator, "kicknorejoin", 'J', PARAM_SETONLY, MODETYPE_CHANNEL)
-		, ext("norejoinusers", Creator)
+	struct KickedUser final
+	{
+		std::string uuid;
+		time_t expire;
+
+		KickedUser(User* user, unsigned int Delay)
+			: uuid(user->uuid)
+			, expire(ServerInstance->Time() + Delay)
+		{
+		}
+	};
+
+	typedef std::vector<KickedUser> KickedList;
+
+	mutable KickedList kicked;
+
+public:
+	const unsigned int delay;
+
+	KickRejoinData(unsigned int Delay)
+		: delay(Delay)
 	{
 	}
 
-	ModeAction OnModeChange(User* source, User* dest, Channel* channel, std::string& parameter, bool adding)
+	bool canjoin(LocalUser* user) const
 	{
-		if (adding)
+		for (KickedList::iterator i = kicked.begin(); i != kicked.end(); )
 		{
-			int v = ConvToInt(parameter);
-			if (v <= 0)
-				return MODEACTION_DENY;
-			if (parameter == channel->GetModeParameter(this))
-				return MODEACTION_DENY;
-
-			if ((IS_LOCAL(source) && ((unsigned int)v > max)))
-				v = max;
-
-			parameter = ConvToStr(v);
-			channel->SetModeParam(this, parameter);
+			KickedUser& rec = *i;
+			if (rec.expire > ServerInstance->Time())
+			{
+				if (rec.uuid == user->uuid)
+					return false;
+				++i;
+			}
+			else
+			{
+				// Expired record, remove.
+				stdalgo::vector::swaperase(kicked, i);
+				if (kicked.empty())
+					break;
+			}
 		}
-		else
-		{
-			if (!channel->IsModeSet(this))
-				return MODEACTION_DENY;
+		return true;
+	}
 
-			ext.unset(channel);
-			channel->SetModeParam(this, "");
-		}
-		return MODEACTION_ALLOW;
+	void add(User* user)
+	{
+		// One user can be in the list multiple times if the user gets kicked, force joins
+		// (skipping OnUserPreJoin) and gets kicked again, but that's okay because canjoin()
+		// works correctly in this case as well
+		kicked.emplace_back(user, delay);
 	}
 };
 
-class ModuleKickNoRejoin : public Module
+/** Handles channel mode +J
+ */
+class KickRejoin final
+	: public ParamMode<KickRejoin, SimpleExtItem<KickRejoinData>>
+{
+public:
+	const unsigned int max = 60;
+
+	KickRejoin(Module* Creator)
+		: ParamMode<KickRejoin, SimpleExtItem<KickRejoinData>>(Creator, "kicknorejoin", 'J')
+	{
+		syntax = "<seconds>";
+	}
+
+	bool OnSet(User* source, Channel* channel, std::string& parameter) override
+	{
+		unsigned int v = ConvToNum<unsigned int>(parameter);
+		if (v <= 0)
+		{
+			source->WriteNumeric(Numerics::InvalidModeParameter(channel, this, parameter));
+			return false;
+		}
+
+		if (IS_LOCAL(source) && v > max)
+			v = max;
+
+		ext.Set(channel, v);
+		return true;
+	}
+
+	void SerializeParam(Channel* chan, const KickRejoinData* krd, std::string& out)
+	{
+		out.append(ConvToStr(krd->delay));
+	}
+};
+
+class ModuleKickNoRejoin final
+	: public Module
 {
 	KickRejoin kr;
+	Invite::API invapi;
 
 public:
-
 	ModuleKickNoRejoin()
-		: kr(this)
+		: Module(VF_VENDOR | VF_COMMON, "Adds channel mode J (kicknorejoin) which prevents users from rejoining after being kicked from a channel.")
+		, kr(this)
+		, invapi(this)
 	{
 	}
 
-	void init()
+	ModResult OnUserPreJoin(LocalUser* user, Channel* chan, const std::string& cname, std::string& privs, const std::string& keygiven, bool override) override
 	{
-		ServerInstance->Modules->AddService(kr);
-		ServerInstance->Modules->AddService(kr.ext);
-		Implementation eventlist[] = { I_OnUserPreJoin, I_OnUserKick, I_OnRehash };
-		ServerInstance->Modules->Attach(eventlist, this, sizeof(eventlist)/sizeof(Implementation));
-		OnRehash(NULL);
-	}
-
-	void OnRehash(User* user)
-	{
-		kr.max = ServerInstance->Duration(ServerInstance->Config->ConfValue("kicknorejoin")->getString("maxtime"));
-		if (!kr.max)
-			kr.max = 30*60;
-	}
-
-	ModResult OnUserPreJoin(User* user, Channel* chan, const char* cname, std::string &privs, const std::string &keygiven)
-	{
-		if (chan)
+		if (!override && chan)
 		{
-			delaylist* dl = kr.ext.get(chan);
-			if (dl)
+			const KickRejoinData* data = kr.ext.Get(chan);
+			if ((data) && !invapi->IsInvited(user, chan) && (!data->canjoin(user)))
 			{
-				for (delaylist::iterator iter = dl->begin(); iter != dl->end(); )
-				{
-					if (iter->second > ServerInstance->Time())
-					{
-						if (iter->first == user->uuid)
-						{
-							std::string modeparam = chan->GetModeParameter(&kr);
-							user->WriteNumeric(ERR_DELAYREJOIN, "%s %s :You must wait %s seconds after being kicked to rejoin (+J)",
-								user->nick.c_str(), chan->name.c_str(), modeparam.c_str());
-							return MOD_RES_DENY;
-						}
-						++iter;
-					}
-					else
-					{
-						// Expired record, remove.
-						dl->erase(iter++);
-					}
-				}
-
-				if (dl->empty())
-					kr.ext.unset(chan);
+				user->WriteNumeric(ERR_UNAVAILRESOURCE, chan->name, INSP_FORMAT("You must wait {} seconds after being kicked to rejoin (+{} is set)",
+					data->delay, kr.GetModeChar()));
+				return MOD_RES_DENY;
 			}
 		}
 		return MOD_RES_PASSTHRU;
 	}
 
-	void OnUserKick(User* source, Membership* memb, const std::string &reason, CUList& excepts)
+	void OnUserKick(User* source, Membership* memb, const std::string& reason, CUList& excepts) override
 	{
-		if (memb->chan->IsModeSet(&kr) && (IS_LOCAL(memb->user)) && (source != memb->user))
+		if ((!IS_LOCAL(memb->user)) || (source == memb->user))
+			return;
+
+		KickRejoinData* data = kr.ext.Get(memb->chan);
+		if (data)
 		{
-			delaylist* dl = kr.ext.get(memb->chan);
-			if (!dl)
-			{
-				dl = new delaylist;
-				kr.ext.set(memb->chan, dl);
-			}
-			(*dl)[memb->user->uuid] = ServerInstance->Time() + ConvToInt(memb->chan->GetModeParameter(&kr));
+			data->add(memb->user);
 		}
 	}
 
-	~ModuleKickNoRejoin()
+	void GetLinkData(LinkData& data, std::string& compatdata) override
 	{
-	}
-
-	Version GetVersion()
-	{
-		return Version("Channel mode to delay rejoin after kick", VF_VENDOR);
+		data["max-time"] = compatdata = ConvToStr(kr.max);
 	}
 };
-
 
 MODULE_INIT(ModuleKickNoRejoin)

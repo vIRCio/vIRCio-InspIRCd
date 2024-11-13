@@ -1,8 +1,7 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
- *   Copyright (C) 2009 Daniel De Graaf <danieldg@inspircd.org>
- *   Copyright (C) 2008 Thomas Stagner <aquanight@inspircd.org>
+ *   Copyright (C) 2020-2023 Sadie Powell <sadie@witchery.services>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -19,95 +18,90 @@
 
 
 #include "inspircd.h"
-#include "m_regex.h"
-#include <sys/types.h>
-#include <regex.h>
+#include "modules/regex.h"
 
-/* $ModDesc: Regex Provider Module for POSIX Regular Expressions */
-/* $ModDep: m_regex.h */
+#ifdef _WIN32
+# include "pcre2posix.h"
+# pragma comment(lib, "pcre2-posix.lib")
+#else
+# include <regex.h>
+# include <sys/types.h>
+#endif
 
-class POSIXRegexException : public ModuleException
-{
-public:
-	POSIXRegexException(const std::string& rx, const std::string& error)
-		: ModuleException("Error in regex " + rx + ": " + error)
-	{
-	}
-};
-
-class POSIXRegex : public Regex
+class POSIXPattern final
+	: public Regex::Pattern
 {
 private:
-	regex_t regbuf;
+	regex_t regex;
 
 public:
-	POSIXRegex(const std::string& rx, bool extended) : Regex(rx)
+	POSIXPattern(const Module* mod, const std::string& pattern, uint8_t options)
+		: Regex::Pattern(pattern, options)
 	{
-		int flags = (extended ? REG_EXTENDED : 0) | REG_NOSUB;
-		int errcode;
-		errcode = regcomp(&regbuf, rx.c_str(), flags);
-		if (errcode)
-		{
-			// Get the error string into a std::string. YUCK this involves at least 2 string copies.
-			std::string error;
-			char* errbuf;
-			size_t sz = regerror(errcode, &regbuf, NULL, 0);
-			errbuf = new char[sz + 1];
-			memset(errbuf, 0, sz + 1);
-			regerror(errcode, &regbuf, errbuf, sz + 1);
-			error = errbuf;
-			delete[] errbuf;
-			regfree(&regbuf);
-			throw POSIXRegexException(rx, error);
-		}
+		int flags = REG_EXTENDED;
+		if (options & Regex::OPT_CASE_INSENSITIVE)
+			flags |= REG_ICASE;
+
+		int error = regcomp(&regex, pattern.c_str(), flags);
+		if (!error)
+			return;
+
+		// Retrieve the size of the error message and allocate a buffer.
+		size_t errorsize = regerror(error, &regex, nullptr, 0);
+		std::vector<char> errormsg(errorsize);
+
+		// Retrieve the error message and free the buffer.
+		regerror(error, &regex, errormsg.data(), errormsg.size());
+		regfree(&regex);
+
+		throw Regex::Exception(mod, pattern, std::string(errormsg.data(), errormsg.size() - 1));
 	}
 
-	virtual ~POSIXRegex()
+	~POSIXPattern() override
 	{
-		regfree(&regbuf);
+		regfree(&regex);
 	}
 
-	virtual bool Matches(const std::string& text)
+	bool IsMatch(const std::string& text) override
 	{
-		if (regexec(&regbuf, text.c_str(), 0, NULL, 0) == 0)
+		return !regexec(&regex, text.c_str(), 0, nullptr, 0);
+	}
+
+	std::optional<Regex::MatchCollection> Matches(const std::string& text) override
+	{
+		std::vector<regmatch_t> matches(32);
+		int result = regexec(&regex, text.c_str(), matches.size(), matches.data(), 0);
+		if (result)
+			return std::nullopt;
+
+		Regex::Captures captures;
+		for (const auto& match : matches)
 		{
-			// Bang. :D
-			return true;
+			if (match.rm_so == -1 || match.rm_eo == -1)
+				break;
+
+			captures.emplace_back(text.c_str() + match.rm_so, match.rm_eo - match.rm_so);
 		}
-		return false;
+		captures.shrink_to_fit();
+
+		// The posix engine does not support named captures.
+		static const Regex::NamedCaptures unusednc;
+
+		return Regex::MatchCollection(captures, unusednc);
 	}
 };
 
-class PosixFactory : public RegexFactory
+class ModuleRegexPOSIX final
+	: public Module
 {
- public:
-	bool extended;
-	PosixFactory(Module* m) : RegexFactory(m, "regex/posix") {}
-	Regex* Create(const std::string& expr)
-	{
-		return new POSIXRegex(expr, extended);
-	}
-};
+private:
+	Regex::SimpleEngine<POSIXPattern> regex;
 
-class ModuleRegexPOSIX : public Module
-{
-	PosixFactory ref;
 public:
-	ModuleRegexPOSIX() : ref(this) {
-		ServerInstance->Modules->AddService(ref);
-		Implementation eventlist[] = { I_OnRehash };
-		ServerInstance->Modules->Attach(eventlist, this, sizeof(eventlist)/sizeof(Implementation));
-		OnRehash(NULL);
-	}
-
-	Version GetVersion()
+	ModuleRegexPOSIX()
+		: Module(VF_VENDOR, "Provides the posix regular expression engine which uses the POSIX.2 regular expression matching system.")
+		, regex(this, "posix")
 	{
-		return Version("Regex Provider Module for POSIX Regular Expressions", VF_VENDOR);
-	}
-
-	void OnRehash(User* u)
-	{
-		ref.extended = ServerInstance->Config->ConfValue("posix")->getBool("extended");
 	}
 };
 

@@ -1,10 +1,14 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
+ *   Copyright (C) 2018-2021, 2023 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2012-2013 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2012, 2019 Robby <robby@chatbelgie.be>
+ *   Copyright (C) 2009 Thomas Stagner <aquanight@gmail.com>
  *   Copyright (C) 2009 Daniel De Graaf <danieldg@inspircd.org>
- *   Copyright (C) 2006-2007 Robin Burchell <robin+git@viroteck.net>
+ *   Copyright (C) 2007-2008 Robin Burchell <robin+git@viroteck.net>
  *   Copyright (C) 2007 Dennis Friis <peavey@inspircd.org>
- *   Copyright (C) 2005 Craig Edwards <craigedwards@brainbox.cc>
+ *   Copyright (C) 2005-2006 Craig Edwards <brain@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -20,44 +24,39 @@
  */
 
 
-/* $ModDesc: Gives each oper type a 'level', cannot kill opers 'above' your level. */
-
 #include "inspircd.h"
 
-class ModuleOperLevels : public Module
+class ModuleOperLevels final
+	: public Module
 {
-	public:
-		void init()
-		{
-			ServerInstance->Modules->Attach(I_OnKill, this);
-		}
+public:
+	ModuleOperLevels()
+		: Module(VF_VENDOR, "Allows the server administrator to define ranks for server operators which prevent lower ranked server operators from using /KILL on higher ranked server operators.")
+	{
+	}
 
-		virtual Version GetVersion()
+	ModResult OnKill(User* source, User* dest, const std::string &reason) override
+	{
+		// oper killing an oper?
+		if (dest->IsOper() && source->IsOper())
 		{
-			return Version("Gives each oper type a 'level', cannot kill opers 'above' your level.", VF_VENDOR);
-		}
+			unsigned long dest_level = dest->oper->GetConfig()->getNum<unsigned long>("level", 0);
+			unsigned long source_level = source->oper->GetConfig()->getNum<unsigned long>("level", 0);
 
-		virtual ModResult OnKill(User* source, User* dest, const std::string &reason)
-		{
-			// oper killing an oper?
-			if (IS_OPER(dest) && IS_OPER(source))
+			if (dest_level > source_level)
 			{
-				std::string level = dest->oper->getConfig("level");
-				long dest_level = atol(level.c_str());
-				level = source->oper->getConfig("level");
-				long source_level = atol(level.c_str());
-
-				if (dest_level > source_level)
+				if (IS_LOCAL(source))
 				{
-					if (IS_LOCAL(source)) ServerInstance->SNO->WriteGlobalSno('a', "Oper %s (level %ld) attempted to /kill a higher oper: %s (level %ld): Reason: %s",source->nick.c_str(),source_level,dest->nick.c_str(),dest_level,reason.c_str());
-					dest->WriteServ("NOTICE %s :*** Oper %s attempted to /kill you!",dest->nick.c_str(),source->nick.c_str());
-					source->WriteNumeric(ERR_NOPRIVILEGES, "%s :Permission Denied - Oper %s is a higher level than you",source->nick.c_str(),dest->nick.c_str());
-					return MOD_RES_DENY;
+					ServerInstance->SNO.WriteGlobalSno('a', "Oper {} (level {}) attempted to /KILL a higher level oper: {} (level {}), reason: {}",
+						source->nick, source_level, dest->nick, dest_level, reason);
 				}
+				dest->WriteNotice("*** Oper " + source->nick + " attempted to /KILL you!");
+				source->WriteNumeric(ERR_NOPRIVILEGES, INSP_FORMAT("Permission Denied - Oper {} is a higher level than you", dest->nick));
+				return MOD_RES_DENY;
 			}
-			return MOD_RES_PASSTHRU;
 		}
+		return MOD_RES_PASSTHRU;
+	}
 };
 
 MODULE_INIT(ModuleOperLevels)
-

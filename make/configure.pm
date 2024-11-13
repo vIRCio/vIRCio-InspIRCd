@@ -1,10 +1,11 @@
 #
 # InspIRCd -- Internet Relay Chat Daemon
 #
-#   Copyright (C) 2012 Peter Powell <petpow@saberuk.com>
-#   Copyright (C) 2008 Robin Burchell <robin+git@viroteck.net>
-#   Copyright (C) 2007-2008 Craig Edwards <craigedwards@brainbox.cc>
-#   Copyright (C) 2008 Thomas Stagner <aquanight@inspircd.org>
+#   Copyright (C) 2024 satmd <satmd@satmd.de>
+#   Copyright (C) 2020 Nicole Kleinhoff <ilbelkyr@shalture.org>
+#   Copyright (C) 2013-2022, 2024 Sadie Powell <sadie@witchery.services>
+#   Copyright (C) 2012 Robby <robby@chatbelgie.be>
+#   Copyright (C) 2007-2008 Craig Edwards <brain@inspircd.org>
 #   Copyright (C) 2007 Dennis Friis <peavey@inspircd.org>
 #
 # This file is part of InspIRCd.  InspIRCd is free software: you can
@@ -23,287 +24,329 @@
 
 package make::configure;
 
-require 5.8.0;
-
+use v5.26.0;
 use strict;
 use warnings FATAL => qw(all);
 
-use Exporter 'import';
-use POSIX;
-use make::utilities;
-our @EXPORT = qw(promptnumeric dumphash is_dir getmodules getrevision getcompilerflags getlinkerflags getdependencies nopedantic resolve_directory yesno showhelp promptstring_s module_installed);
+use Exporter              qw(import);
+use File::Basename        qw(basename dirname);
+use File::Spec::Functions qw(abs2rel catdir catfile);
 
-my $no_git = 0;
+use make::common;
+use make::console;
 
-sub yesno {
-	my ($flag,$prompt) = @_;
-	print "$prompt [\e[1;32m$main::config{$flag}\e[0m] -> ";
-	chomp(my $tmp = <STDIN>);
-	if ($tmp eq "") { $tmp = $main::config{$flag} }
-	if (($tmp eq "") || ($tmp =~ /^y/i))
-	{
-		$main::config{$flag} = "y";
+use constant CONFIGURE_ROOT          => dirname dirname __FILE__;
+use constant CONFIGURE_DIRECTORY     => catdir(CONFIGURE_ROOT, '.configure');
+use constant CONFIGURE_CACHE_FILE    => catfile(CONFIGURE_DIRECTORY, 'cache.cfg');
+use constant CONFIGURE_CACHE_VERSION => '1';
+use constant CONFIGURE_ERROR_PIPE    => $ENV{INSPIRCD_VERBOSE} ? '' : '1>/dev/null 2>/dev/null';
+
+our @EXPORT = qw(CONFIGURE_CACHE_FILE
+                 CONFIGURE_CACHE_VERSION
+                 CONFIGURE_DIRECTORY
+                 cmd_clean
+                 cmd_help
+                 cmd_update
+                 run_test
+                 test_file
+                 test_header
+                 write_configure_cache
+                 get_compiler_info
+                 find_compiler
+                 parse_templates);
+
+sub __get_socketengines {
+	my @socketengines;
+	for (<${\CONFIGURE_ROOT}/src/socketengines/*.cpp>) {
+		s/src\/socketengines\/(\w+)\.cpp/$1/;
+		push @socketengines, $1;
 	}
-	else
-	{
-		$main::config{$flag} = "n";
-	}
-	return;
+	return @socketengines;
 }
 
-sub resolve_directory
-{
-	my $ret = $_[0];
-	eval
-	{
-		use File::Spec;
-		$ret = File::Spec->rel2abs($_[0]);
-	};
-	return $ret;
+sub __get_template_settings($$$) {
+
+	# These are actually hash references
+	my ($config, $compiler, $version) = @_;
+
+	# Start off by populating with the config
+	my %settings = %$config;
+
+	# Compiler information
+	while (my ($key, $value) = each %{$compiler}) {
+		$settings{'COMPILER_' . $key} = $value;
+	}
+
+	# Version information
+	while (my ($key, $value) = each %{$version}) {
+		$settings{'VERSION_' . $key} = $value;
+	}
+
+	# Miscellaneous information
+	$settings{CONFIGURE_DIRECTORY} = CONFIGURE_DIRECTORY;
+	$settings{CONFIGURE_CACHE_FILE} = CONFIGURE_CACHE_FILE;
+	$settings{SOURCE_DIR} = CONFIGURE_ROOT;
+	$settings{SYSTEM_NAME} = lc $^O;
+
+	return %settings;
 }
 
-sub getrevision {
-	if ($no_git)
-	{
-		return "0";
-	}
-	my $data = `git describe --tags 2>/dev/null`;
-	if ($data eq "")
-	{
-		$no_git = 1;
-		return '0';
-	}
-	chomp $data; # remove \n
-	return $data;
+sub __test_compiler($) {
+	my $compiler = shift;
+	return 0 unless run_test("`$compiler`", !system "$compiler --version ${\CONFIGURE_ERROR_PIPE}");
+	return 0 unless run_test("`$compiler`", test_file($compiler, 'compiler.cpp', '-fno-rtti'), 'compatible');
+	return 1;
 }
 
-sub getcompilerflags {
-	my ($file) = @_;
-	open(FLAGS, $file) or return "";
-	while (<FLAGS>) {
-		if ($_ =~ /^\/\* \$CompileFlags: (.+) \*\/\r?$/) {
-			my $x = translate_functions($1, $file);
-			next if ($x eq "");
-			close(FLAGS);
-			return $x;
+sub cmd_clean {
+	unlink CONFIGURE_CACHE_FILE;
+}
+
+sub cmd_help {
+	my $SELIST = join ', ', __get_socketengines();
+	print console_format <<EOH;
+<|GREEN Usage:|> <|BOLD $0 [OPTIONS|>]
+
+When no options are specified, configure runs in interactive mode and you must
+specify any required values manually. If one or more options are specified,
+non-interactive configuration is started and any omitted values are defaulted.
+
+<|GREEN PATH OPTIONS|>
+
+  <|BOLD --portable|>                    Automatically set up the installation paths for
+                                portable installation.
+  <|BOLD --system|>                      Automatically set up the installation paths for
+                                system-wide installation.
+  <|BOLD --prefix <DIR>|>                The root install directory. If this is set then
+                                all subdirectories will be adjusted accordingly.
+                                [${\CONFIGURE_ROOT}/run]
+  <|BOLD --binary-dir <DIR>|>            The location where the main server binary is
+                                stored.
+                                [${\CONFIGURE_ROOT}/run/bin]
+  <|BOLD --config-dir <DIR>|>            The location where the configuration files and
+                                TLS certificates are stored.
+                                [${\CONFIGURE_ROOT}/run/conf]
+  <|BOLD --data-dir <DIR>|>              The location where the data files, such as the
+                                xline database, are stored.
+                                [${\CONFIGURE_ROOT}/run/data]
+  <|BOLD --example-dir <DIR>|>           The location where the example configuration
+                                files and SQL schemas are stored.
+                                [${\CONFIGURE_ROOT}/run/conf/examples]
+  <|BOLD --log-dir <DIR>|>               The location where the log files are stored.
+                                [${\CONFIGURE_ROOT}/run/logs]
+  <|BOLD --manual-dir <DIR>|>            The location where the manual files are stored.
+                                [${\CONFIGURE_ROOT}/run/manuals]
+  <|BOLD --module-dir <DIR>|>            The location where the loadable modules are
+                                stored.
+                                [${\CONFIGURE_ROOT}/run/modules]
+  <|BOLD --runtime-dir <DIR>|>            The location where the runtime files, such as
+                                the pid file, are stored.
+                                [${\CONFIGURE_ROOT}/run/data]
+  <|BOLD --script-dir <DIR>|>            The location where the scripts, such as the
+                                init scripts, are stored.
+                                [${\CONFIGURE_ROOT}/run]
+
+<|GREEN EXTRA MODULE OPTIONS|>
+
+  <|BOLD --enable-extras <MODULE>|>      Enables a comma separated list of extra modules.
+  <|BOLD --disable-extras <MODULE>|>     Disables a comma separated list of extra modules.
+  <|BOLD --list-extras|>                 Shows the availability status of all extra
+                                modules.
+
+<|GREEN MISC OPTIONS|>
+
+  <|BOLD --clean|>                       Remove the configuration cache file and start
+                                the interactive configuration wizard.
+  <|BOLD --disable-auto-extras|>         Disables automatically enabling extra modules
+                                for which the dependencies are available.
+  <|BOLD --disable-interactive|>         Disables the interactive configuration wizard.
+  <|BOLD --disable-ownership|>           Disables setting file ownership on install.
+  <|BOLD --distribution-label <TEXT>|>   Sets a distribution specific version label in
+                                the build configuration.
+  <|BOLD --gid <ID|NAME>|>               Sets the group to run InspIRCd as.
+  <|BOLD --help|>                        Show this message and exit.
+  <|BOLD --socketengine <NAME>|>         Sets the socket engine to be used. Possible
+                                values are $SELIST.
+  <|BOLD --uid [ID|NAME]|>               Sets the user to run InspIRCd as.
+  <|BOLD --update|>                      Updates the build environment with the settings
+                                from the cache.
+
+<|GREEN FLAGS|>
+
+  <|BOLD CXX=<NAME>|>                    Sets the C++ compiler to use when building the
+                                server. If not specified then the build system
+                                will search for c++, g++, clang++, or icpx.
+  <|BOLD INSPIRCD_VERBOSE=<0|1>|>        Shows additional information for debugging.
+
+If you have any problems with configuring InspIRCd then visit our IRC channel
+at ircs://irc.teranova.net/inspircd or create a support discussion at
+https://github.com/inspircd/inspircd/discussions.
+
+Packagers: see https://docs.inspircd.org/packaging/ for packaging advice.
+EOH
+	exit 0;
+}
+
+sub cmd_update {
+	print_error "You have not run $0 before. Please do this before trying to update the generated files." unless -f CONFIGURE_CACHE_FILE;
+	say 'Updating...';
+	my %config = read_config_file(CONFIGURE_CACHE_FILE);
+	$config{EXAMPLE_DIR} //= catdir $config{CONFIG_DIR}, 'examples';
+	$config{RUNTIME_DIR} //= $config{DATA_DIR};
+	my %compiler = get_compiler_info($config{CXX});
+	my %version = get_version $config{DISTRIBUTION};
+	parse_templates(\%config, \%compiler, \%version);
+	say 'Update complete!';
+	exit 0;
+}
+
+sub run_test($$;$) {
+	my ($what, $result, $adjective) = @_;
+	$adjective //= 'available';
+	print console_format "Checking whether <|GREEN $what|> is $adjective ... ";
+	say console_format($result ? "<|GREEN yes|>" : "<|RED no|>");
+	return $result;
+}
+
+sub test_file($$;$) {
+	my ($compiler, $file, $args) = @_;
+	my $status = 0;
+	$args //= '';
+	$status ||= system "$compiler -std=c++17 -o ${\CONFIGURE_ROOT}/__test_$file ${\CONFIGURE_ROOT}/make/test/$file $args ${\CONFIGURE_ERROR_PIPE}";
+	$status ||= system "${\CONFIGURE_ROOT}/__test_$file ${\CONFIGURE_ERROR_PIPE}";
+	unlink "${\CONFIGURE_ROOT}/__test_$file";
+	return !$status;
+}
+
+sub test_header($$;$) {
+	my ($compiler, $header, $args) = @_;
+	$args //= '';
+	open(my $fh, "| $compiler -E - $args ${\CONFIGURE_ERROR_PIPE}") or return 0;
+	print $fh "#include <$header>";
+	close $fh;
+	return !$?;
+}
+
+sub write_configure_cache(%) {
+	unless (-e CONFIGURE_DIRECTORY) {
+		say console_format "Creating <|GREEN ${\abs2rel CONFIGURE_DIRECTORY, CONFIGURE_ROOT}|> ...";
+		create_directory CONFIGURE_DIRECTORY, 0750 or print_error "unable to create ${\CONFIGURE_DIRECTORY}: $!";
+	}
+
+	say console_format "Writing <|GREEN ${\abs2rel CONFIGURE_CACHE_FILE, CONFIGURE_ROOT}|> ...";
+	my %config = @_;
+	write_config_file CONFIGURE_CACHE_FILE, %config;
+}
+
+sub get_compiler_info($) {
+	my $binary = shift;
+	my %info = (NAME => 'Unknown', VERSION => '0.0');
+	return %info if system "$binary -o __compiler_info ${\CONFIGURE_ROOT}/make/test/compiler.cpp ${\CONFIGURE_ERROR_PIPE}";
+	open(my $fh, '-|', './__compiler_info 2>/dev/null');
+	while (my $line = <$fh>) {
+		$info{$1} = $2 if $line =~ /^([A-Z_]+)\s(.*)$/;
+	}
+	close $fh;
+	unlink './__compiler_info';
+	return %info;
+}
+
+sub find_compiler {
+	my @compilers = qw(c++ g++ clang++ icpx);
+	for my $compiler (shift // @compilers) {
+		return $compiler if __test_compiler $compiler;
+		return "xcrun $compiler" if $^O eq 'darwin' && __test_compiler "xcrun $compiler";
+	}
+}
+
+sub parse_templates($$$) {
+
+	# These are actually hash references
+	my ($config, $compiler, $version) = @_;
+
+	# Collect settings to be used when generating files
+	my %settings = __get_template_settings($config, $compiler, $version);
+
+	# Iterate through files in make/template.
+	for my $template (<${\CONFIGURE_ROOT}/make/template/*>) {
+		say console_format "Parsing <|GREEN ${\abs2rel $template, CONFIGURE_ROOT}|> ...";
+		open(my $fh, $template) or print_error "unable to read $template: $!";
+		my (@lines, $mode, @platforms, @targets);
+
+		# First pass: parse template variables and directives.
+		while (my $line = <$fh>) {
+			chomp $line;
+
+			# Does this line match a variable?
+			while ($line =~ /(@(\w+?)(?:\|(\w*))?@)/) {
+				my ($variable, $name, $default) = ($1, $2, $3);
+				if (defined $settings{$name}) {
+					$line =~ s/\Q$variable\E/$settings{$name}/;
+				} elsif (defined $default) {
+					$line =~ s/\Q$variable\E/$default/;
+				} else {
+					print_warning "unknown template variable '$name' in $template!";
+					last;
+				}
+			}
+
+			# Does this line match a directive?
+			if ($line =~ /^(\s*)%(\w+)\s+(.+)$/) {
+				if ($2 eq 'define') {
+					if ($settings{$3}) {
+						push @lines, "#$1define $3";
+					} else {
+						push @lines, "#$1undef $3";
+					}
+				} elsif ($2 eq 'mode') {
+					$mode = oct $3;
+				} elsif ($2 eq 'platform') {
+					push @platforms, $3;
+				} elsif ($2 eq 'target') {
+					push @targets, catfile CONFIGURE_ROOT, $3;
+				} else {
+					print_warning "unknown template command '$2' in $template!";
+					push @lines, $line;
+				}
+				next;
+			}
+			push @lines, $line;
 		}
-	}
-	close(FLAGS);
-	return "";
-}
+		close $fh;
 
-sub getlinkerflags {
-	my ($file) = @_;
-	open(FLAGS, $file) or return "";
-	while (<FLAGS>) {
-		if ($_ =~ /^\/\* \$LinkerFlags: (.+) \*\/\r?$/) {
-			my $x = translate_functions($1, $file);
-			next if ($x eq "");
-			close(FLAGS);
-			return $x;
-		}
-	}
-	close(FLAGS);
-	return "";
-}
+		# Only proceed if this file should be templated on this platform.
+		if ($#platforms < 0 || grep { $_ eq $^O } @platforms) {
 
-sub getdependencies {
-	my ($file) = @_;
-	open(FLAGS, $file) or return "";
-	while (<FLAGS>) {
-		if ($_ =~ /^\/\* \$ModDep: (.+) \*\/\r?$/) {
-			my $x = translate_functions($1, $file);
-			next if ($x eq "");
-			close(FLAGS);
-			return $x;
-		}
-	}
-	close(FLAGS);
-	return "";
-}
+			# Add a default target if the template has not defined one.
+			unless (@targets) {
+				push @targets, catfile(CONFIGURE_DIRECTORY, basename $template);
+			}
 
-sub nopedantic {
-	my ($file) = @_;
-	open(FLAGS, $file) or return "";
-	while (<FLAGS>) {
-		if ($_ =~ /^\/\* \$NoPedantic \*\/\r?$/) {
-			my $x = translate_functions($_, $file);
-			next if ($x eq "");
-			close(FLAGS);
-			return 1;
-		}
-	}
-	close(FLAGS);
-	return 0;
-}
+			# Write the templated files to disk.
+			for my $target (@targets) {
 
-sub getmodules
-{
-	my ($silent) = @_;
+				# Create the directory if it doesn't already exist.
+				my $directory = dirname $target;
+				unless (-e $directory) {
+					say console_format "Creating <|GREEN ${\abs2rel $directory, CONFIGURE_ROOT}|> ...";
+					create_directory $directory, 0750 or print_error "unable to create $directory: $!";
+				};
 
-	my $i = 0;
+				# Write the template file.
+				say console_format "Writing <|GREEN ${\abs2rel $target, CONFIGURE_ROOT}|> ...";
+				open(my $fh, '>', $target) or print_error "unable to write $target: $!";
+				for (@lines) {
+					say $fh $_;
+				}
+				close $fh;
 
-	if (!$silent)
-	{
-		print "Detecting modules ";
-	}
-
-	opendir(DIRHANDLE, "src/modules") or die("WTF, missing src/modules!");
-	foreach my $name (sort readdir(DIRHANDLE))
-	{
-		if ($name =~ /^m_(.+)\.cpp$/)
-		{
-			my $mod = $1;
-			$main::modlist[$i++] = $mod;
-			if (!$silent)
-			{
-				print ".";
+				# Set file permissions.
+				if (defined $mode) {
+					chmod $mode, $target;
+				}
 			}
 		}
 	}
-	closedir(DIRHANDLE);
-
-	if (!$silent)
-	{
-		print "\nOk, $i modules.\n";
-	}
-}
-
-sub promptnumeric($$)
-{
-	my $continue = 0;
-	my ($prompt, $configitem) = @_;
-	while (!$continue)
-	{
-		print "Please enter the maximum $prompt?\n";
-		print "[\e[1;32m$main::config{$configitem}\e[0m] -> ";
-		chomp(my $var = <STDIN>);
-		if ($var eq "")
-		{
-			$var = $main::config{$configitem};
-		}
-		if ($var =~ /^\d+$/) {
-			# We don't care what the number is, set it and be on our way.
-			$main::config{$configitem} = $var;
-			$continue = 1;
-			print "\n";
-		} else {
-			print "You must enter a number in this field. Please try again.\n\n";
-		}
-	}
-}
-
-sub module_installed($)
-{
-	my $module = shift;
-	eval("use $module;");
-	return !$@;
-}
-
-sub promptstring_s($$)
-{
-	my ($prompt,$default) = @_;
-	my $var;
-	print "$prompt\n";
-	print "[\e[1;32m$default\e[0m] -> ";
-	chomp($var = <STDIN>);
-	$var = $default if $var eq "";
-	print "\n";
-	return $var;
-}
-
-sub dumphash()
-{
-	print "\n\e[1;32mPre-build configuration is complete!\e[0m\n\n";
-	print "\e[0mBase install path:\e[1;32m\t\t$main::config{BASE_DIR}\e[0m\n";
-	print "\e[0mConfig path:\e[1;32m\t\t\t$main::config{CONFIG_DIR}\e[0m\n";
-	print "\e[0mModule path:\e[1;32m\t\t\t$main::config{MODULE_DIR}\e[0m\n";
-	print "\e[0mGCC Version Found:\e[1;32m\t\t$main::config{GCCVER}.$main::config{GCCMINOR}\e[0m\n";
-	print "\e[0mCompiler program:\e[1;32m\t\t$main::config{CC}\e[0m\n";
-	print "\e[0mGnuTLS Support:\e[1;32m\t\t\t$main::config{USE_GNUTLS}\e[0m\n";
-	print "\e[0mOpenSSL Support:\e[1;32m\t\t$main::config{USE_OPENSSL}\e[0m\n\n";
-	print "\e[1;32mImportant note: The maximum length values are now configured in the\e[0m\n";
-	print "\e[1;32m                configuration file, not in ./configure! See the <limits>\e[0m\n";
-	print "\e[1;32m                tag in the configuration file for more information.\e[0m\n\n";
-}
-
-sub is_dir
-{
-	my ($path) = @_;
-	if (chdir($path))
-	{
-		chdir($main::this);
-		return 1;
-	}
-	else
-	{
-		# Just in case..
-		chdir($main::this);
-		return 0;
-	}
-}
-
-sub showhelp
-{
-	chomp(my $PWD = `pwd`);
-	print <<EOH;
-Usage: configure [options]
-
-*** NOTE: NON-INTERACTIVE CONFIGURE IS *NOT* SUPPORTED BY THE ***
-*** INSPIRCD DEVELOPMENT TEAM. DO NOT ASK FOR HELP REGARDING  ***
-***     NON-INTERACTIVE CONFIGURE ON THE FORUMS OR ON IRC!    ***
-
-Options: [defaults in brackets after descriptions]
-
-When no options are specified, interactive
-configuration is started and you must specify
-any required values manually. If one or more
-options are specified, non-interactive configuration
-is started, and any omitted values are defaulted.
-
-Arguments with a single \"-\" symbol, as in
-InspIRCd 1.0.x, are also allowed.
-
-  --disable-interactive        Sets no options itself, but
-                               will disable any interactive prompting.
-  --update                     Update makefiles and dependencies
-  --clean                      Remove .config.cache file and go interactive
-  --enable-gnutls              Enable GnuTLS module [no]
-  --enable-openssl             Enable OpenSSL module [no]
-  --enable-epoll               Enable epoll() where supported [set]
-  --enable-kqueue              Enable kqueue() where supported [set]
-  --disable-epoll              Do not enable epoll(), fall back
-                               to select() [not set]
-  --disable-kqueue             Do not enable kqueue(), fall back
-                               to select() [not set]
-  --with-cc=[filename]         Use an alternative compiler to
-                               build InspIRCd [g++]
-  --with-maxbuf=[n]            Change the per message buffer size [512]
-                               DO NOT ALTER THIS OPTION WITHOUT GOOD REASON
-                               AS IT *WILL* BREAK CLIENTS!!!
-  --prefix=[directory]         Base directory to install into (if defined,
-                               can automatically define config, module, bin
-                               and library dirs as subdirectories of prefix)
-                               [$PWD]
-  --config-dir=[directory]     Config file directory for config and SSL certs
-                               [$PWD/run/conf]
-  --log-dir=[directory]	       Log file directory for logs
-                               [$PWD/run/logs]
-  --data-dir=[directory]       Data directory for variable data, such as the
-                               permchannel configuration and the XLine database
-                               [$PWD/run/data]
-  --module-dir=[directory]     Modules directory for loadable modules
-                               [$PWD/run/modules]
-  --binary-dir=[directory]     Binaries directory for core binary
-                               [$PWD/run/bin]
-  --list-extras                Show current status of extra modules
-  --enable-extras=[extras]     Enable the specified list of extras
-  --disable-extras=[extras]    Disable the specified list of extras
-  --help                       Show this help text and exit
-
-EOH
-	exit(0);
 }
 
 1;
-

@@ -1,9 +1,13 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
+ *   Copyright (C) 2022 delthas
+ *   Copyright (C) 2018-2023 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
+ *   Copyright (C) 2012 Attila Molnar <attilamolnar@hush.com>
+ *   Copyright (C) 2009 Daniel De Graaf <danieldg@inspircd.org>
+ *   Copyright (C) 2007 John Brooks <john@jbrooks.io>
  *   Copyright (C) 2007 Dennis Friis <peavey@inspircd.org>
- *   Copyright (C) 2007 Robin Burchell <robin+git@viroteck.net>
- *   Copyright (C) 2004-2005 Craig Edwards <craigedwards@brainbox.cc>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -20,60 +24,83 @@
 
 
 #include "inspircd.h"
+#include "modules/ircv3.h"
+#include "modules/ircv3_replies.h"
+#include "modules/monitor.h"
 
-/* $ModDesc: Provides support for the SETNAME command */
-
-
-
-class CommandSetname : public Command
+class CommandSetName final
+	: public SplitCommand
 {
- public:
-	CommandSetname(Module* Creator) : Command(Creator,"SETNAME", 1, 1)
+private:
+	IRCv3::Replies::Fail fail;
+
+public:
+	Cap::Capability cap;
+	bool notifyopers;
+
+	CommandSetName(Module* Creator)
+		: SplitCommand(Creator, "SETNAME", 1, 1)
+		, fail(Creator)
+		, cap(Creator, "setname")
 	{
-		allow_empty_last_param = false;
-		syntax = "<new-gecos>";
-		TRANSLATE2(TR_TEXT, TR_END);
+		syntax = { ":<realname>" };
 	}
 
-	CmdResult Handle (const std::vector<std::string>& parameters, User *user)
+	CmdResult HandleLocal(LocalUser* user, const Params& parameters) override
 	{
-		if (parameters[0].size() > ServerInstance->Config->Limits.MaxGecos)
+		if (parameters[0].size() > ServerInstance->Config->Limits.MaxReal)
 		{
-			user->WriteServ("NOTICE %s :*** SETNAME: GECOS too long", user->nick.c_str());
-			return CMD_FAILURE;
+			fail.SendIfCap(user, &cap, this, "INVALID_REALNAME", "Real name is too long");
+			return CmdResult::FAILURE;
 		}
 
-		if (user->ChangeName(parameters[0].c_str()))
-		{
-			ServerInstance->SNO->WriteGlobalSno('a', "%s used SETNAME to change their GECOS to '%s'", user->nick.c_str(), parameters[0].c_str());
-		}
-
-		return CMD_SUCCESS;
+		user->ChangeRealName(parameters[0]);
+		if (notifyopers)
+			ServerInstance->SNO.WriteGlobalSno('a', "{} used SETNAME to change their real name to '{}'",
+				user->nick, parameters[0]);
+		return CmdResult::SUCCESS;
 	}
 };
 
-
-class ModuleSetName : public Module
+class ModuleSetName final
+	: public Module
 {
-	CommandSetname cmd;
- public:
+private:
+	CommandSetName cmd;
+	ClientProtocol::EventProvider setnameevprov;
+	Monitor::API monitorapi;
+
+public:
 	ModuleSetName()
-		: cmd(this)
+		: Module(VF_VENDOR, "Adds the /SETNAME command which allows users to change their real name.")
+		, cmd(this)
+		, setnameevprov(this, "SETNAME")
+		, monitorapi(this)
 	{
 	}
 
-	void init()
+	void ReadConfig(ConfigStatus& status) override
 	{
-		ServerInstance->Modules->AddService(cmd);
+		const auto& tag = ServerInstance->Config->ConfValue("setname");
+
+		// Whether the module should only be usable by server operators.
+		bool operonly = tag->getBool("operonly");
+		cmd.access_needed = operonly ? CmdAccess::OPERATOR : CmdAccess::NORMAL;
+
+		// Whether a snotice should be sent out when a user changes their real name.
+		cmd.notifyopers = tag->getBool("notifyopers", !operonly);
 	}
 
-	virtual ~ModuleSetName()
+	void OnChangeRealName(User* user, const std::string& real) override
 	{
-	}
+		if (!(user->connected & User::CONN_NICKUSER))
+			return;
 
-	virtual Version GetVersion()
-	{
-		return Version("Provides support for the SETNAME command", VF_VENDOR);
+		ClientProtocol::Message msg("SETNAME", user);
+		msg.PushParamRef(real);
+		ClientProtocol::Event protoev(setnameevprov, msg);
+		IRCv3::WriteNeighborsWithCap res(user, protoev, cmd.cap, true);
+		Monitor::WriteWatchersWithCap(monitorapi, user, protoev, cmd.cap, res.GetAlreadySentId());
 	}
 };
 

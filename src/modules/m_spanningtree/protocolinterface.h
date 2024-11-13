@@ -1,7 +1,10 @@
 /*
  * InspIRCd -- Internet Relay Chat Daemon
  *
- *   Copyright (C) 2008 Craig Edwards <craigedwards@brainbox.cc>
+ *   Copyright (C) 2013, 2019, 2021-2023 Sadie Powell <sadie@witchery.services>
+ *   Copyright (C) 2012 Robby <robby@chatbelgie.be>
+ *   Copyright (C) 2009 Daniel De Graaf <danieldg@inspircd.org>
+ *   Copyright (C) 2008 Craig Edwards <brain@inspircd.org>
  *
  * This file is part of InspIRCd.  InspIRCd is free software: you can
  * redistribute it and/or modify it under the terms of the GNU General Public
@@ -17,32 +20,18 @@
  */
 
 
-#ifndef M_SPANNINGTREE_PROTOCOLINTERFACE_H
-#define M_SPANNINGTREE_PROTOCOLINTERFACE_H
+#pragma once
 
-class SpanningTreeUtilities;
-class ModuleSpanningTree;
-
-class SpanningTreeProtocolInterface : public ProtocolInterface
+class SpanningTreeProtocolInterface final
+	: public ProtocolInterface
 {
-	SpanningTreeUtilities* Utils;
-	void SendChannel(Channel* target, char status, const std::string &text);
- public:
-	SpanningTreeProtocolInterface(SpanningTreeUtilities* util) : Utils(util) { }
-	virtual ~SpanningTreeProtocolInterface() { }
-
-	virtual bool SendEncapsulatedData(const parameterlist &encap);
-	virtual void SendMetaData(Extensible* target, const std::string &key, const std::string &data);
-	virtual void SendTopic(Channel* channel, std::string &topic);
-	virtual void SendMode(const std::string &target, const parameterlist &modedata, const std::vector<TranslateType> &types);
-	virtual void SendSNONotice(const std::string &snomask, const std::string &text);
-	virtual void PushToClient(User* target, const std::string &rawline);
-	virtual void SendChannelPrivmsg(Channel* target, char status, const std::string &text);
-	virtual void SendChannelNotice(Channel* target, char status, const std::string &text);
-	virtual void SendUserPrivmsg(User* target, const std::string &text);
-	virtual void SendUserNotice(User* target, const std::string &text);
-	virtual void GetServerList(ProtoServerList &sl);
+public:
+	bool SendEncapsulatedData(const std::string& targetmask, const std::string& cmd, const CommandBase::Params& params, const User* source) override;
+	void BroadcastEncap(const std::string& cmd, const CommandBase::Params& params, const User* source, const User* omit) override;
+	void SendMetadata(const Extensible* ext, const std::string& key, const std::string& data) override;
+	void SendMetadata(const std::string& key, const std::string& data) override;
+	void SendSNONotice(char snomask, const std::string& text) override;
+	void SendMessage(const Channel* target, char status, const std::string& text, MessageType msgtype) override;
+	void SendMessage(const User* target, const std::string& text, MessageType msgtype) override;
+	void GetServerList(ServerList& sl) override;
 };
-
-#endif
-
