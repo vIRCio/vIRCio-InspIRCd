@@ -1,0 +1,267 @@
+############################################################
+#                                                          #
+#                 Rede vIRCio - ircd.conf                  #
+#                                                          #
+# Este arquivo contem configuracoes especificas deste IRCd #
+# e pode ser personalizado para cada servidor da rede.     #
+#                                                          #
+############################################################
+
+
+# ==========================================================
+# Variaveis especificas deste IRCd
+# ==========================================================
+
+<define name="serverName" value="irc1.vircio.net">
+<define name="serverId" value="1AA">
+
+<define name="bindIPv4" value="0.0.0.0">
+
+# IMPORTANTE:
+# A mesma cloakKey deve ser usada em todos os IRCds da rede.
+# Futuramente sera fornecida por Docker Secret/env.
+<define name="cloakKey" value="ALTERAR_CLOAK_KEY">
+
+# Certificado atual de laboratorio.
+# Em producao usar Let's Encrypt fullchain.pem + privkey.pem.
+<define name="tlsCertFile" value="/CAMINHO/PARA/fullchain.pem">
+<define name="tlsKeyFile" value="/CAMINHO/PARA/privkey.pem">
+
+
+# ==========================================================
+# Servidor
+# ==========================================================
+
+<server
+    name="&serverName;"
+    description="&networkDescription;"
+    id="&serverId;"
+    network="&networkName;">
+
+
+# ==========================================================
+# OpenSSL
+# ==========================================================
+
+<openssl onrehash="yes">
+
+<sslprofile
+    name="Clients"
+    provider="openssl"
+    cafile=""
+    certfile="&tlsCertFile;"
+    keyfile="&tlsKeyFile;"
+    hash="sha256"
+    compression="no"
+    renegotiation="no"
+    requestclientcert="no"
+    securitylevel="1"
+    tlsv11="no"
+    tlsv12="yes"
+    tlsv13="yes">
+
+<sslprofile
+    name="Servers"
+    provider="openssl"
+    cafile=""
+    certfile="&tlsCertFile;"
+    keyfile="&tlsKeyFile;"
+    hash="sha256"
+    compression="no"
+    renegotiation="no"
+    requestclientcert="no"
+    securitylevel="1"
+    tlsv11="no"
+    tlsv12="yes"
+    tlsv13="yes">
+
+
+# ==========================================================
+# Listeners IPv4
+# ==========================================================
+
+# Clientes IRC sem TLS
+<bind
+    address="&bindIPv4;"
+    port="&clientPort;"
+    type="clients"
+    defer="0"
+    free="no">
+
+# Clientes IRC com TLS
+<bind
+    address="&bindIPv4;"
+    port="&clientTLSPort;"
+    type="clients"
+    sslprofile="Clients"
+    defer="0"
+    free="no">
+
+# WebChat / WebSocket seguro - WSS
+<bind
+    address="&bindIPv4;"
+    port="&websocketPort;"
+    type="clients"
+    hook="websocket"
+    sslprofile="Clients"
+    defer="0"
+    free="no">
+
+# Links entre IRCds via TLS
+<bind
+    address="&bindIPv4;"
+    port="&serverTLSPort;"
+    type="servers"
+    sslprofile="Servers"
+    defer="0"
+    free="no">
+
+
+# ==========================================================
+# IPv6
+# ==========================================================
+
+# ATIVAR - substituir pelo IPv6 real deste IRCd.
+
+#<bind
+#    address="2001:db8::1"
+#    port="&clientPort;"
+#    type="clients"
+#    defer="0"
+#    free="no">
+
+#<bind
+#    address="2001:db8::1"
+#    port="&clientTLSPort;"
+#    type="clients"
+#    sslprofile="Clients"
+#    defer="0"
+#    free="no">
+
+#<bind
+#    address="2001:db8::1"
+#    port="&websocketPort;"
+#    type="clients"
+#    hook="websocket"
+#    sslprofile="Clients"
+#    defer="0"
+#    free="no">
+
+#<bind
+#    address="2001:db8::1"
+#    port="&serverTLSPort;"
+#    type="servers"
+#    sslprofile="Servers"
+#    defer="0"
+#    free="no">
+
+
+# ==========================================================
+# WebIRC
+# ==========================================================
+
+# ATIVAR - adicionar aqui cada gateway autorizado.
+#
+# Nunca usar mask="*" em producao.
+#
+# Gerar senha/hash proprio para cada gateway.
+
+#<gateway
+#    type="webirc"
+#    password="HASH_BCRYPT"
+#    hash="bcrypt"
+#    mask="IP_OU_CIDR_DO_GATEWAY">
+
+# Tambem sera necessario criar uma classe de entrada para os
+# IPs dos gateways com localmax/globalmax elevados antes do
+# comando WEBIRC revelar o IP real do usuario.
+
+#<connect
+#    name="webirc-gateway"
+#    parent="users"
+#    allow="IP_OU_CIDR_DO_GATEWAY"
+#    localmax="1000"
+#    globalmax="1000"
+#    usednsbl="no"
+#    useident="no"
+#    resolvehostnames="no"
+#    useconnectban="no"
+#    useconnflood="no">
+
+
+# ==========================================================
+# Links entre IRCds
+# ==========================================================
+
+# ATIVAR - exemplo para irc2.vircio.net
+
+#<link
+#    name="irc2.vircio.net"
+#    ipaddr="IP_OU_HOST_DO_IRC2"
+#    port="&serverTLSPort;"
+#    allowmask="IP_OU_CIDR_DO_IRC2"
+#    timeout="30s"
+#    sslprofile="Servers"
+#    statshidden="no"
+#    hidden="no"
+#    sendpass="SENHA_DE_ENVIO"
+#    recvpass="SENHA_DE_RECEBIMENTO">
+
+#<autoconnect
+#    bootperiod="15s"
+#    period="5m"
+#    server="irc2.vircio.net">
+
+
+# ==========================================================
+# Link com Services / Anope
+# ==========================================================
+
+# ATIVAR quando o Anope for integrado.
+
+#<link
+#    name="services.vircio.net"
+#    ipaddr="IP_OU_HOST_DO_SERVICES"
+#    port="&serverTLSPort;"
+#    allowmask="IP_OU_CIDR_DO_SERVICES"
+#    timeout="30s"
+#    sslprofile="Servers"
+#    statshidden="yes"
+#    hidden="yes"
+#    sendpass="SENHA_DE_ENVIO"
+#    recvpass="SENHA_DE_RECEBIMENTO">
+
+#<autoconnect
+#    bootperiod="15s"
+#    period="1m"
+#    server="services.vircio.net">
+
+#<services
+#    server="services.vircio.net"
+#    silent="yes">
+
+
+# ==========================================================
+# Operadores locais deste IRCd
+# ==========================================================
+
+# Os tipos/classes ficarao em vIRCio.roots.
+#
+# Aqui ficarao apenas as OLINES especificas deste servidor:
+#
+# NetAdmin
+# GlobalOp
+#
+# Services Root/Admin/Oper serao tratados posteriormente como
+# equipe global da rede e integrados ao Anope.
+
+# ATIVAR depois da criacao de vIRCio.roots.
+
+#<oper
+#    name="oper-local"
+#    password="HASH_BCRYPT"
+#    hash="bcrypt"
+#    host="*@*"
+#    sslonly="yes"
+#    type="NetAdmin">
+

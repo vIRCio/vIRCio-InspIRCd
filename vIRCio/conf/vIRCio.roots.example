@@ -1,0 +1,408 @@
+############################################################
+#                                                          #
+#               Rede vIRCio - vIRCio.roots                 #
+#                                                          #
+#     CONFIGURACAO PADRAO E IMUTAVEL DA REDE vIRCio       #
+#                                                          #
+# Define classes, privilegios e tipos de operadores.        #
+#                                                          #
+# As O-Lines individuais devem ficar no ircd.conf de cada   #
+# servidor ou ser integradas posteriormente ao Services.    #
+#                                                          #
+############################################################
+
+
+# ==========================================================
+# VIEW
+# ==========================================================
+#
+# Privilegios exclusivamente relacionados a visualizacao
+# administrativa da rede.
+#
+
+<class
+    name="View"
+
+    commands="CHECK TLINE"
+
+    privs="channels/auspex users/auspex users/channel-spy users/secret-whois servers/auspex"
+
+    snomasks="*">
+
+
+# ==========================================================
+# USER CONTROL
+# ==========================================================
+#
+# Administracao de usuarios sem incluir bans globais.
+#
+
+<class
+    name="UserControl"
+
+    commands="CHGHOST CHGIDENT CHGNAME NICKLOCK NICKUNLOCK SETHOST SETIDENT SETIDLE SWHOIS"
+
+    privs="users/auspex"
+
+    usermodes="*"
+    chanmodes="*">
+
+
+# ==========================================================
+# SA COMMANDS
+# ==========================================================
+#
+# Comandos administrativos que atuam diretamente sobre
+# usuarios e canais.
+#
+
+<class
+    name="SACommands"
+
+    commands="SAJOIN SAKICK SAMODE SANICK SAPART SAQUIT SATOPIC OJOIN"
+
+    privs="users/sajoin-others users/samode-usermodes"
+
+    usermodes="*"
+    chanmodes="*">
+
+
+# ==========================================================
+# BAN CONTROL
+# ==========================================================
+#
+# Controle de bans, kills, shuns e X-Lines.
+#
+
+<class
+    name="BanControl"
+
+    commands="KILL GLINE KLINE ZLINE QLINE ELINE RLINE CBAN SHUN TLINE"
+
+    usermodes="*"
+    chanmodes="*"
+
+    snomasks="Xx">
+
+
+# ==========================================================
+# OPER CHAT
+# ==========================================================
+#
+# Comunicacao administrativa da rede.
+#
+
+<class
+    name="OperChat"
+
+    commands="WALLOPS GLOBOPS"
+
+    privs="users/mass-message"
+
+    usermodes="*"
+    chanmodes="*"
+
+    snomasks="Gg">
+
+
+# ==========================================================
+# PERMISSIONS
+# ==========================================================
+#
+# Permissoes especiais para ignorar restricoes normais
+# impostas aos usuarios.
+#
+
+<class
+    name="Permissions"
+
+    privs="channels/ignore-chanfilter channels/ignore-delaymsg channels/ignore-noctcp channels/ignore-nonicks channels/ignore-opmoderated channels/ignore-repeat channels/restricted-create users/ignore-callerid users/ignore-commonchans users/ignore-noctcp users/ignore-privdeaf users/secret-whois servers/ignore-blockamsg servers/ignore-shun servers/ignore-securelist servers/use-disabled-commands servers/use-disabled-modes"
+
+    usermodes="*"
+    chanmodes="*">
+
+
+# ==========================================================
+# FLOOD EXEMPT
+# ==========================================================
+#
+# ATENCAO:
+# Estes privilegios removem varias protecoes de flood.
+# Devem ser concedidos apenas aos niveis administrativos.
+#
+
+<class
+    name="FloodExempt"
+
+    privs="users/flood/increased-buffers users/flood/no-fakelag users/flood/no-throttle">
+
+
+# ==========================================================
+# SERVER LINK
+# ==========================================================
+#
+# Administracao da topologia e links da rede.
+#
+
+<class
+    name="ServerLink"
+
+    commands="CONNECT SQUIT RCONNECT RSQUIT ALLTIME"
+
+    privs="servers/auspex"
+
+    usermodes="*"
+    chanmodes="*"
+
+    snomasks="CcLl">
+
+
+# ==========================================================
+# SERVER ADMIN
+# ==========================================================
+#
+# Administracao da configuracao e dos modulos do IRCd.
+#
+
+<class
+    name="ServerAdmin"
+
+    commands="REHASH LOADMODULE UNLOADMODULE RELOADMODULE GLOADMODULE GUNLOADMODULE GRELOADMODULE MKPASSWD"
+
+    usermodes="*"
+    chanmodes="*">
+
+
+# ==========================================================
+# SHUTDOWN
+# ==========================================================
+#
+# Controle destrutivo do daemon.
+#
+# Services Administrator NAO recebe esta classe.
+# NetAdmin e Services Root recebem.
+#
+
+<class
+    name="Shutdown"
+
+    commands="DIE RESTART">
+
+
+# ==========================================================
+# ROOT ACCESS
+# ==========================================================
+#
+# Acesso irrestrito.
+#
+# Exclusivo do Services Root.
+#
+
+<class
+    name="RootAccess"
+
+    commands="*"
+    privs="*"
+    usermodes="*"
+    chanmodes="*"
+    snomasks="*">
+
+
+############################################################
+#
+# TIPOS DE OPERADORES
+#
+############################################################
+
+
+# ==========================================================
+# SERVICES ROOT
+# ==========================================================
+#
+# Maior nivel administrativo da Rede vIRCio.
+#
+# Equivalente ao Services Root do Anope.
+#
+# FUTURO m_vircio_oper:
+# ATIVAR usermode +N
+#
+
+<type
+    name="Services Root"
+
+    classes="RootAccess"
+
+    level="100"
+
+    maxchans="300"
+
+    # ATIVAR apos m_vircio_oper:
+    # adicionar +N aos modes.
+    modes="+s +cCqQ">
+
+
+# ==========================================================
+# SERVICES ADMINISTRATOR
+# ==========================================================
+#
+# Administracao global da rede.
+#
+# Segue a hierarquia do Anope:
+#
+# Services Administrator > Services Operator
+#
+# Nao recebe DIE/RESTART.
+#
+# FUTURO m_vircio_oper:
+# ATIVAR usermode +A
+#
+
+<type
+    name="Services Administrator"
+
+    classes="View UserControl SACommands BanControl OperChat Permissions FloodExempt ServerLink ServerAdmin"
+
+    level="90"
+
+    maxchans="300"
+
+    # ATIVAR apos m_vircio_oper:
+    # adicionar +A aos modes.
+    modes="+s +cCqQ">
+
+
+# ==========================================================
+# SERVICES OPERATOR
+# ==========================================================
+#
+# Operacao global cotidiana dos Services e da rede.
+#
+# Pode observar, administrar usuarios, aplicar bans e
+# comunicar-se com a equipe.
+#
+# Nao administra modulos, links ou o daemon.
+#
+# FUTURO m_vircio_oper:
+# ATIVAR usermode +O
+#
+
+<type
+    name="Services Operator"
+
+    classes="View UserControl BanControl OperChat"
+
+    level="80"
+
+    maxchans="300"
+
+    # ATIVAR apos m_vircio_oper:
+    # adicionar +O aos modes.
+    modes="+s +cCqQ">
+
+
+# ==========================================================
+# NETADMIN
+# ==========================================================
+#
+# Administrador de um IRCd especifico da rede.
+#
+# O-Lines NetAdmin locais ficam no ircd.conf de cada servidor.
+# A equipe Root global fica neste vIRCio.roots.
+#
+# Possui controle completo daquele daemon, incluindo
+# REHASH, modulos, DIE e RESTART.
+#
+
+<type
+    name="NetAdmin"
+
+    classes="View UserControl SACommands BanControl OperChat Permissions FloodExempt ServerLink ServerAdmin Shutdown"
+
+    level="70"
+
+    maxchans="300"
+
+    modes="+s +cCqQ">
+
+
+# ==========================================================
+# GLOBALOP
+# ==========================================================
+#
+# IRC Operator normal.
+#
+# Mantem aproximadamente o papel historico GlobalOp da
+# Rede vIRCio: operacao, bans, usuarios e links.
+#
+# As O-Lines GlobalOp ficam no ircd.conf de cada servidor.
+#
+
+<type
+    name="GlobalOp"
+
+    classes="View UserControl BanControl OperChat ServerLink"
+
+    level="50"
+
+    maxchans="300"
+
+    modes="+s +cCqQ">
+
+############################################################
+#
+# EQUIPE GLOBAL - O-LINES
+#
+############################################################
+#
+# Estas contas existem em TODOS os IRCds da Rede vIRCio.
+#
+# Operadores especificos de apenas um servidor devem ser
+# definidos no ircd.conf daquele servidor.
+#
+############################################################
+
+
+# ==========================================================
+# cirinho
+# ==========================================================
+#
+# Root global da Rede vIRCio.
+# Deve possuir acesso Root em todos os IRCds e no Services.
+#
+
+<oper
+    name="cirinho"
+    password="HASH_BCRYPT_CIRINHO"
+    host="*@*"
+    sslonly="yes"
+    type="Services Root"
+    hash="bcrypt">
+
+
+# ==========================================================
+# rockcavera
+# ==========================================================
+#
+# Root global da Rede vIRCio.
+# Deve possuir acesso Root em todos os IRCds e no Services.
+#
+
+<oper
+    name="rockcavera"
+    password="HASH_BCRYPT_ROCKCAVERA"
+    hash="sha256"
+    host="*@*"
+    sslonly="yes"
+    type="Services Root">
+
+
+############################################################
+#
+# OPERADORES LOCAIS
+#
+############################################################
+#
+# NetAdmins ou GlobalOps que existam apenas em um IRCd
+# devem ser declarados no ircd.conf desse servidor.
+#
+############################################################

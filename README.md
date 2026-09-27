@@ -1,46 +1,136 @@
-## About
+# vIRCio-InspIRCd
 
-InspIRCd is a high-performance Internet Relay Chat (IRCv3) server for UNIX-like and Windows systems.
+InspIRCd utilizado pela [Rede vIRCio](https://vircio.net).
 
-## Supported Platforms
+Este repositório é um fork do projeto
+[InspIRCd](https://github.com/inspircd/inspircd), adaptado para a
+infraestrutura e necessidades da Rede vIRCio.
 
-InspIRCd is supported on the following platforms:
+A base atual utiliza **InspIRCd 4.12.0** e mantém o core upstream o mais
+limpo possível. Funcionalidades específicas da rede são implementadas
+através de configuração, módulos contrib ou módulos próprios da vIRCio,
+evitando alterações diretas no core sempre que possível.
 
-- Most recent BSD variants using the Clang 5+ or GCC 7+ compilers and the GNU toolchains (Make, etc).
+## Estado atual
 
-- Most recent Linux distributions using the Clang 5+ or GCC 7+ compilers and the GNU toolchain.
+Branch de desenvolvimento atual:
 
-- The three most recent major releases of macOS using the AppleClang 10, Clang 5+, or GCC 7+ compilers and the GNU toolchain.
+    v4
 
-- Windows 10 April 2018 Update or newer using the MSVC 19.15+ (Visual Studio 15.8 2017) compiler and CMake 3.20 or newer.
+Base upstream:
 
-Other platforms and toolchains may also work but are not officially supported by the InspIRCd team. Generally speaking if you are using a reasonably modern UNIX-like system you should be able to build InspIRCd on it. If you can not and you wish to submit a patch we are happy to accept it as long as it is not extremely large.
+    InspIRCd 4.12.0
 
-If you encounter any bugs then [please file an issue](https://github.com/inspircd/inspircd/issues/new/choose).
+Baseline homologada da vIRCio:
 
-## Installation
+    vIRCio-baseline-v4.12.0
 
-Most InspIRCd users running a UNIX-like system build from source. A guide about how to do this is available on [the InspIRCd docs site](https://docs.inspircd.org/4/installation/source).
+A baseline foi auditada e submetida a testes funcionais antes do início
+da integração dos módulos específicos da Rede vIRCio.
 
-Building from source on Windows is generally not recommended but [a guide is available](https://docs.inspircd.org/4/installation/windows-source/) if you wish to do this.
+## Estrutura do projeto
 
-If you are running on Debian, RHEL, Ubuntu, or Windows binary packages are available from [the downloads page](https://github.com/inspircd/inspircd/releases/latest).
+As customizações específicas da Rede vIRCio ficam concentradas em:
 
-A [Docker](https://www.docker.com) image is also available. See [the inspircd-docker repository](https://github.com/inspircd/inspircd-docker) for more information.
+    vIRCio/
 
-Some distributions ship an InspIRCd package in their package managers. We generally do not recommend the use of such packages as in the past distributions have made broken modifications to InspIRCd and not kept their packages up to date with essential security updates.
+Estrutura atual:
 
-## License
+    vIRCio/
+    ├── conf/
+    └── modules/
 
-InspIRCd is licensed under [version 2 of the GNU General Public License](https://docs.inspircd.org/license).
+### vIRCio/conf/
 
-## External Links
+Contém os templates das configurações padrão da Rede vIRCio.
 
-* [Website](https://www.inspircd.org)
-* [Documentation](https://docs.inspircd.org)
-* [Support](https://docs.inspircd.org/support)
-* [GitHub](https://github.com/inspircd)
-* [Codeberg (read-only mirror)](https://codeberg.org/inspircd)
-* Support IRC channel &mdash; \#inspircd on irc.teranova.net (TLS only)
-* Development IRC channel &mdash; \#inspircd.dev on irc.teranova.net (TLS only)
-* InspIRCd test network &mdash; testnet.inspircd.org (TLS only)
+Dados sensíveis e arquivos gerados em runtime não são versionados.
+
+### vIRCio/modules/
+
+Área destinada aos módulos próprios da Rede vIRCio.
+
+A política do projeto é, nesta ordem:
+
+1. utilizar funcionalidades nativas do InspIRCd;
+2. avaliar módulos contrib existentes;
+3. desenvolver módulos próprios da vIRCio quando necessário.
+
+Não serão feitas alterações no core upstream quando a funcionalidade
+puder ser implementada adequadamente por módulo.
+
+## Módulos próprios planejados
+
+Entre as funcionalidades históricas que serão portadas ou
+reimplementadas para InspIRCd 4 estão:
+
+- `m_vircio_oper`
+- `m_vircio_zombie`
+- `m_vircio_invisible`
+- `cmd_vircio_pretenduser`
+- `m_vircio_serverprotect`
+
+O comportamento das implementações antigas será revisado antes do port
+para aproveitar recursos nativos existentes no InspIRCd 4.
+
+## Instalação
+
+Consulte:
+
+    INSTALL.md
+
+O documento contém o procedimento utilizado para preparar, compilar,
+instalar e executar a versão da vIRCio.
+
+## Configuração
+
+Os templates da configuração da rede estão em:
+
+    vIRCio/conf/
+
+Os arquivos de exemplo não contêm credenciais reais.
+
+Nunca devem ser versionados:
+
+- `cloakKey` real;
+- hashes reais de operadores;
+- senhas de links entre servidores;
+- credenciais WEBIRC;
+- tokens;
+- certificados privados;
+- chaves privadas TLS;
+- bancos de X-Lines;
+- bancos de canais permanentes;
+- logs e demais dados de runtime.
+
+## Upstream
+
+Projeto original:
+
+https://github.com/inspircd/inspircd
+
+Documentação oficial:
+
+https://docs.inspircd.org/4/
+
+O README original correspondente à base upstream utilizada por este
+fork é preservado em:
+
+    README.inspircd.md
+
+## Histórico
+
+A branch `master` deste repositório preserva a antiga implementação da
+Rede vIRCio baseada em InspIRCd 2.
+
+O InspIRCd 2 está obsoleto e é mantido apenas como referência histórica
+para a migração das funcionalidades específicas da rede.
+
+O desenvolvimento atual ocorre na branch `v4`.
+
+## Licença
+
+Este projeto é derivado do InspIRCd e permanece sujeito aos termos da
+GNU General Public License versão 2 aplicáveis ao projeto upstream.
+
+Consulte também os arquivos de licença presentes no repositório.

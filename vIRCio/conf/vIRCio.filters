@@ -1,0 +1,112 @@
+############################################################
+#                                                          #
+#              Rede vIRCio - vIRCio.filters                #
+#                                                          #
+#     CONFIGURACAO PADRAO E IMUTAVEL DA REDE vIRCio       #
+#                                                          #
+# Regras globais do modulo filter utilizando PCRE2.         #
+#                                                          #
+############################################################
+
+
+# ==========================================================
+# SPAM / MALWARE
+# ==========================================================
+#
+# Migrado diretamente do vIRCio.filter historico.
+#
+# Na v4 o engine e PCRE2, portanto pontos literais sao
+# expressos como [.] para evitar interpretacao como regex.
+#
+
+<keyword
+    pattern="abrege[.]eu"
+    reason="Spam de Virus"
+    action="block"
+    flags="qPopn">
+
+<keyword
+    pattern="weba[.]im"
+    reason="Spam de Virus"
+    action="block"
+    flags="qPopn">
+
+
+# ==========================================================
+# ALERTA DE DIVULGACAO DE IRC
+# ==========================================================
+#
+# No InspIRCd 2 a vIRCio possuia a acao customizada:
+#
+#     warningopers
+#
+# O InspIRCd 4 possui a acao nativa:
+#
+#     warn
+#
+# Ela permite a mensagem e envia o alerta aos IRCops.
+#
+
+<keyword
+    pattern="irc[.]"
+    reason="Warning"
+    action="warn"
+    flags="pqoPn">
+
+
+# ==========================================================
+# REGRAS HISTORICAS DESABILITADAS
+# ==========================================================
+#
+# Permanecem comentadas como estavam no arquivo legado.
+#
+#<keyword
+#    pattern="irc[.]brasirc"
+#    reason="Spam de outra Rede"
+#    action="block"
+#    flags="qPopn">
+#
+#<keyword
+#    pattern="irc[.]virtualife"
+#    reason="Spam de outra Rede"
+#    action="block"
+#    flags="qPopn">
+#
+#<keyword
+#    pattern="vircio"
+#    reason="Warning"
+#    action="warn"
+#    flags="pqoPn">
+
+
+# ==========================================================
+# CANAIS ISENTOS
+# ==========================================================
+#
+# Na v4 cada destino e declarado separadamente.
+#
+
+<exemptfromfilter target="#IRCops">
+<exemptfromfilter target="#Ajuda">
+
+
+# ==========================================================
+# CENSOR LEGADO - PENDENTE
+# ==========================================================
+#
+# O arquivo vIRCio.censor antigo continha:
+#
+#   virtualife -> (spam)
+#   brasirc    -> (spam)
+#
+# O antigo censor SUBSTITUIA palavras.
+#
+# O modulo filter nao possui a mesma semantica de
+# substituicao, portanto essas regras NAO foram convertidas
+# artificialmente para block.
+#
+# Revisar posteriormente o m_censor do inspircd-contrib/4
+# antes de decidir a migracao.
+#
+
+############################################################

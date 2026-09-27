@@ -1,0 +1,745 @@
+############################################################
+#                                                          #
+#              Rede vIRCio - vIRCio.modules                #
+#                                                          #
+#     CONFIGURACAO PADRAO E IMUTAVEL DA REDE vIRCio       #
+#                                                          #
+# Nao altere este arquivo individualmente em um IRCd.      #
+#                                                          #
+############################################################
+
+
+# ==========================================================
+# Hash / criptografia
+# ==========================================================
+
+<module name="sha1">
+<module name="sha2">
+<module name="bcrypt">
+<module name="password_hash">
+<mkpasswd operonly="yes">
+
+
+# ==========================================================
+# TLS
+# ==========================================================
+
+<module name="ssl_openssl">
+<module name="sslrehashsignal">
+<module name="sslinfo">
+<module name="sslmodes">
+
+<sslinfo
+    hash="sha-256"
+    localsecure="yes"
+    operonly="no"
+    warnexpiring="1w"
+    welcomemsg="no">
+
+<sslmodes extbanoperonly="yes">
+
+# STARTTLS nao utilizado atualmente.
+# A rede utiliza listener TLS dedicado.
+#<module name="starttls">
+
+
+# ==========================================================
+# Cloaking
+# ==========================================================
+
+<module name="cloak">
+<module name="cloak_sha256">
+
+<cloak
+    method="hmac-sha256"
+    key="&cloakKey;"
+    class=""
+    prefix="vIRCio"
+    suffix="IP"
+    case="lower"
+    hostparts="3"
+    pathparts="1">
+
+
+# ==========================================================
+# Core / comandos gerais
+# ==========================================================
+
+<module name="abbreviation">
+<module name="alias">
+<module name="allowinvite">
+<module name="alltime">
+<module name="cycle">
+
+<fantasy
+    prefix="!"
+    allowbots="yes">
+
+
+# Aliases proprios da Rede vIRCio.
+
+<alias text="REGRAS" replace="RULES">
+<alias text="APELIDO" replace="NICK :$2-">
+<alias text="ENTRAR" replace="JOIN :$2-">
+<alias text="SAIR" replace="PART :$2-">
+
+
+# ==========================================================
+# CAP / IRCv3
+# ==========================================================
+
+<module name="cap">
+
+<module name="ircv3">
+
+<ircv3
+    accountnotify="yes"
+    awaynotify="yes"
+    extendedjoin="yes"
+    noimplicitnames="yes"
+    standardreplies="yes">
+
+<module name="ircv3_accounttag">
+<module name="ircv3_batch">
+<module name="ircv3_capnotify">
+<module name="ircv3_chghost">
+<module name="ircv3_ctctags">
+<module name="ircv3_echomessage">
+<module name="ircv3_invitenotify">
+<module name="ircv3_labeledresponse">
+<module name="ircv3_msgid">
+<module name="ircv3_servertime">
+<module name="ircv3_utf8only">
+
+# STS sera utilizado em producao depois que os certificados
+# Let's Encrypt estiverem instalados.
+#
+# ATIVAR
+#<module name="ircv3_sts">
+#<sts
+#    host="*.vircio.net"
+#    duration="30d"
+#    port="6697"
+#    preload="no">
+
+
+# ==========================================================
+# SASL / Accounts / Services
+# ==========================================================
+
+<module name="account">
+<module name="services">
+<module name="sasl">
+
+<servicesintegration
+    accountoverrideshold="no"
+    disablemodes="no">
+
+<sasl
+    target="services.vircio.net"
+    requiressl="yes">
+
+
+# ==========================================================
+# WebIRC / WebSocket
+# ==========================================================
+
+<module name="gateway">
+<module name="websocket">
+
+<websocket
+    defaultmode="text"
+    allowmissingorigin="no"
+    nativeping="yes">
+
+<wsorigin allow="https://*.vircio.net">
+
+#
+# Os gateways WEBIRC serao adicionados quando definirmos
+# IPs e credenciais.
+#
+# Exemplo:
+#
+#<gateway
+#    type="webirc"
+#    password="HASH_BCRYPT"
+#    hash="bcrypt"
+#    mask="127.0.0.1">
+#
+# O segundo parametro enviado pelo WEBIRC define o nome do
+# gateway usado pelas connect classes, por exemplo KiwiIRC.
+
+
+# ==========================================================
+# Canais / modos
+# ==========================================================
+
+<module name="anticaps">
+<module name="auditorium">
+<module name="autoop">
+<module name="banexception">
+<module name="blockcolor">
+<module name="botmode">
+<module name="callerid">
+<module name="cban">
+<module name="chancreate">
+<module name="chanfilter">
+<module name="chanhistory">
+<module name="chanlog">
+<module name="channames">
+<module name="channelban">
+<module name="commonchans">
+<module name="customprefix">
+<module name="deaf">
+<module name="delayjoin">
+<module name="delaymsg">
+<module name="denychans">
+<module name="exemptchanops">
+<module name="inviteexception">
+<module name="joinflood">
+<module name="kicknorejoin">
+<module name="knock">
+<module name="messageflood">
+<module name="muteban">
+<module name="namedmodes">
+<module name="nickflood">
+<module name="noctcp">
+<module name="nokicks">
+<module name="nonicks">
+<module name="nonotice">
+<module name="redirect">
+<module name="remove">
+<module name="repeat">
+<module name="stripcolor">
+<module name="timedbans">
+<module name="uninvite">
+
+
+<auditorium
+    opvisible="yes"
+    opcansee="no"
+    opercansee="yes">
+
+<callerid
+    maxaccepts="24"
+    tracknick="yes"
+    cooldown="1m">
+
+<chanfilter
+    hidemask="yes"
+    maxlen="50"
+    notifyuser="yes">
+
+<chanhistory
+    maxlines="50"
+    maxduration="4w"
+    prefixmsg="yes"
+    savefrombots="yes"
+    sendtobots="yes">
+
+# Logs administrativos no canal da equipe.
+<chanlog
+    snomasks="acdfgjklnoqrtvwx"
+    channel="#ServerS">
+
+<channames
+    denyrange="2,3"
+    allowrange="">
+
+<customprefix
+    name="founder"
+    letter="q"
+    prefix="~"
+    rank="50000"
+    ranktoset="50000">
+
+<customprefix
+    name="admin"
+    letter="a"
+    prefix="&amp;"
+    rank="40000"
+    ranktoset="50000">
+
+<customprefix
+    name="halfop"
+    letter="h"
+    prefix="%"
+    rank="20000"
+    ranktoset="30000">
+
+<customprefix
+    name="halfvoice"
+    letter="V"
+    prefix="-"
+    rank="1"
+    ranktoset="20000">
+
+<badchan
+    name="#IRCops"
+    allowopers="yes"
+    reason="IRCops">
+
+<badchan
+    name="#ServiceS"
+    allowopers="yes"
+    reason="IRCops">
+
+<badchan
+    name="#ServerS"
+    allowopers="yes"
+    reason="IRCops">
+
+<inviteexception bypasskey="yes">
+
+<joinflood
+    duration="1m"
+    bootwait="30s"
+    splitwait="30s"
+    notifyrank="0">
+
+<knock notify="notice">
+
+<nickflood
+    duration="1m"
+    notifyrank="0">
+
+<redirect
+    ban="no"
+    extban="yes"
+    inviteonly="yes"
+    key="yes"
+    limit="yes">
+
+<remove
+    supportnokicks="yes"
+    protectedrank="50000">
+
+<repeat
+    maxbacklog="20"
+    maxdistance="50"
+    maxlines="20"
+    maxtime="0s"
+    size="512"
+    extended="yes">
+
+<timedbans sendnotice="yes">
+
+
+# ==========================================================
+# Ocultacao de informacoes
+# ==========================================================
+
+<module name="hidechans">
+<module name="hidelist">
+<module name="hideoper">
+
+<hidechans
+    affectsopers="no"
+    hideservices="yes">
+
+# Equivalente moderno ao antigo hidemodes="eI".
+<hidelist
+    mode="banexception"
+    rank="20000">
+
+<hidelist
+    mode="invex"
+    rank="20000">
+
+
+# ==========================================================
+# SecureList
+# ==========================================================
+#
+# Protege o /LIST contra spambots logo apos a conexao.
+#
+# Usuarios autenticados em conta ficam isentos imediatamente.
+# Nao envia canais falsos.
+#
+
+<module name="securelist">
+
+# Excecoes oficiais mantidas pelo InspIRCd para crawlers
+# conhecidos.
+<include
+    file="&dir.example;/providers/securelist.example.conf"
+    missingokay="yes">
+
+<securelist
+    exemptregistered="yes"
+    fakechans="0"
+    hidesmallchans="0"
+    showmsg="yes"
+    waittime="30s">
+
+
+# ==========================================================
+# Connect / protecao contra conexoes
+# ==========================================================
+
+# Autojoin historico da vIRCio.
+# Reativar caso voltemos a utilizar <autojoin>.
+#<module name="conn_join">
+<module name="conn_umodes">
+<module name="connectban">
+<module name="connflood">
+
+<connectban
+    threshold="20"
+    banduration="10m"
+    ipv4cidr="32"
+    ipv6cidr="64"
+    bootwait="2m"
+    splitwait="2m"
+    banmessage="Muitas tentativas de conexao. Aguarde antes de conectar novamente.">
+
+<connflood
+    period="30s"
+    maxconns="15"
+    timeout="30s"
+    quitmsg="Estrangulado - Throttled"
+    bootwait="2m">
+
+# Nao utilizado.
+#<module name="conn_waitpong">
+
+
+# ==========================================================
+# DNSBL
+# ==========================================================
+
+<module name="dnsbl">
+
+# Configuracoes oficiais fornecidas pelo InspIRCd v4.
+<include file="&dir.example;/providers/dronebl.example.conf">
+<include file="&dir.example;/providers/efnet-rbl.example.conf">
+
+
+# ==========================================================
+# GeoIP
+# ==========================================================
+
+# Os modulos ja foram compilados.
+# Serao ativados depois da instalacao/configuracao da base MMDB.
+
+# ATIVAR
+#<module name="geo_maxmind">
+
+# ATIVAR
+#<module name="geoban">
+
+# ATIVAR
+#<module name="geoclass">
+
+
+# ==========================================================
+# Filter / Regex
+# ==========================================================
+
+<module name="regex_pcre2">
+<module name="filter">
+
+<filteropts
+    engine="pcre"
+    enableflags="yes"
+    notifyuser="yes"
+    warnonselfmsg="yes">
+
+# Regras estaticas da Rede vIRCio.
+<include file="vIRCio.filters" missingokay="yes">
+
+#
+# IMPORTANTE:
+#
+# Na v4 a acao oficial "warn" substitui a antiga
+# customizacao "warningopers" da vIRCio v2.
+# Portanto nao sera necessario alterar m_filter.cpp.
+#
+
+
+# ==========================================================
+# Realname / bans / X-Lines
+# ==========================================================
+
+<module name="realnameban">
+<module name="rline">
+<module name="rmode">
+<module name="serverban">
+<module name="shun">
+<module name="tline">
+<module name="xline_db">
+
+<rline
+    matchonnickchange="yes"
+    useflags="yes"
+    zlineonmatch="no"
+    engine="pcre">
+
+<serverban operonly="yes">
+
+<shun
+    enabledcommands="ADMIN PING PONG QUIT PART JOIN"
+    cleanedcommands="AWAY PART QUIT"
+    allowconnect="no"
+    allowtags="no"
+    notifyuser="no">
+
+<xlinedb
+    filename="vIRCio.xline"
+    saveperiod="5s"
+    backoff="2"
+    maxbackoff="5m">
+
+
+# ==========================================================
+# Canais permanentes
+# ==========================================================
+
+<module name="permchannels">
+
+<permchanneldb
+    filename="vIRCio.permchannels"
+    listmodes="yes"
+    saveperiod="5s"
+    backoff="2"
+    maxbackoff="5m"
+    operonly="yes"
+    writeversion="2">
+
+<include
+    file="vIRCio.permchannels"
+    missingokay="yes">
+
+
+# ==========================================================
+# Notify / WATCH / MONITOR
+# ==========================================================
+
+<module name="watch">
+<module name="monitor">
+
+<watch maxwatch="32">
+<monitor maxentries="30">
+
+
+# ==========================================================
+# Operadores
+# ==========================================================
+
+<module name="check">
+<module name="chghost">
+<module name="chgident">
+<module name="chgname">
+
+<module name="globalload">
+<module name="globops">
+
+<module name="nicklock">
+
+<module name="ojoin">
+<module name="operchans">
+<module name="operjoin">
+<module name="operlevels">
+<module name="operlog">
+<module name="opermodes">
+<module name="opermotd">
+
+<opermotd
+    file="vIRCio.opermotd"
+    onoper="yes">
+<module name="override">
+
+<module name="sajoin">
+<module name="sakick">
+<module name="samode">
+<module name="sanick">
+<module name="sapart">
+<module name="saquit">
+<module name="satopic">
+
+<module name="seenicks">
+
+<module name="sethost">
+<module name="setident">
+<module name="setidle">
+<module name="setname">
+
+<module name="showwhois">
+<module name="swhois">
+
+
+<hostname
+    charmap="abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ.-_/0123456789">
+
+<ojoin
+    prefix="!"
+    notice="yes"
+    op="no">
+
+<operjoin
+    channel="#IRCops"
+    override="no">
+
+<operlog tosnomask="no">
+
+<override
+    noisy="yes"
+    requirekey="no"
+    timeout="30m">
+
+<setname
+    notifyopers="no"
+    operonly="no">
+
+<showwhois opersonly="no">
+
+
+# OperPrefix nao utilizado atualmente.
+#<module name="operprefix">
+#<operprefix prefix="!">
+
+
+# ==========================================================
+# Help
+# ==========================================================
+
+<module name="help">
+<module name="helpmode">
+
+<helpmode
+    ignorehideoper="no"
+    markhelpers="yes">
+
+# ATIVAR / preencher com a versao convertida da v2.
+<include file="vIRCio.helpop" missingokay="yes">
+
+
+# ==========================================================
+# PassForward
+# ==========================================================
+
+<module name="passforward">
+
+<passforward
+    nick="NickServ"
+    forwardmsg="NOTICE %nick% :*** Forwarding password to %nickrequired%"
+    cmd="SQUERY %nickrequired% :IDENTIFY %nick% %pass%">
+
+
+# ==========================================================
+# Silence
+# ==========================================================
+
+<module name="silence">
+
+<silence
+    maxentries="32"
+    exemptservice="yes">
+
+
+# ==========================================================
+# UHNAMES
+# ==========================================================
+
+<module name="multiprefix">
+<module name="uhnames">
+
+
+# ==========================================================
+# VHOST
+# ==========================================================
+
+<module name="vhost">
+
+# VHosts normais serao administrados pelo HostServ/Anope.
+#
+#<vhost
+#    user="usuario"
+#    password="HASH"
+#    hash="bcrypt"
+#    host="usuario.vircio.net">
+
+
+# ==========================================================
+# CustomTitle
+# ==========================================================
+
+<module name="customtitle">
+
+# ATIVAR apos gerar nova senha bcrypt.
+#
+#<title
+#    name="helper"
+#    password="HASH_BCRYPT"
+#    hash="bcrypt"
+#    host="*@*"
+#    title="Official Chat Helper"
+#    vhost="helper.vircio.net">
+
+
+# ==========================================================
+# SpanningTree
+# ==========================================================
+
+<module name="spanningtree">
+
+
+# ==========================================================
+# Modulos personalizados vIRCio
+# ==========================================================
+
+#
+# Estes modulos existiam na v2 e SERAO utilizados.
+# Permanecem comentados somente ate serem portados para v4.
+#
+
+# ATIVAR - portar modulo invisible / umode +Q.
+#<module name="invisible">
+
+# ATIVAR - portar modulo IRCOPS / modes Services Root/Admin/Oper.
+#<module name="ircops">
+
+# ATIVAR - portar comando PRETENDUSER.
+#<module name="pretenduser">
+
+# ATIVAR - portar funcionalidades proprias da Rede vIRCio,
+# incluindo Zombie/Gringo +Z.
+#<module name="vircio">
+
+
+# ==========================================================
+# Modulos legados / nao utilizados atualmente
+# ==========================================================
+
+# Ident nao utilizado.
+#<module name="ident">
+#<ident timeout="5s">
+
+# DCCALLOW nao utilizado.
+#<module name="dccallow">
+
+# Random quote nao utilizado atualmente.
+# O arquivo vIRCio.quotes permanecera disponivel.
+#<module name="randquote">
+#<randquote file="vIRCio.quotes">
+
+# Restricao global de criacao de canais nao utilizada.
+#<module name="restrictchans">
+
+# Restricao global de mensagens nao utilizada.
+#<module name="restrictmsg">
+
+# Modulos antigos sem equivalente oficial direto na v4:
+#
+# m_close
+# m_clones
+# m_devoice
+# m_jumpserver
+# m_lockserv
+# m_nopartmsg
+# m_userip
+#
+# Nao foram descartados funcionalmente.
+# Caso alguma funcao continue necessaria sera avaliada
+# durante a etapa de port dos modulos customizados.
+

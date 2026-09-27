@@ -1,0 +1,73 @@
+============================================================
+                         vIRCio
+============================================================
+
+Bem-vindo à equipe de administração da Rede vIRCio.
+
+Este acesso possui privilégios administrativos. Utilize os
+comandos de IRCop somente quando necessário e de acordo com
+a sua função e regras da rede.
+
+
+AJUDA DO INSPIRCD
+-----------------
+
+/HELP
+    Lista os tópicos de ajuda disponíveis.
+
+/HELP <comando>
+    Exibe a ajuda de um comando específico.
+
+
+SERVIÇOS
+--------
+
+NickServ:
+    /NICKSERV HELP
+
+ChanServ:
+    /CHANSERV HELP
+
+MemoServ:
+    /MEMOSERV HELP
+
+BotServ:
+    /BOTSERV HELP
+
+HostServ:
+    /HOSTSERV HELP
+
+OperServ:
+    /OPERSERV HELP
+
+StatServ:
+    /STATSERV HELP
+
+
+IDENTIFICAÇÃO
+-------------
+
+/ID <senha>
+/IDENTIFY <senha>
+/LOGIN <senha>
+/LOGOUT
+
+O uso de SASL é recomendado sempre que o cliente suportar.
+
+
+EQUIPE
+------
+
+Canal administrativo:
+    #IRCops
+
+Site:
+    https://vircio.net
+
+Wiki:
+    https://wiki.vircio.net
+
+
+============================================================
+              vIRCio - conectando pessoas
+============================================================

@@ -1,0 +1,259 @@
+############################################################
+#                                                          #
+#              Rede vIRCio - vIRCio.services               #
+#                                                          #
+#     CONFIGURACAO PADRAO E IMUTAVEL DA REDE vIRCio       #
+#                                                          #
+# Integracao logica entre InspIRCd e Anope Services.        #
+#                                                          #
+# O link fisico com services.vircio.net permanece no        #
+# ircd.conf de cada servidor.                               #
+#                                                          #
+############################################################
+
+
+# ==========================================================
+# ALIASES DOS SERVICES
+# ==========================================================
+#
+# Baseado no modelo oficial do InspIRCd 4 para Anope.
+#
+# O modulo "alias" ja e carregado em vIRCio.modules.
+#
+
+
+# ----------------------------------------------------------
+# Comandos completos
+# ----------------------------------------------------------
+
+<alias text="BOTSERV"
+    replace="PRIVMSG $requirement :$2-"
+    requires="BotServ"
+    service="yes">
+
+<alias text="CHANSERV"
+    replace="PRIVMSG $requirement :$2-"
+    requires="ChanServ"
+    service="yes">
+
+<alias text="GLOBAL"
+    replace="PRIVMSG $requirement :$2-"
+    requires="Global"
+    service="yes"
+    operonly="yes">
+
+<alias text="HOSTSERV"
+    replace="PRIVMSG $requirement :$2-"
+    requires="HostServ"
+    service="yes">
+
+<alias text="MEMOSERV"
+    replace="PRIVMSG $requirement :$2-"
+    requires="MemoServ"
+    service="yes">
+
+<alias text="NICKSERV"
+    replace="PRIVMSG $requirement :$2-"
+    requires="NickServ"
+    service="yes">
+
+<alias text="OPERSERV"
+    replace="PRIVMSG $requirement :$2-"
+    requires="OperServ"
+    service="yes"
+    operonly="yes">
+
+<alias text="STATSERV"
+    replace="PRIVMSG $requirement :$2-"
+    requires="StatServ"
+    service="yes">
+
+
+# ----------------------------------------------------------
+# Comandos abreviados
+# ----------------------------------------------------------
+
+<alias text="BS"
+    replace="PRIVMSG $requirement :$2-"
+    requires="BotServ"
+    service="yes">
+
+<alias text="CS"
+    replace="PRIVMSG $requirement :$2-"
+    requires="ChanServ"
+    service="yes">
+
+<alias text="GL"
+    replace="PRIVMSG $requirement :$2-"
+    requires="Global"
+    service="yes"
+    operonly="yes">
+
+<alias text="HS"
+    replace="PRIVMSG $requirement :$2-"
+    requires="HostServ"
+    service="yes">
+
+<alias text="MS"
+    replace="PRIVMSG $requirement :$2-"
+    requires="MemoServ"
+    service="yes">
+
+<alias text="NS"
+    replace="PRIVMSG $requirement :$2-"
+    requires="NickServ"
+    service="yes">
+
+<alias text="OS"
+    replace="PRIVMSG $requirement :$2-"
+    requires="OperServ"
+    service="yes"
+    operonly="yes">
+
+<alias text="SS"
+    replace="PRIVMSG $requirement :$2-"
+    requires="StatServ"
+    service="yes">
+
+
+# ==========================================================
+# IDENTIFICACAO
+# ==========================================================
+#
+# /ID <senha>
+# /ID <conta> <senha>
+#
+# /IDENTIFY ...
+# /LOGIN ...
+#
+# Mantemos o formato oficial da v4 usando $2- para permitir
+# tanto senha simples quanto conta + senha.
+#
+
+<alias text="ID"
+    format="*"
+    replace="PRIVMSG $requirement :IDENTIFY $2-"
+    requires="NickServ"
+    service="yes">
+
+<alias text="IDENTIFY"
+    format="*"
+    replace="PRIVMSG $requirement :IDENTIFY $2-"
+    requires="NickServ"
+    service="yes">
+
+<alias text="LOGIN"
+    format="*"
+    replace="PRIVMSG $requirement :IDENTIFY $2-"
+    requires="NickServ"
+    service="yes">
+
+
+# ----------------------------------------------------------
+# Logout
+# ----------------------------------------------------------
+
+<alias text="LOGOUT"
+    format="*"
+    replace="PRIVMSG $requirement :LOGOUT"
+    requires="NickServ"
+    service="yes">
+
+
+# ==========================================================
+# FANTASY COMMAND CHANSERV
+# ==========================================================
+#
+# Funcionalidade existente na vIRCio legada e oficialmente
+# suportada pelo modulo alias do InspIRCd 4.
+#
+# Exemplo:
+#
+#   !cs op apelido
+#   !cs voice apelido
+#
+# O canal atual e automaticamente inserido no comando.
+#
+
+<alias
+    text="CS"
+    usercommand="no"
+    channelcommand="yes"
+    replace="PRIVMSG ChanServ :$1 $chan $2-"
+    requires="ChanServ"
+    service="yes">
+
+
+# ==========================================================
+# RESERVA DOS NICKS DOS SERVICES
+# ==========================================================
+#
+# Substitui as antigas Q-lines estaticas usadas pela vIRCio
+# para os pseudoclients do Anope.
+#
+
+<badnick
+    nick="BotServ"
+    reason="Reservado para um servico da Rede vIRCio">
+
+<badnick
+    nick="ChanServ"
+    reason="Reservado para um servico da Rede vIRCio">
+
+<badnick
+    nick="Global"
+    reason="Reservado para um servico da Rede vIRCio">
+
+<badnick
+    nick="HostServ"
+    reason="Reservado para um servico da Rede vIRCio">
+
+<badnick
+    nick="MemoServ"
+    reason="Reservado para um servico da Rede vIRCio">
+
+<badnick
+    nick="NickServ"
+    reason="Reservado para um servico da Rede vIRCio">
+
+<badnick
+    nick="OperServ"
+    reason="Reservado para um servico da Rede vIRCio">
+
+<badnick
+    nick="StatServ"
+    reason="Reservado para um servico da Rede vIRCio">
+
+
+# ==========================================================
+# EXCECOES DO FILTRO
+# ==========================================================
+#
+# Os pseudoclients oficiais dos Services nao devem ser
+# submetidos aos filtros de mensagens da rede.
+#
+
+<exemptfromfilter target="BotServ">
+<exemptfromfilter target="ChanServ">
+<exemptfromfilter target="Global">
+<exemptfromfilter target="HostServ">
+<exemptfromfilter target="MemoServ">
+<exemptfromfilter target="NickServ">
+<exemptfromfilter target="OperServ">
+<exemptfromfilter target="StatServ">
+
+
+############################################################
+#
+# OBSERVACAO
+#
+# O seguinte NAO pertence a este arquivo:
+#
+# - <link> para services.vircio.net
+# - <autoconnect>
+# - <services server="services.vircio.net">
+#
+# Esses itens dependem da topologia/IP de cada IRCd e ficam
+# no ircd.conf de cada servidor.
+#
+############################################################
