@@ -58,9 +58,16 @@ Instale as dependências:
         build-essential \
         pkg-config \
         perl \
+        libwww-perl \
+        libio-socket-ssl-perl \
         libssl-dev \
         libpcre2-dev \
         libmaxminddb-dev
+
+
+
+`libwww-perl` e `libio-socket-ssl-perl` são utilizados pelo
+`modulemanager` para consultar e baixar módulos contrib através de HTTPS.
 
 
 ## Clonar o repositório
@@ -80,6 +87,57 @@ Entre no source:
 Selecione a branch atual:
 
     git checkout v4
+
+
+## Módulos contrib
+
+Módulos de terceiros mantidos pelo projeto `inspircd-contrib` podem ser
+instalados através do `modulemanager` incluído no source do InspIRCd.
+
+O `modulemanager` utiliza Perl e HTTPS. Por isso são necessárias as
+dependências:
+
+    libwww-perl
+    libio-socket-ssl-perl
+
+Para listar os módulos disponíveis:
+
+    ./modulemanager list
+
+Para instalar um módulo:
+
+    ./modulemanager install <modulo>
+
+Exemplo:
+
+    ./modulemanager install clones
+
+É possível instalar vários módulos de uma vez:
+
+    ./modulemanager install \
+        clones \
+        stats_unlinked \
+        jumpserver \
+        lockserv \
+        xlinetools
+
+Depois de adicionar módulos contrib, compile e instale novamente:
+
+    make -j5 install
+
+Os sources baixados pelo `modulemanager` ficam em:
+
+    src/modules/
+
+A Rede vIRCio versiona os módulos contrib utilizados para que a versão
+homologada da rede permaneça reproduzível.
+
+O arquivo `.modulemanager` é utilizado localmente pelo gerenciador e não
+é versionado.
+
+Módulos próprios da Rede vIRCio permanecem separados em:
+
+    vIRCio/modules/
 
 
 ## Extras utilizados pela vIRCio

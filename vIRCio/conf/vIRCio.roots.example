@@ -23,7 +23,7 @@
 <class
     name="View"
 
-    commands="CHECK TLINE"
+    commands="CHECK TLINE CLONES"
 
     privs="channels/auspex users/auspex users/channel-spy users/secret-whois servers/auspex"
 
@@ -147,7 +147,7 @@
 <class
     name="ServerLink"
 
-    commands="CONNECT SQUIT RCONNECT RSQUIT ALLTIME"
+    commands="CONNECT SQUIT RCONNECT RSQUIT ALLTIME JUMPSERVER LOCKSERV UNLOCKSERV"
 
     privs="servers/auspex"
 

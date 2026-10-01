@@ -231,6 +231,13 @@ Shows the administrative information for the given server.
 
 <helptopic key="privmsg" title="/PRIVMSG <target>[,<target>]+ :<message>" value="
 Sends a message to a user or channel specified in <target>.
+
+A Rede vIRCio limita mensagens enviadas rapidamente para muitos
+destinos diferentes. Quando o limite e atingido, a mensagem e descartada
+e o servidor informa: Targets changing too fast, message dropped.
+
+Respostas recentes e algumas conversas entre usuarios em canais em comum
+podem ser isentas dessa limitacao.
 ">
 
 <helptopic key="notice" title="/NOTICE <target>[,<target>]+ :<message>" value="
@@ -274,6 +281,10 @@ Sets or retrieves the channel topic. If a channel topic is
 given in the command and either the channel is not +t, or
 you are at least a halfoperator, the channel topic will be
 changed to the new one you provide.
+
+Na Rede vIRCio, canais novos recebem automaticamente um topic padrao.
+O topic pode ser alterado ou removido normalmente depois da criacao
+do canal.
 ">
 
 <helptopic key="who" title="/WHO <pattern> [<flags>][%[<fields>[,<querytype>]]] <pattern>" value="
@@ -387,6 +398,12 @@ miscellaneous information.
 <helptopic key="away" title="/AWAY [:<message>]" value="
 If a message is given, marks you as being away, otherwise
 removes your away status and previous message.
+
+Na Rede vIRCio, usuarios com 1 hora de inatividade sao marcados
+automaticamente como ausentes. A verificacao ocorre a cada 15 minutos.
+
+Quando o AWAY foi definido automaticamente, voltar a enviar mensagens
+remove o estado automatico de ausencia.
 ">
 
 <helptopic key="ison" title="/ISON <nick> [<nick>]+" value="
@@ -413,6 +430,9 @@ of seconds.
 
 /INVITE without a parameter will list pending invitations for channels
 you have been invited to.
+
+Convites tambem estao sujeitos ao limite de mudanca de destinos usado
+pela Rede vIRCio para reduzir spam automatizado.
 ">
 
 <helptopic key="pass" title="/PASS <password>" value="
@@ -473,6 +493,107 @@ RLINE          RSQUIT         SAJOIN         SAKICK         SAMODE
 SANICK         SAPART         SAQUIT         SATOPIC        SETHOST
 SETIDENT       SETIDLE        SHUN           SQUIT          SWHOIS
 TLINE          UNLOADMODULE   WALLOPS        ZLINE
+CLONES         JUMPSERVER     LOCKSERV       UNLOCKSERV
+XCOUNT         XCOPY          XREMOVE        XSEARCH
+">
+
+<helptopic key="clones" title="/CLONES <limit>" value="
+Mostra IPs ou faixas CIDR que possuem pelo menos o numero informado
+de conexoes.
+
+A resposta informa a quantidade de conexoes locais e globais.
+
+Exemplo:
+/CLONES 2
+">
+
+<helptopic key="jumpserver" title="/JUMPSERVER [<server> <port>[:<sslport>] <flags> [:<reason>]]" value="
+Redireciona usuarios para outro servidor IRC.
+
+Flags:
+
++a  redireciona imediatamente usuarios ja conectados
+-a  nao redireciona usuarios ja conectados
+
++n  redireciona novas conexoes
+-n  nao redireciona novas conexoes
+
+A porta TLS pode ser informada depois da porta normal:
+
+/JUMPSERVER irc2.vircio.net 6667:6697 +n :Servidor em manutencao
+
+Sem parametros, desativa o JUMPSERVER:
+
+/JUMPSERVER
+">
+
+<helptopic key="lockserv" title="/LOCKSERV [:<reason>]" value="
+Bloqueia temporariamente novas conexoes no IRCd local.
+
+Usuarios ja conectados permanecem na rede.
+
+Exemplo:
+/LOCKSERV :Servidor temporariamente em manutencao
+
+Use /UNLOCKSERV para reabrir o servidor.
+">
+
+<helptopic key="unlockserv" title="/UNLOCKSERV" value="
+Remove o bloqueio criado por /LOCKSERV e volta a permitir novas
+conexoes ao servidor local.
+">
+
+<helptopic key="xcount" title="/XCOUNT <criterios>" value="
+Conta X-Lines que correspondem aos criterios informados.
+
+Criterios disponiveis:
+
+-type=<tipo|*>
+-mask=[!]<mascara>
+-reason=[!]<motivo>
+-source=[!]<origem>
+-set=[-]<tempo>
+-duration=[-+]<tempo>
+-expires=[+]<tempo>
+-config=<yes|no>
+
+Exemplo:
+/XCOUNT -type=G -mask=*@203.0.113.*
+">
+
+<helptopic key="xsearch" title="/XSEARCH <criterios>" value="
+Lista detalhadamente X-Lines correspondentes aos criterios.
+
+Aceita os mesmos criterios utilizados por /XCOUNT.
+
+Exemplo:
+/XSEARCH -type=G -mask=*@203.0.113.*
+">
+
+<helptopic key="xremove" title="/XREMOVE <criterios>" value="
+Remove X-Lines correspondentes aos criterios.
+
+O operador somente pode remover tipos de X-Line para os quais possui
+permissao administrativa.
+
+ATENCAO: criterios amplos podem remover varias X-Lines.
+
+Exemplo:
+/XREMOVE -type=G -mask=*@203.0.113.78
+">
+
+<helptopic key="xcopy" title="/XCOPY <type> <oldmask> <newmask> [opcoes]" value="
+Copia uma X-Line existente para uma nova mascara do mesmo tipo.
+
+Opcoes:
+
+-duration=<tempo>
+-reason=<motivo>
+
+Sem opcoes, preserva o motivo e o tempo restante da X-Line original.
+
+Exemplo:
+/XCOPY G *@203.0.113.77 *@203.0.113.78
 ">
 
 <helptopic key="tline" title="/TLINE <mask>" value="
@@ -828,6 +949,8 @@ operators that have the DNSBL (d) snomask enabled.
 ">
 
 <helptopic key="umodes" title="User Modes" value="
+ a            Oculta idle e horario de conexao no WHOIS de usuarios normais.
+              O proprio usuario e IRCops com users/auspex ainda podem visualizar.
  c            Blocks private messages and notices from users who do
               not share a common channel with you (requires the
               commonchans module).
@@ -1058,6 +1181,7 @@ O  Show opertypes and the allowed user and channel modes it can set
 E  Show socket engine events
 S  Show currently held registered nicknames
 G  Show how many local users are connected from each country
+X  Show configured but currently unlinked servers
 
 Note that all /STATS use is broadcast to online server operators.
 ">

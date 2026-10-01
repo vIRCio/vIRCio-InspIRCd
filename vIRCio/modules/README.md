@@ -40,6 +40,19 @@ Substituto da personalização histórica feita no antigo servprotect.
 A implementação deverá considerar a integração com o Anope atual e
 evitar alterações diretas em módulos oficiais.
 
+## Módulos contrib
+
+Módulos mantidos pelo projeto `inspircd-contrib` não ficam nesta pasta.
+
+Eles são instalados pelo `modulemanager` no diretório:
+
+    src/modules/
+
+e são versionados junto ao source utilizado pela vIRCio.
+
+Esta pasta `vIRCio/modules/` é reservada exclusivamente aos módulos
+próprios da Rede vIRCio.
+
 ## Regra de desenvolvimento
 
 Não modificar arquivos do core oficial para implementar funcionalidades

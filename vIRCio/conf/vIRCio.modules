@@ -171,6 +171,42 @@
 
 
 # ==========================================================
+# Contrib - Experiencia do usuario / Seguranca
+# ==========================================================
+
+# Define um topic padrao quando um novo canal e criado.
+<module name="defaulttopic">
+
+# Marca automaticamente usuarios inativos como AWAY.
+# Verifica a cada 15 minutos e marca AWAY apos 1 hora de inatividade.
+<module name="autoaway">
+
+<autoaway
+    checkperiod="15m"
+    idleperiod="1h"
+    message="Ausente por inatividade">
+
+# Usermode +a:
+# oculta idle e signon time no WHOIS para usuarios normais.
+<module name="hideidle">
+
+# Derruba conexoes ainda nao registradas que enviem comandos
+# tipicos de HTTP/scanners para as portas IRC.
+<module name="autodrop">
+
+<autodrop
+    commands="CONNECT DELETE GET HEAD OPTIONS PATCH POST PUT TRACE">
+
+# Limita mudancas rapidas entre muitos destinos diferentes.
+# Mantem ate 20 destinos e 10 destinos de resposta recentes.
+<module name="tgchange">
+
+<tgchange
+    num="20"
+    reply="10">
+
+
+# ==========================================================
 # Canais / modos
 # ==========================================================
 
@@ -527,6 +563,20 @@
 # ==========================================================
 
 <module name="check">
+
+# /CLONES <limite>
+# Permite aos IRCops visualizar IPs/faixas CIDR com multiplas conexoes.
+<module name="clones">
+
+# Contrib administrativos.
+# /STATS X - mostra servidores configurados que nao estao linkados.
+<module name="stats_unlinked">
+# /JUMPSERVER - redireciona clientes para outro IRCd.
+<module name="jumpserver">
+# /LOCKSERV e /UNLOCKSERV - controla novas conexoes.
+<module name="lockserv">
+# XCOPY, XCOUNT, XREMOVE e XSEARCH - ferramentas para X-Lines.
+<module name="xlinetools">
 <module name="chghost">
 <module name="chgident">
 <module name="chgname">
