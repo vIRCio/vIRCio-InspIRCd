@@ -6,7 +6,7 @@ Este repositório é um fork do projeto
 [InspIRCd](https://github.com/inspircd/inspircd), adaptado para a
 infraestrutura e necessidades da Rede vIRCio.
 
-A base atual utiliza **InspIRCd 4.12.0** e mantém o core upstream o mais
+A base atual utiliza **InspIRCd 4.12.1** e mantém o core upstream o mais
 limpo possível. Funcionalidades específicas da rede são implementadas
 através de configuração, módulos contrib ou módulos próprios da vIRCio,
 evitando alterações diretas no core sempre que possível.
@@ -19,14 +19,15 @@ Branch de desenvolvimento atual:
 
 Base upstream:
 
-    InspIRCd 4.12.0
+    InspIRCd 4.12.1
 
 Baseline homologada da vIRCio:
 
-    vIRCio-baseline-v4.12.0
+    vIRCio-baseline-v4.12.1
 
-A baseline foi auditada e submetida a testes funcionais antes do início
-da integração dos módulos específicos da Rede vIRCio.
+A baseline 4.12.1 foi compilada, instalada e submetida a testes funcionais
+após a integração do release upstream, preservando as configurações e os
+módulos contrib já homologados pela Rede vIRCio.
 
 ## Estrutura do projeto
 

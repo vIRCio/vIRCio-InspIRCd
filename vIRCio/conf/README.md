@@ -5,9 +5,9 @@ para InspIRCd 4.
 
 Baseline:
 
-- InspIRCd 4.12.0
+- InspIRCd 4.12.1
 - branch: v4
-- tag: vIRCio-baseline-v4.12.0
+- tag: vIRCio-baseline-v4.12.1
 
 ## Arquivos
 

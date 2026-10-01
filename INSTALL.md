@@ -5,7 +5,7 @@ preparar, compilar e instalar o InspIRCd 4.
 
 A base atual do projeto é:
 
-    InspIRCd 4.12.0
+    InspIRCd 4.12.1
 
 Branch:
 
@@ -13,7 +13,7 @@ Branch:
 
 Baseline homologada:
 
-    vIRCio-baseline-v4.12.0
+    vIRCio-baseline-v4.12.1
 
 
 ## Repositórios
@@ -180,7 +180,7 @@ Execute:
 
 Resultado esperado:
 
-    InspIRCd-4.12.0
+    InspIRCd-4.12.1
 
 
 ## Diretórios
