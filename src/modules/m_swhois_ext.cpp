@@ -1,0 +1,487 @@
+/*
+ * InspIRCd -- Internet Relay Chat Daemon
+ *
+ *   Copyright (C) 2026 Sadie Powell <sadie@sadiepowell.dev>
+ *
+ * This file is part of InspIRCd.  InspIRCd is free software: you can
+ * redistribute it and/or modify it under the terms of the GNU General Public
+ * License as published by the Free Software Foundation, version 2.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+ * FOR A PARTICULAR PURPOSE.  See the GNU General Public License for more
+ * details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
+
+/// $ModAuthor: Sadie Powell <sadie@sadiepowell.dev>
+/// $ModDepends: core 4
+/// $ModDesc: Adds the /SWHOIS command which adds custom messages to a user's WHOIS response.
+
+
+#include "inspircd.h"
+#include "extension.h"
+#include "modules/ircv3_replies.h"
+#include "modules/server.h"
+#include "modules/whois.h"
+#include "numerichelper.h"
+
+struct SWhois final
+{
+	enum Flags
+		: uint8_t
+	{
+		// The message has no special properties.
+		FLAG_NONE = 0,
+
+		// The message was set by a v4 or earlier server.
+		FLAG_COMPAT = 1,
+
+		// The message comes from <oper:swhois>.
+		FLAG_OPER_CONFIG = 2,
+
+		// The message is only visible by opers with the users/auspex privilege.
+		FLAG_OPER_ONLY = 4,
+
+		// The message was set by a server and can not be removed by an operator.
+		FLAG_SERVER_SET = 8,
+	};
+
+	// The flags that apply to this entry.
+	uint8_t flags = FLAG_NONE;
+
+	// Where to prioritize this entry in the output.
+	time_t priority = ServerInstance->Time();
+
+	// The swhois message.
+	std::string message;
+
+	// The tag for referencing this message in S2S.
+	std::string tag;
+
+	bool operator <(const SWhois& other) const
+	{
+		return std::tie(priority, tag, message, other.flags)
+			< std::tie(other.priority, other.tag, other.message, other.flags);
+	}
+
+	std::string GetFlags() const
+	{
+		std::string flagstr;
+		if (this->flags & FLAG_COMPAT)
+			flagstr.push_back('c');
+		if (this->flags & FLAG_OPER_CONFIG)
+			flagstr.push_back('o');
+		if (this->flags & FLAG_OPER_ONLY)
+			flagstr.push_back('O');
+		if (this->flags & FLAG_SERVER_SET)
+			flagstr.push_back('s');
+		if (flagstr.empty())
+			flagstr.push_back('*');
+		return flagstr;
+	}
+
+	void ParseFlags(const std::string& flagstr)
+	{
+		this->flags = FLAG_NONE;
+		if (flagstr.find('o') != std::string::npos)
+			this->flags |= FLAG_OPER_CONFIG;
+		if (flagstr.find('O') != std::string::npos)
+			this->flags |= FLAG_OPER_ONLY;
+		if (flagstr.find('s') != std::string::npos)
+			this->flags |= FLAG_SERVER_SET;
+	}
+
+	std::string SerializeAdd() const
+	{
+		return INSP_FORMAT("+ @{} {} {} :{}", this->tag, this->GetFlags(),
+			this->priority, this->message);
+	}
+
+	std::string SerializeDel() const
+	{
+		if (this->tag.empty())
+			return INSP_FORMAT("- :{}", this->message);
+		else
+			return INSP_FORMAT("- @{}", this->tag);
+	}
+};
+
+using SWhoisList = std::vector<SWhois>;
+
+using SWhoisExtItem = SimpleExtItem<SWhoisList>;
+
+namespace
+{
+	static SWhois& AddSWhois(SWhoisExtItem& swhoisext, User* user, time_t priority, const std::string& msg)
+	{
+		auto* swhoislist = swhoisext.Get(user);
+		if (!swhoislist)
+		{
+			swhoislist = new SWhoisList();
+			swhoisext.Set(user, swhoislist);
+		}
+
+		// If the message is empty we use a space to avoid client formatting issues.
+		SWhois swhois;
+		swhois.message = msg.empty() ? " " : msg;
+		if (priority)
+			swhois.priority = priority;
+
+		// Insert sorted so we get the right order on iteration.
+		auto pos = std::upper_bound(swhoislist->begin(), swhoislist->end(), swhois);
+		return *swhoislist->insert(pos, swhois);
+	}
+
+	static bool DelSWhois(SWhoisExtItem& swhoisext, User* user, std::function<bool(const SWhois&)> predicate, bool from_network = false)
+	{
+		auto* swhoislist = swhoisext.Get(user);
+		if (!swhoislist)
+			return false; // Nothing to delete.
+
+		auto it = std::remove_if(swhoislist->begin(), swhoislist->end(), [&from_network, &predicate](const SWhois& swhois) {
+			if (!from_network && (swhois.flags & SWhois::FLAG_SERVER_SET))
+				return false;
+			return predicate(swhois);
+		});
+		if (it == swhoislist->end())
+			return false; // Nothing deleted.
+
+		if (!from_network)
+		{
+			for (auto sit = it; sit != swhoislist->end(); ++sit)
+			{
+				if (sit->flags & SWhois::FLAG_COMPAT)
+					ServerInstance->PI->SendMetadata(user, "swhois", "");
+				else
+					ServerInstance->PI->SendMetadata(user, "specialwhois", sit->SerializeDel());
+			}
+		}
+
+		swhoislist->erase(it, swhoislist->end());
+		if (swhoislist->empty())
+			swhoisext.Unset(user);
+		return true;
+	}
+}
+
+class CommandSWhois final
+	: public SplitCommand
+{
+public:
+	SWhoisExtItem swhoisext;
+
+private:
+	IRCv3::Replies::Fail failrpl;
+	IRCv3::Replies::Note noterpl;
+	IRCv3::Replies::CapReference stdrplcap;
+
+	CmdResult DoAdd(LocalUser* source, User* target, const Params& parameters)
+	{
+		if (parameters.size() < 3)
+		{
+			TellNotEnoughParameters(source, parameters);
+			return CmdResult::FAILURE;
+		}
+
+		time_t priority = 0;
+		if (parameters.size() > 3 && parameters[2].find_first_not_of("0123456789+-") == std::string::npos)
+			priority = ConvToNum<time_t>(parameters[2]);
+
+		auto& swhois = AddSWhois(swhoisext, target, priority, parameters.back());
+		ServerInstance->PI->SendMetadata(target, "specialwhois", swhois.SerializeAdd());
+
+		noterpl.SendIfCap(source, stdrplcap, this, "ENTRY_ADDED", target->nick, INSP_FORMAT("Added special whois for {}: {}",
+			target->nick, swhois.message));
+		return CmdResult::SUCCESS;
+	}
+
+	CmdResult DoClear(LocalUser* source, User* target, const Params& parameters)
+	{
+		if (DelSWhois(swhoisext, target, [](const SWhois& swhois) { return true; }))
+		{
+			noterpl.SendIfCap(source, stdrplcap, this, "LIST_CLEARED", target->nick, INSP_FORMAT("Special whois list for {} has been cleared.",
+				target->nick));
+		}
+		else
+		{
+			failrpl.SendIfCap(source, stdrplcap, this, "LIST_EMPTY", target->nick, INSP_FORMAT("Special whois list for {} is already empty!",
+				target->nick));
+		}
+		return CmdResult::SUCCESS;
+	}
+
+	CmdResult DoDel(LocalUser* source, User* target, const Params& parameters)
+	{
+		if (parameters.size() < 3)
+		{
+			TellNotEnoughParameters(source, parameters);
+			return CmdResult::FAILURE;
+		}
+
+		auto deleted = false;
+		const auto& msg = parameters[2];
+		if (msg.find_first_not_of("0123456789") == std::string::npos)
+		{
+			size_t currentidx = 0;;
+			const auto idx = ConvToNum<size_t>(msg);
+			deleted = DelSWhois(swhoisext, target, [&currentidx, idx](const SWhois& swhois) {
+				return ++currentidx == idx;
+			});
+		}
+		if (!deleted)
+		{
+			deleted = DelSWhois(swhoisext, target, [&msg](const SWhois& swhois) {
+				return msg == swhois.message;
+			});
+		}
+
+		if (deleted)
+		{
+			noterpl.SendIfCap(source, stdrplcap, this, "ENTRY_DELETED", target->nick,
+				"The special whois message you specified has been deleted.");
+		}
+		else
+		{
+			failrpl.SendIfCap(source, stdrplcap, this, "LIST_EMPTY", target->nick,
+				"The special whois message you specified does not exist!");
+		}
+		return CmdResult::SUCCESS;
+	}
+
+	CmdResult DoList(LocalUser* source, User* target, const Params& parameters)
+	{
+		auto* swhoislist = swhoisext.Get(target);
+		if (!swhoislist || swhoislist->empty())
+		{
+			failrpl.SendIfCap(source, stdrplcap, this, "LIST_EMPTY", target->nick, INSP_FORMAT("Special whois list for {} is empty!",
+				target->nick));
+			return CmdResult::SUCCESS;
+		}
+
+		size_t index = 0;
+		for (const auto& swhois : *swhoislist)
+		{
+			noterpl.SendIfCap(source, stdrplcap, this, "LIST_ENTRY", target->nick, INSP_FORMAT("#{}: {} (priority: {}, flags: {})",
+				++index, swhois.message, swhois.priority, swhois.GetFlags()));
+		}
+
+		return CmdResult::SUCCESS;
+	}
+
+public:
+	CommandSWhois(Module* mod)
+		: SplitCommand(mod, "SWHOIS", 2, 4)
+		, swhoisext(mod, "swhois", ExtensionType::USER)
+		, failrpl(mod)
+		, noterpl(mod)
+		, stdrplcap(mod)
+	{
+		access_needed = CmdAccess::OPERATOR;
+		allow_empty_last_param = true;
+		syntax = {
+			"ADD <nick> [<priority>] :<message>",
+			"CLEAR <nick>",
+			"DEL <nick> :<index|message>",
+			"LIST <nick>",
+		};
+		translation = { TR_TEXT, TR_NICK, TR_TEXT, TR_TEXT };
+	}
+
+	CmdResult HandleLocal(LocalUser* user, const Params& parameters) override
+	{
+		auto* target = ServerInstance->Users.Find(parameters[1]);
+		if (!target)
+		{
+			user->WriteNumeric(Numerics::NoSuchNick(parameters[1]));
+			return CmdResult::FAILURE;
+		}
+
+		const auto& subcmd = parameters[0];
+		if (irc::equals(subcmd, "ADD"))
+			return DoAdd(user, target, parameters);
+		else if (irc::equals(subcmd, "CLEAR"))
+			return DoClear(user, target, parameters);
+		else if (irc::equals(subcmd, "DEL"))
+			return DoDel(user, target, parameters);
+		else if (irc::equals(subcmd, "LIST"))
+			return DoList(user, target, parameters);
+		else
+		{
+			failrpl.SendIfCap(user, stdrplcap, this, "UNKNOWN_COMMAND", subcmd, INSP_FORMAT("Invalid {} subcommand: {}",
+				this->name, subcmd));
+
+			if (ServerInstance->Config->SyntaxHints)
+			{
+				for (const auto& syntaxline : this->syntax)
+					user->WriteNumeric(RPL_SYNTAX, name, syntaxline);
+			}
+			return CmdResult::FAILURE;
+		}
+		return CmdResult::SUCCESS;
+	}
+};
+
+class ModuleSWhois final
+	: public Module
+	, public ServerProtocol::SyncEventListener
+	, public Whois::LineEventListener
+{
+private:
+	CommandSWhois cmdswhois;
+	UserModeReference hideopermode;
+
+	void DecodeSWhoisAdd(User* user, irc::tokenstream& stream)
+	{
+		std::string tag, flags, priority, message;
+		if (!stream.GetMiddle(tag) || !stream.GetMiddle(flags) || !stream.GetMiddle(priority) || !stream.GetTrailing(message))
+			return; // Malformed.
+
+		// If a tag was specified we might be replacing an existing entry.
+		if (tag.length() > 1 && tag[0] == '@')
+		{
+			tag.erase(0, 1);
+			DelSWhois(cmdswhois.swhoisext, user, [&tag](const SWhois& swhois) {
+				return swhois.tag == tag;
+			}, true);
+		}
+
+		auto& swhois = AddSWhois(cmdswhois.swhoisext, user, ConvToNum<time_t>(priority), message);
+		swhois.tag = tag;
+		swhois.ParseFlags(flags);
+	}
+
+	void DecodeSWhoisDel(User* user, irc::tokenstream& stream)
+	{
+		std::string message;
+		if (!stream.GetTrailing(message))
+			return; // Malformed.
+
+		auto deleted = false;
+		if (message.length() > 1 && message[0] == '@')
+		{
+			auto tag = message.substr(1);
+			deleted = DelSWhois(cmdswhois.swhoisext, user, [&tag](const SWhois& swhois) {
+				return swhois.tag == tag;
+			}, true);
+		}
+		if (!deleted)
+		{
+			DelSWhois(cmdswhois.swhoisext, user, [&message](const SWhois& swhois) {
+				return swhois.message == message;
+			}, true);
+		}
+	}
+
+	void DecodeSWhoisLegacy(User* user, const std::string& message)
+	{
+		// Delete the previous compatibility swhois message and optionally replace it.
+		DelSWhois(cmdswhois.swhoisext, user, [](const SWhois& swhois) { return swhois.flags & SWhois::FLAG_COMPAT; });
+		if (!message.empty())
+			AddSWhois(cmdswhois.swhoisext, user, 0, message);
+	}
+
+public:
+	ModuleSWhois()
+		: Module(VF_OPTCOMMON, "Adds the /SWHOIS command which adds custom messages to a user's WHOIS response.")
+		, ServerProtocol::SyncEventListener(this)
+		, Whois::LineEventListener(this)
+		, cmdswhois(this)
+		, hideopermode(this, "hideoper")
+	{
+	}
+
+	void OnDecodeMetadata(Extensible* target, const std::string& extname, const std::string& extvalue) override
+	{
+		if (!target || target->extype != ExtensionType::USER)
+			return; // Not for us
+
+		auto* user = static_cast<User*>(target);
+		if (irc::equals(extname, "swhois"))
+			DecodeSWhoisLegacy(user, extvalue);
+		else if (irc::equals(extname, "specialwhois"))
+		{
+			irc::tokenstream msgstream(extvalue);
+
+			std::string operation;
+			if (!msgstream.GetMiddle(operation))
+				return; // Malformed.
+
+			if (irc::equals(operation, "+"))
+				DecodeSWhoisAdd(user, msgstream);
+
+			else if (irc::equals(operation, "-"))
+				DecodeSWhoisDel(user, msgstream);
+		}
+	}
+
+	void OnPostOperLogin(User* user, bool automatic) override
+	{
+		if (!IS_LOCAL(user))
+			return;
+
+		std::string swhoisstr;
+		if (!user->oper->GetConfig()->readString("swhois", swhoisstr, true) || swhoisstr.empty())
+			return;
+
+		irc::sepstream msgstream(swhoisstr, '\n', true);
+		for (std::string msg; msgstream.GetToken(msg); )
+		{
+			auto& swhois = AddSWhois(cmdswhois.swhoisext, user, 0, msg);
+			swhois.flags = SWhois::FLAG_OPER_CONFIG;
+			ServerInstance->PI->SendMetadata(user, "specialwhois", swhois.SerializeAdd());
+		}
+	}
+
+	void OnPostOperLogout(User* user, const std::shared_ptr<OperAccount>& oper) override
+	{
+		if (!IS_LOCAL(user))
+			return;
+
+		// Remove any swhois entries added by the oper block.
+		DelSWhois(cmdswhois.swhoisext, user, [](const SWhois& swhois) { return swhois.flags & SWhois::FLAG_OPER_CONFIG; });
+	}
+
+	void OnSyncUser(User* user, Server& server) override
+	{
+		auto* swhoislist = cmdswhois.swhoisext.Get(user);
+		if (!swhoislist)
+			return;
+
+		for (const auto& swhois : *swhoislist)
+		{
+			if (swhois.flags & SWhois::FLAG_COMPAT)
+				server.SendMetadata(user, "swhois", swhois.message);
+			else
+				server.SendMetadata(user, "specialwhois", swhois.SerializeAdd());
+		}
+	}
+
+	ModResult OnWhoisLine(Whois::Context& whois, Numeric::Numeric& numeric) override
+	{
+		// We use this and not OnWhois because this triggers for remote users too.
+		if (numeric.GetNumeric() != RPL_WHOISSERVER)
+			return MOD_RES_PASSTHRU;
+
+		auto* swhoislist = cmdswhois.swhoisext.Get(whois.GetTarget());
+		if (!swhoislist)
+			return MOD_RES_PASSTHRU;
+
+		const auto has_priv = whois.GetSource()->HasPrivPermission("users/auspex");
+		for (const auto& swhois : *swhoislist)
+		{
+			if (swhois.flags & SWhois::FLAG_OPER_CONFIG && whois.GetTarget()->IsModeSet(hideopermode))
+				continue; // Avoid exposing hidden opers.
+
+			if (swhois.flags & SWhois::FLAG_OPER_ONLY && !has_priv)
+				continue; // This swhois is only available to opers.
+
+			whois.SendLine(RPL_WHOISSPECIAL, swhois.message);
+		}
+		return MOD_RES_PASSTHRU;
+	}
+};
+
+MODULE_INIT(ModuleSWhois)
