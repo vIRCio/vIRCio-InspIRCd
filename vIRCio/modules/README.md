@@ -1,65 +1,53 @@
 # Módulos próprios da Rede vIRCio
 
-Os módulos exclusivos da Rede vIRCio devem ser implementados aqui sem
-alterar diretamente o core oficial do InspIRCd.
+Os módulos próprios da vIRCio são implementados sem alterar o core
+upstream do InspIRCd.
 
-Módulos planejados:
-
-## m_vircio_oper.cpp
-
-Responsável pelas funcionalidades administrativas específicas da rede.
-
-Previsto inicialmente:
-
-- Services Root: +N
-- Services Administrator: +A
-- Services Operator: +O
-- comportamento equivalente ao antigo /IRCOPS, quando necessário
-
-## m_vircio_zombie.cpp
-
-Port do antigo modo Zombie +Z.
-
-O comportamento histórico será reavaliado antes da implementação.
-
-## m_vircio_invisible.cpp
-
-Port da funcionalidade histórica de invisibilidade +Q.
-
-O comportamento será comparado com os recursos atuais do InspIRCd 4
-antes da implementação.
-
-## cmd_vircio_pretenduser.cpp
-
-Port do comando PRETENDUSER utilizado pela Rede vIRCio.
-
-## m_vircio_serverprotect.cpp
-
-Substituto da personalização histórica feita no antigo servprotect.
-
-A implementação deverá considerar a integração com o Anope atual e
-evitar alterações diretas em módulos oficiais.
-
-## Módulos contrib
-
-Módulos mantidos pelo projeto `inspircd-contrib` não ficam nesta pasta.
-
-Eles são instalados pelo `modulemanager` no diretório:
+Os sources compiláveis ficam em:
 
     src/modules/
 
-e são versionados junto ao source utilizado pela vIRCio.
+## Implementados
 
-Esta pasta `vIRCio/modules/` é reservada exclusivamente aos módulos
-próprios da Rede vIRCio.
+### m_vircio_ircops.cpp
 
-## Regra de desenvolvimento
+Fornece `/IRCOPS` e exibe IRCops e Helpers da rede conforme OperType,
+nível administrativo e regras de visibilidade.
 
-Não modificar arquivos do core oficial para implementar funcionalidades
-da vIRCio.
+### m_vircio_root.cpp
 
-Sempre que possível:
+Protege operadores `Services Root` contra ações administrativas forçadas
+de operadores sem autorização equivalente.
 
-1. utilizar primeiro funcionalidade nativa do InspIRCd;
-2. depois avaliar módulos contrib;
-3. somente então criar módulo próprio vIRCio.
+### m_vircio_pretenduser.cpp
+
+Fornece `PRETENDUSER`, permitindo execução administrativa de uma linha
+IRC em nome de outro usuário, com controles de permissão e hierarquia.
+
+### m_vircio_invisible.cpp
+
+Fornece o usermode `+Q`, usado por IRCops humanos para ocultar sua
+presença em canais de usuários sem `users/auspex`.
+
+### m_vircio_zombie.cpp
+
+Fornece o usermode `+Z` e a quarentena Zombie/Gringo.
+
+Enquanto `+Z` está ativo, o usuário fica restrito ao canal de quarentena
+e aos Services. A integração positiva com Anope/ZombieGringo será
+homologada separadamente.
+
+## Desenvolvimento
+
+Ordem de preferência:
+
+1. recurso nativo do InspIRCd;
+2. módulo contrib mantido;
+3. módulo próprio da vIRCio.
+
+Não portar código legado linha por linha.
+
+Reimplementar o comportamento necessário usando a API atual do
+InspIRCd, mantendo o código preparado para futura migração para v5.
+
+Alterações diretas no core upstream devem ser evitadas.

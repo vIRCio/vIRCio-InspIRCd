@@ -1,56 +1,34 @@
 # Instalação do vIRCio-InspIRCd 4
 
-Este documento descreve o procedimento utilizado pela Rede vIRCio para
-preparar, compilar e instalar o InspIRCd 4.
+Procedimento para preparar, compilar e instalar o InspIRCd utilizado pela
+Rede vIRCio.
 
-A base atual do projeto é:
+Base atual:
 
     InspIRCd 4.12.1
+    branch: v4
+    tag: vIRCio-baseline-v4.12.1
 
-Branch:
+Ambiente de referência:
 
-    v4
+    Debian GNU/Linux 13 (Trixie)
+    usuário: vircio
 
-Baseline homologada:
-
-    vIRCio-baseline-v4.12.1
-
-
-## Repositórios
-
-Projeto oficial InspIRCd:
-
-https://github.com/inspircd/inspircd
-
-Fork da Rede vIRCio:
-
-https://github.com/vIRCio/vIRCio-InspIRCd-v2
-
-
-## Sistema utilizado
-
-A instalação atual da Rede vIRCio utiliza Debian GNU/Linux.
-
-Os exemplos deste documento consideram o usuário:
-
-    vircio
-
-Código fonte:
+Source:
 
     /home/vircio/vIRCio-InspIRCd-v2
 
-Instalação:
+Runtime:
 
     /home/vircio/inspircd
 
 
 ## Dependências
 
-Atualize os índices dos pacotes:
+Instale as ferramentas de compilação e as bibliotecas exigidas pelos extras
+utilizados pela vIRCio:
 
     sudo apt update
-
-Instale as dependências:
 
     sudo apt install -y \
         git \
@@ -58,216 +36,189 @@ Instale as dependências:
         build-essential \
         pkg-config \
         perl \
-        libwww-perl \
-        libio-socket-ssl-perl \
+        openssl \
         libssl-dev \
         libpcre2-dev \
         libmaxminddb-dev
 
+Essas dependências atendem aos extras atualmente preparados:
+
+    ssl_openssl
+    regex_pcre2
+    geo_maxmind
+    sslrehashsignal
+
+O InspIRCd 4 requer compilador com suporte a C++17 e Perl 5.26 ou superior.
 
 
-`libwww-perl` e `libio-socket-ssl-perl` são utilizados pelo
-`modulemanager` para consultar e baixar módulos contrib através de HTTPS.
+### Module Manager
+
+Os contrib homologados pela vIRCio já são versionados no repositório e não
+precisam ser baixados novamente durante uma instalação normal.
+
+Caso seja necessário usar `./modulemanager` para adicionar ou atualizar
+contribs, instale também:
+
+    sudo apt install -y \
+        libwww-perl \
+        libio-socket-ssl-perl
 
 
 ## Clonar o repositório
 
-Entre no diretório do usuário:
-
     cd /home/vircio
 
-Clone o repositório:
-
-    git clone git@github.com:vIRCio/vIRCio-InspIRCd-v2.git
-
-Entre no source:
+    git clone --branch v4 \
+        git@github.com:vIRCio/vIRCio-InspIRCd-v2.git
 
     cd /home/vircio/vIRCio-InspIRCd-v2
 
-Selecione a branch atual:
 
-    git checkout v4
+## Extras
 
+A vIRCio compila explicitamente:
 
-## Módulos contrib
+    regex_pcre2
+    geo_maxmind
+    ssl_openssl
+    sslrehashsignal
 
-Módulos de terceiros mantidos pelo projeto `inspircd-contrib` podem ser
-instalados através do `modulemanager` incluído no source do InspIRCd.
+Configure a compilação:
 
-O `modulemanager` utiliza Perl e HTTPS. Por isso são necessárias as
-dependências:
+    ./configure \
+        --prefix=/home/vircio/inspircd \
+        --disable-auto-extras \
+        --enable-extras "regex_pcre2 geo_maxmind ssl_openssl sslrehashsignal"
 
-    libwww-perl
-    libio-socket-ssl-perl
-
-Para listar os módulos disponíveis:
-
-    ./modulemanager list
-
-Para instalar um módulo:
-
-    ./modulemanager install <modulo>
-
-Exemplo:
-
-    ./modulemanager install clones
-
-É possível instalar vários módulos de uma vez:
-
-    ./modulemanager install \
-        clones \
-        stats_unlinked \
-        jumpserver \
-        lockserv \
-        xlinetools
-
-Depois de adicionar módulos contrib, compile e instale novamente:
-
-    make -j5 install
-
-Os sources baixados pelo `modulemanager` ficam em:
-
-    src/modules/
-
-A Rede vIRCio versiona os módulos contrib utilizados para que a versão
-homologada da rede permaneça reproduzível.
-
-O arquivo `.modulemanager` é utilizado localmente pelo gerenciador e não
-é versionado.
-
-Módulos próprios da Rede vIRCio permanecem separados em:
-
-    vIRCio/modules/
-
-
-## Extras utilizados pela vIRCio
-
-Antes da configuração principal, habilite os módulos extras utilizados
-pela Rede vIRCio:
-
-    ./configure --enable-extras regex_pcre2,geo_maxmind,ssl_openssl,sslrehashsignal
-
-Atualmente são preparados:
-
-- regex_pcre2
-- geo_maxmind
-- ssl_openssl
-- sslrehashsignal
-
-O fato de um extra estar compilado não significa necessariamente que
-ele já esteja ativo na configuração da rede.
-
-
-## Configurar a compilação
-
-Configure o prefixo da instalação:
-
-    ./configure --prefix=/home/vircio/inspircd
+Nem todo extra compilado precisa estar ativo na configuração da rede.
 
 
 ## Compilar e instalar
 
-Compile e instale:
+    make -j5 install
+
+
+## Contribs
+
+Os módulos contrib utilizados pela vIRCio ficam versionados em
+`src/modules/` junto com o source homologado.
+
+Os módulos abaixo são os sources oficiais para InspIRCd 4 mantidos em
+`inspircd/inspircd-contrib`, sem modificações locais da Rede vIRCio:
+
+    clones
+    stats_unlinked
+    jumpserver
+    lockserv
+    xlinetools
+    defaulttopic
+    autoaway
+    hideidle
+    autodrop
+    tgchange
+    swhois_ext
+
+Também é mantido no source, mas não está ativo na configuração atual:
+
+    delayuse
+
+O `swhois_ext` já contém upstream a correção dos comandos CLEAR e DEL
+reportada pela vIRCio e não possui patch local.
+
+Se um contrib precisar de alteração específica da Rede vIRCio, a
+modificação deve ser identificada explicitamente como local e documentada.
+
+O `modulemanager` só é necessário para adicionar ou atualizar contribs:
+
+    ./modulemanager list
+    ./modulemanager install <modulo>
+    ./modulemanager upgrade
+
+Após alteração:
 
     make -j5 install
 
 
-## Verificar a versão
+## Módulos próprios vIRCio
 
-Execute:
+Os módulos compiláveis próprios da rede ficam em:
+
+    src/modules/m_vircio_*.cpp
+
+Atualmente:
+
+    m_vircio_ircops.cpp
+    m_vircio_root.cpp
+    m_vircio_pretenduser.cpp
+    m_vircio_invisible.cpp
+    m_vircio_zombie.cpp
+
+A documentação específica desses módulos fica em:
+
+    vIRCio/modules/
+
+
+## Verificar a instalação
+
+Versão:
 
     /home/vircio/inspircd/bin/inspircd --version
 
-Resultado esperado:
+Esperado:
 
     InspIRCd-4.12.1
 
+Diretórios:
 
-## Diretórios
-
-Código fonte:
-
-    /home/vircio/vIRCio-InspIRCd-v2
-
-Instalação:
-
-    /home/vircio/inspircd
-
-Configuração:
-
-    /home/vircio/inspircd/conf
-
-Módulos:
-
-    /home/vircio/inspircd/modules
-
-Dados:
-
-    /home/vircio/inspircd/data
-
-Logs:
-
-    /home/vircio/inspircd/logs
+    source:   /home/vircio/vIRCio-InspIRCd-v2
+    runtime:  /home/vircio/inspircd
+    config:   /home/vircio/inspircd/conf
+    modules:  /home/vircio/inspircd/modules
+    data:     /home/vircio/inspircd/data
+    logs:     /home/vircio/inspircd/logs
 
 
-## Configuração da Rede vIRCio
+## Configuração vIRCio
 
-Os templates versionados ficam em:
+Templates e arquivos comuns versionados:
 
     /home/vircio/vIRCio-InspIRCd-v2/vIRCio/conf
 
-A configuração operacional fica em:
+Configuração operacional:
 
     /home/vircio/inspircd/conf
 
-Os arquivos comuns da Rede vIRCio devem ser copiados a partir dos
-templates versionados.
-
-Arquivos específicos do servidor devem ser ajustados individualmente.
+Arquivos específicos de cada IRCd devem ser criados a partir dos respectivos
+templates.
 
 Exemplos:
 
-    ircd.conf.example
-    vIRCio.roots.example
+    ircd.conf.example  -> ircd.conf
+    vIRCio.roots.example -> vIRCio.roots
 
-devem dar origem respectivamente a:
-
-    ircd.conf
-    vIRCio.roots
-
-Nunca copie placeholders diretamente para produção sem revisar os
-valores específicos do servidor.
+Nunca copie placeholders para produção sem revisar os valores do servidor.
 
 
 ## Segredos
 
-Os templates do Git não contêm os segredos reais.
+Nunca versionar:
 
-Nunca versione:
+    senhas e hashes reais
+    cloak keys
+    credenciais entre IRCds
+    credenciais WEBIRC
+    tokens
+    chaves privadas TLS
+    outros secrets da infraestrutura
 
-- cloakKey real;
-- hashes reais de OPER;
-- senhas entre IRCds;
-- credenciais WEBIRC;
-- tokens;
-- chaves privadas TLS;
-- certificados privados;
-- outros secrets da infraestrutura.
-
-Os valores reais devem ser configurados diretamente no ambiente de
-execução.
+Os valores reais pertencem apenas ao ambiente operacional.
 
 
-## Certificado TLS de laboratório
+## TLS de laboratório
 
-Durante desenvolvimento pode ser utilizado um certificado
-autoassinado.
-
-Crie o diretório:
+Para desenvolvimento pode ser usado certificado autoassinado:
 
     mkdir -p /home/vircio/inspircd/conf/certs
-
-Exemplo:
 
     openssl req \
         -x509 \
@@ -278,64 +229,42 @@ Exemplo:
         -keyout /home/vircio/inspircd/conf/certs/irc-dev.key \
         -out /home/vircio/inspircd/conf/certs/irc-dev.crt
 
-Ajuste as permissões da chave privada:
+    chmod 600 \
+        /home/vircio/inspircd/conf/certs/irc-dev.key
 
-    chmod 600 /home/vircio/inspircd/conf/certs/irc-dev.key
-
-Em produção devem ser utilizados certificados apropriados para os
-nomes reais dos servidores, por exemplo certificados Let's Encrypt.
+Em produção devem ser utilizados certificados apropriados aos nomes reais dos
+servidores.
 
 
-## Iniciar o InspIRCd
+## Controle do daemon
 
-Utilize sempre o script de controle instalado:
+Usar sempre:
 
     /home/vircio/inspircd/inspircd start
-
-
-## Verificar o status
-
     /home/vircio/inspircd/inspircd status
-
-
-## Rehash
-
-Depois de alterações de configuração:
-
     /home/vircio/inspircd/inspircd rehash
-
-
-## Parar o InspIRCd
-
     /home/vircio/inspircd/inspircd stop
 
-
-## Reiniciar
-
-Quando for necessário um restart completo:
+Para restart:
 
     /home/vircio/inspircd/inspircd stop
-
     /home/vircio/inspircd/inspircd start
 
-Evite iniciar diretamente:
+Não iniciar o daemon diretamente por:
 
     /home/vircio/inspircd/bin/inspircd
 
-O binário não deve ser utilizado como substituto do script de controle
-da instalação.
 
+## Portas
 
-## Portas atualmente utilizadas
+Configuração atual da vIRCio:
 
-A configuração padrão da Rede vIRCio utiliza:
+    6667    IRC
+    6697    IRC/TLS
+    7002    WSS
+    7007    link IRCd/TLS
 
-    6667    IRC sem TLS
-    6697    IRC com TLS
-    7002    WebSocket seguro / WSS
-    7007    links entre servidores via TLS
-
-As portas podem ser alteradas na configuração específica de cada node.
+Os valores podem variar por node.
 
 
 ## Verificação rápida
@@ -350,38 +279,28 @@ Listeners:
 
 Log:
 
-    tail -n 100 /home/vircio/inspircd/logs/inspircd.log
-
-
-## Atualizações
-
-O core upstream deve permanecer o mais próximo possível do InspIRCd
-oficial.
-
-A ordem de preferência para funcionalidades específicas da Rede vIRCio
-é:
-
-1. recurso nativo do InspIRCd;
-2. módulo contrib;
-3. módulo próprio da vIRCio.
-
-Alterações diretas no core upstream devem ser evitadas.
+    tail -n 100 \
+        /home/vircio/inspircd/logs/inspircd.log
 
 
 ## Referências
 
-README do fork:
+Projeto oficial:
 
+    https://github.com/inspircd/inspircd
+
+Fork vIRCio:
+
+    https://github.com/vIRCio/vIRCio-InspIRCd-v2
+
+Documentação:
+
+    https://docs.inspircd.org/4/
+
+Arquivos do projeto:
+
+    AGENTS.md
     README.md
-
-README original do InspIRCd:
-
     README.inspircd.md
-
-Configurações da Rede vIRCio:
-
     vIRCio/conf/
-
-Módulos próprios:
-
     vIRCio/modules/
