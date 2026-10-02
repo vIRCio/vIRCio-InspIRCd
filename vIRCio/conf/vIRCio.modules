@@ -38,8 +38,7 @@
 
 <sslmodes extbanoperonly="yes">
 
-# STARTTLS nao utilizado atualmente.
-# A rede utiliza listener TLS dedicado.
+# Habilita TLS em listener plaintext.
 #<module name="starttls">
 
 
@@ -62,7 +61,7 @@
 
 
 # ==========================================================
-# Core / comandos gerais
+# Comandos e recursos gerais
 # ==========================================================
 
 <module name="abbreviation">
@@ -76,7 +75,7 @@
     allowbots="yes">
 
 
-# Aliases proprios da Rede vIRCio.
+# Aliases em portugues para comandos comuns.
 
 <alias text="REGRAS" replace="RULES">
 <alias text="APELIDO" replace="NICK :$2-">
@@ -111,10 +110,8 @@
 <module name="ircv3_servertime">
 <module name="ircv3_utf8only">
 
-# STS sera utilizado em producao depois que os certificados
-# Let's Encrypt estiverem instalados.
-#
-# ATIVAR
+# Exige TLS para conexoes subsequentes ao host configurado.
+# Requer certificado TLS publico valido.
 #<module name="ircv3_sts">
 #<sts
 #    host="*.vircio.net"
@@ -124,7 +121,7 @@
 
 
 # ==========================================================
-# SASL / Accounts / Services
+# Contas, Services e autenticacao SASL.
 # ==========================================================
 
 <module name="account">
@@ -141,7 +138,7 @@
 
 
 # ==========================================================
-# WebIRC / WebSocket
+# Gateways WebIRC e clientes WebSocket.
 # ==========================================================
 
 <module name="gateway">
@@ -154,51 +151,41 @@
 
 <wsorigin allow="https://*.vircio.net">
 
-#
-# Os gateways WEBIRC serao adicionados quando definirmos
-# IPs e credenciais.
-#
-# Exemplo:
-#
+# Gateways WEBIRC autorizados exigem origem e credenciais definidas.
 #<gateway
 #    type="webirc"
 #    password="HASH_BCRYPT"
 #    hash="bcrypt"
 #    mask="127.0.0.1">
 #
-# O segundo parametro enviado pelo WEBIRC define o nome do
-# gateway usado pelas connect classes, por exemplo KiwiIRC.
+# O nome WEBIRC seleciona a connect class correspondente.
 
 
 # ==========================================================
-# Contrib - Experiencia do usuario / Seguranca
+# Contrib: experiencia do usuario e protecao.
 # ==========================================================
 
-# Define um topic padrao quando um novo canal e criado.
+# Aplica <options:defaulttopic> a canais novos.
 <module name="defaulttopic">
 
-# Marca automaticamente usuarios inativos como AWAY.
-# Verifica a cada 15 minutos e marca AWAY apos 1 hora de inatividade.
+# Marca usuarios inativos como AWAY apos uma hora.
 <module name="autoaway">
 
 <autoaway
     checkperiod="15m"
     idleperiod="1h"
-    message="Ausente por inatividade">
+    message="Away due to inactivity. Ausente por inatividade.">
 
-# Usermode +a:
-# oculta idle e signon time no WHOIS para usuarios normais.
+# Usermode +a oculta idle e signon no WHOIS comum.
 <module name="hideidle">
 
-# Derruba conexoes ainda nao registradas que enviem comandos
-# tipicos de HTTP/scanners para as portas IRC.
+# Desconecta clientes nao registrados que enviam comandos HTTP/scanner.
 <module name="autodrop">
 
 <autodrop
     commands="CONNECT DELETE GET HEAD OPTIONS PATCH POST PUT TRACE">
 
-# Limita mudancas rapidas entre muitos destinos diferentes.
-# Mantem ate 20 destinos e 10 destinos de resposta recentes.
+# Limita mudancas rapidas entre muitos destinos para reduzir spam.
 <module name="tgchange">
 
 <tgchange
@@ -206,8 +193,16 @@
     reply="10">
 
 
+# Impoe atraso para reutilizacao de nicks e canais recentemente liberados.
+# <module name="delayuse">
+#
+# <delay
+#     chan="30s"
+#     nick="30s">
+
+
 # ==========================================================
-# Canais / modos
+# Canais, modos e protecoes associadas.
 # ==========================================================
 
 <module name="anticaps">
@@ -373,7 +368,7 @@
     affectsopers="no"
     hideservices="yes">
 
-# Equivalente moderno ao antigo hidemodes="eI".
+# Oculta listas de ban exception e invite exception de usuarios sem rank.
 <hidelist
     mode="banexception"
     rank="20000">
@@ -413,8 +408,7 @@
 # Connect / protecao contra conexoes
 # ==========================================================
 
-# Autojoin historico da vIRCio.
-# Reativar caso voltemos a utilizar <autojoin>.
+# Entra automaticamente em canais configurados no connect class.
 #<module name="conn_join">
 <module name="conn_umodes">
 <module name="connectban">
@@ -427,16 +421,16 @@
     ipv6cidr="64"
     bootwait="2m"
     splitwait="2m"
-    banmessage="Muitas tentativas de conexao. Aguarde antes de conectar novamente.">
+    banmessage="Too many connection attempts. Aguarde antes de conectar novamente.">
 
 <connflood
     period="30s"
     maxconns="15"
     timeout="30s"
-    quitmsg="Estrangulado - Throttled"
+    quitmsg="Connection throttled. Conexao limitada."
     bootwait="2m">
 
-# Nao utilizado.
+# Exige resposta ao PING inicial antes de concluir a conexao.
 #<module name="conn_waitpong">
 
 
@@ -446,30 +440,23 @@
 
 <module name="dnsbl">
 
-# Configuracoes oficiais fornecidas pelo InspIRCd v4.
+# Listas DNSBL mantidas pelo InspIRCd.
 <include file="&dir.example;/providers/dronebl.example.conf">
 <include file="&dir.example;/providers/efnet-rbl.example.conf">
 
 
 # ==========================================================
-# GeoIP
+# Geolocalizacao por IP e recursos dependentes.
 # ==========================================================
 
-# Os modulos ja foram compilados.
-# Serao ativados depois da instalacao/configuracao da base MMDB.
-
-# ATIVAR
+# Requer base GeoIP/MaxMind configurada.
 #<module name="geo_maxmind">
-
-# ATIVAR
 #<module name="geoban">
-
-# ATIVAR
 #<module name="geoclass">
 
 
 # ==========================================================
-# Filter / Regex
+# Filtros globais por expressao regular.
 # ==========================================================
 
 <module name="regex_pcre2">
@@ -481,20 +468,12 @@
     notifyuser="yes"
     warnonselfmsg="yes">
 
-# Regras estaticas da Rede vIRCio.
+# Regras estaticas da Rede vIRCio; warn permite a mensagem e avisa a snomask FILTER.
 <include file="vIRCio.filters" missingokay="yes">
-
-#
-# IMPORTANTE:
-#
-# Na v4 a acao oficial "warn" substitui a antiga
-# customizacao "warningopers" da vIRCio v2.
-# Portanto nao sera necessario alterar m_filter.cpp.
-#
 
 
 # ==========================================================
-# Realname / bans / X-Lines
+# Bans por realname, regex e X-Lines.
 # ==========================================================
 
 <module name="realnameban">
@@ -528,7 +507,7 @@
 
 
 # ==========================================================
-# Canais permanentes
+# Persistencia de canais permanentes.
 # ==========================================================
 
 <module name="permchannels">
@@ -548,7 +527,7 @@
 
 
 # ==========================================================
-# Notify / WATCH / MONITOR
+# Notificacao de disponibilidade de apelidos.
 # ==========================================================
 
 <module name="watch">
@@ -559,23 +538,21 @@
 
 
 # ==========================================================
-# Operadores
+# Comandos e recursos administrativos.
 # ==========================================================
 
 <module name="check">
 
-# /CLONES <limite>
-# Permite aos IRCops visualizar IPs/faixas CIDR com multiplas conexoes.
+# Mostra IPs ou CIDRs com multiplas conexoes.
 <module name="clones">
 
-# Contrib administrativos.
-# /STATS X - mostra servidores configurados que nao estao linkados.
+# Adiciona /STATS X para servidores configurados e nao linkados.
 <module name="stats_unlinked">
-# /JUMPSERVER - redireciona clientes para outro IRCd.
+# Redireciona clientes para outro IRCd com /JUMPSERVER.
 <module name="jumpserver">
-# /LOCKSERV e /UNLOCKSERV - controla novas conexoes.
+# Controla novas conexoes com /LOCKSERV e /UNLOCKSERV.
 <module name="lockserv">
-# XCOPY, XCOUNT, XREMOVE e XSEARCH - ferramentas para X-Lines.
+# Ferramentas XCOPY, XCOUNT, XREMOVE e XSEARCH para X-Lines.
 <module name="xlinetools">
 <module name="chghost">
 <module name="chgident">
@@ -615,7 +592,8 @@
 <module name="setname">
 
 <module name="showwhois">
-<module name="swhois">
+# Substitui SWHOIS nativo com multiplas entradas e ADD/DEL/CLEAR/LIST.
+<module name="swhois_ext">
 
 
 <hostname
@@ -644,13 +622,13 @@
 <showwhois opersonly="no">
 
 
-# OperPrefix nao utilizado atualmente.
+# Adiciona prefixo de canal para IRCops.
 #<module name="operprefix">
 #<operprefix prefix="!">
 
 
 # ==========================================================
-# Help
+# Ajuda e usermode +h para Helpers.
 # ==========================================================
 
 <module name="help">
@@ -660,24 +638,24 @@
     ignorehideoper="no"
     markhelpers="yes">
 
-# ATIVAR / preencher com a versao convertida da v2.
+# Topicos de ajuda da Rede vIRCio.
 <include file="vIRCio.helpop" missingokay="yes">
 
 
 # ==========================================================
-# PassForward
+# Encaminha senha ao Services solicitado durante o registro.
 # ==========================================================
 
 <module name="passforward">
 
 <passforward
     nick="NickServ"
-    forwardmsg="NOTICE %nick% :*** Forwarding password to %nickrequired%"
+    forwardmsg="NOTICE %nick% :*** Forwarding password to %nickrequired%. Encaminhando senha para %nickrequired%."
     cmd="SQUERY %nickrequired% :IDENTIFY %nick% %pass%">
 
 
 # ==========================================================
-# Silence
+# Lista de ignorados no servidor.
 # ==========================================================
 
 <module name="silence">
@@ -688,7 +666,7 @@
 
 
 # ==========================================================
-# UHNAMES
+# Exibe multiplos prefixos e user@host no NAMES.
 # ==========================================================
 
 <module name="multiprefix">
@@ -696,13 +674,12 @@
 
 
 # ==========================================================
-# VHOST
+# VHosts definidos localmente.
 # ==========================================================
 
 <module name="vhost">
 
-# VHosts normais serao administrados pelo HostServ/Anope.
-#
+# Define vhost autenticado por credenciais locais.
 #<vhost
 #    user="usuario"
 #    password="HASH"
@@ -711,13 +688,11 @@
 
 
 # ==========================================================
-# CustomTitle
+# Titulos e vhosts autenticados.
 # ==========================================================
 
 <module name="customtitle">
 
-# ATIVAR apos gerar nova senha bcrypt.
-#
 #<title
 #    name="helper"
 #    password="HASH_BCRYPT"
@@ -728,7 +703,7 @@
 
 
 # ==========================================================
-# SpanningTree
+# Topologia e sincronizacao entre IRCds.
 # ==========================================================
 
 <module name="spanningtree">
@@ -738,58 +713,66 @@
 # Modulos personalizados vIRCio
 # ==========================================================
 
-#
-# Estes modulos existiam na v2 e SERAO utilizados.
-# Permanecem comentados somente ate serem portados para v4.
-#
+# /IRCOPS ordena a equipe e reconhece Helpers nao-oper por +h ou @op/superior
+# nos canais de ajuda; respeita +H e users/auspex.
+<module name="vircio_ircops">
 
-# ATIVAR - portar modulo invisible / umode +Q.
-#<module name="invisible">
+<vircioircops
+    helperlevel="20"
+    helperchannels="#Ajuda #Help #vIRCio">
 
-# ATIVAR - portar modulo IRCOPS / modes Services Root/Admin/Oper.
-#<module name="ircops">
 
-# ATIVAR - portar comando PRETENDUSER.
-#<module name="pretenduser">
+# Protege Services Root humanos com level minimo e privilegio configurado.
+# Deve estar carregado em todos os IRCds da rede.
+<module name="vircio_root">
 
-# ATIVAR - portar funcionalidades proprias da Rede vIRCio,
-# incluindo Zombie/Gringo +Z.
-#<module name="vircio">
+<vircioroot
+    minlevel="100"
+    privilege="users/vircio-root">
+
+
+# Usermode +Q oculta presenca e membership de usuarios sem users/auspex.
+# Deve estar carregado em todos os IRCds da rede.
+<module name="vircio_invisible">
+
+<vircioinvisible
+    join="yes"
+    names="yes"
+    who="yes"
+    whois="yes"
+    msg="yes"
+    seepriv="users/auspex">
+
+# PRETENDUSER executa comando como outro usuario, controlado por comando e
+# users/pretenduser.
+<module name="vircio_pretenduser">
+
+# Usermode +Z coloca usuario em quarentena, permitindo #vIRCio e Services.
+# Deve estar carregado em todos os IRCds da rede.
+<module name="vircio_zombie">
+
+<virciozombie
+    channel="#vIRCio"
+    notice="*** Authentication required. Identifique-se ou registre conta nos Services. Use /NICKSERV HELP.">
 
 
 # ==========================================================
-# Modulos legados / nao utilizados atualmente
+# Modulos opcionais
 # ==========================================================
 
-# Ident nao utilizado.
+# Consulta ident do cliente.
 #<module name="ident">
 #<ident timeout="5s">
 
-# DCCALLOW nao utilizado.
+# Lista de nicks autorizados para DCC.
 #<module name="dccallow">
 
-# Random quote nao utilizado atualmente.
-# O arquivo vIRCio.quotes permanecera disponivel.
+# Exibe frase aleatoria de vIRCio.quotes.
 #<module name="randquote">
 #<randquote file="vIRCio.quotes">
 
-# Restricao global de criacao de canais nao utilizada.
+# Restringe criacao de canais por politica global.
 #<module name="restrictchans">
 
-# Restricao global de mensagens nao utilizada.
+# Restringe mensagens por politica global.
 #<module name="restrictmsg">
-
-# Modulos antigos sem equivalente oficial direto na v4:
-#
-# m_close
-# m_clones
-# m_devoice
-# m_jumpserver
-# m_lockserv
-# m_nopartmsg
-# m_userip
-#
-# Nao foram descartados funcionalmente.
-# Caso alguma funcao continue necessaria sera avaliada
-# durante a etapa de port dos modulos customizados.
-

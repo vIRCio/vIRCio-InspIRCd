@@ -13,21 +13,18 @@
 # SPAM / MALWARE
 # ==========================================================
 #
-# Migrado diretamente do vIRCio.filter historico.
-#
-# Na v4 o engine e PCRE2, portanto pontos literais sao
-# expressos como [.] para evitar interpretacao como regex.
+# Expressoes PCRE2 usam [.] para pontos literais.
 #
 
 <keyword
     pattern="abrege[.]eu"
-    reason="Spam de Virus"
+    reason="Virus spam. Spam de virus."
     action="block"
     flags="qPopn">
 
 <keyword
     pattern="weba[.]im"
-    reason="Spam de Virus"
+    reason="Virus spam. Spam de virus."
     action="block"
     flags="qPopn">
 
@@ -35,46 +32,36 @@
 # ==========================================================
 # ALERTA DE DIVULGACAO DE IRC
 # ==========================================================
-#
-# No InspIRCd 2 a vIRCio possuia a acao customizada:
-#
-#     warningopers
-#
-# O InspIRCd 4 possui a acao nativa:
-#
-#     warn
-#
-# Ela permite a mensagem e envia o alerta aos IRCops.
-#
+# Permite a mensagem e avisa os IRCops pelo snomask FILTER.
 
 <keyword
     pattern="irc[.]"
-    reason="Warning"
+    reason="IRC promotion. Divulgacao de IRC."
     action="warn"
     flags="pqoPn">
 
 
 # ==========================================================
-# REGRAS HISTORICAS DESABILITADAS
+# REGRAS DESABILITADAS
 # ==========================================================
 #
-# Permanecem comentadas como estavam no arquivo legado.
+# Mantidas para referencia, sem efeito na rede.
 #
 #<keyword
 #    pattern="irc[.]brasirc"
-#    reason="Spam de outra Rede"
+#    reason="Other network spam. Spam de outra rede."
 #    action="block"
 #    flags="qPopn">
 #
 #<keyword
 #    pattern="irc[.]virtualife"
-#    reason="Spam de outra Rede"
+#    reason="Other network spam. Spam de outra rede."
 #    action="block"
 #    flags="qPopn">
 #
 #<keyword
 #    pattern="vircio"
-#    reason="Warning"
+#    reason="IRC promotion. Divulgacao de IRC."
 #    action="warn"
 #    flags="pqoPn">
 
@@ -83,30 +70,23 @@
 # CANAIS ISENTOS
 # ==========================================================
 #
-# Na v4 cada destino e declarado separadamente.
+# A comparacao respeita o case mapping IRC.
+# A isencao cobre PRIVMSG, NOTICE e motivos de PART; QUIT nao possui alvo.
 #
 
 <exemptfromfilter target="#IRCops">
 <exemptfromfilter target="#Ajuda">
+<exemptfromfilter target="#Help">
+<exemptfromfilter target="#vIRCio">
 
 
 # ==========================================================
-# CENSOR LEGADO - PENDENTE
+# CENSOR
 # ==========================================================
 #
-# O arquivo vIRCio.censor antigo continha:
-#
-#   virtualife -> (spam)
-#   brasirc    -> (spam)
-#
-# O antigo censor SUBSTITUIA palavras.
-#
-# O modulo filter nao possui a mesma semantica de
-# substituicao, portanto essas regras NAO foram convertidas
-# artificialmente para block.
-#
-# Revisar posteriormente o m_censor do inspircd-contrib/4
-# antes de decidir a migracao.
+# As regras antigas substituiam "virtualife" e "brasirc" por "(spam)".
+# O modulo filter bloqueia ou alerta, mas nao substitui texto; essas regras
+# nao sao aplicadas para preservar a semantica original.
 #
 
 ############################################################

@@ -18,6 +18,31 @@ AJUDA DO INSPIRCD
 /HELP <comando>
     Exibe a ajuda de um comando específico.
 
+/HELPOP <topico>
+    Alias da Rede vIRCio para /HELP.
+
+
+RECURSOS PROPRIOS DA vIRCio
+---------------------------
+
+/IRCOPS
+    Mostra a equipe online por nivel administrativo (shows online staff).
+
+/HELP HELPER
+    Explica o status de Helper e o usermode +h (help status).
+
+/HELP VIRCIO-INVISIBLE
+    Explica o modo de invisibilidade administrativa +Q.
+
+/HELP VIRCIO-ZOMBIE
+    Explica a quarentena Zombie/Gringo e o usermode +Z.
+
+/HELP VIRCIO-ROOT
+    Explica a protecao aplicada aos Services Root.
+
+/HELP PRETENDUSER
+    Documenta o comando administrativo PRETENDUSER.
+
 
 SERVIÇOS
 --------

@@ -126,15 +126,20 @@
 # FLOOD EXEMPT
 # ==========================================================
 #
-# ATENCAO:
-# Estes privilegios removem varias protecoes de flood.
-# Devem ser concedidos apenas aos niveis administrativos.
+# Estes privilegios removem protecoes de flood e sao exclusivos de niveis
+# administrativos elevados.
 #
 
 <class
     name="FloodExempt"
 
     privs="users/flood/increased-buffers users/flood/no-fakelag users/flood/no-throttle">
+
+
+<class
+    name="Helper"
+
+    usermodes="h">
 
 
 # ==========================================================
@@ -223,9 +228,6 @@
 #
 # Equivalente ao Services Root do Anope.
 #
-# FUTURO m_vircio_oper:
-# ATIVAR usermode +N
-#
 
 <type
     name="Services Root"
@@ -236,9 +238,7 @@
 
     maxchans="300"
 
-    # ATIVAR apos m_vircio_oper:
-    # adicionar +N aos modes.
-    modes="+s +cCqQ">
+    modes="+s +cCq">
 
 
 # ==========================================================
@@ -253,9 +253,6 @@
 #
 # Nao recebe DIE/RESTART.
 #
-# FUTURO m_vircio_oper:
-# ATIVAR usermode +A
-#
 
 <type
     name="Services Administrator"
@@ -266,9 +263,7 @@
 
     maxchans="300"
 
-    # ATIVAR apos m_vircio_oper:
-    # adicionar +A aos modes.
-    modes="+s +cCqQ">
+    modes="+s +cCq">
 
 
 # ==========================================================
@@ -282,9 +277,6 @@
 #
 # Nao administra modulos, links ou o daemon.
 #
-# FUTURO m_vircio_oper:
-# ATIVAR usermode +O
-#
 
 <type
     name="Services Operator"
@@ -295,9 +287,7 @@
 
     maxchans="300"
 
-    # ATIVAR apos m_vircio_oper:
-    # adicionar +O aos modes.
-    modes="+s +cCqQ">
+    modes="+s +cCq">
 
 
 # ==========================================================
@@ -322,7 +312,7 @@
 
     maxchans="300"
 
-    modes="+s +cCqQ">
+    modes="+s +cCq">
 
 
 # ==========================================================
@@ -346,7 +336,27 @@
 
     maxchans="300"
 
-    modes="+s +cCqQ">
+    modes="+s +cCq">
+
+
+# ==========================================================
+# HELPER
+# ==========================================================
+#
+# IRCop dedicado ao atendimento, sem comandos ou privilegios de
+# administracao da rede. Usuarios nao-oper continuam podendo ser Helpers.
+#
+
+<type
+    name="Helper"
+
+    classes="Helper"
+
+    level="20"
+
+    maxchans="300"
+
+    modes="+h">
 
 ############################################################
 #
@@ -354,7 +364,7 @@
 #
 ############################################################
 #
-# Estas contas existem em TODOS os IRCds da Rede vIRCio.
+# Estas contas existem em cada IRCd da Rede vIRCio.
 #
 # Operadores especificos de apenas um servidor devem ser
 # definidos no ircd.conf daquele servidor.
@@ -367,7 +377,7 @@
 # ==========================================================
 #
 # Root global da Rede vIRCio.
-# Deve possuir acesso Root em todos os IRCds e no Services.
+# Deve possuir acesso Root em cada IRCd e no Services.
 #
 
 <oper
@@ -384,7 +394,7 @@
 # ==========================================================
 #
 # Root global da Rede vIRCio.
-# Deve possuir acesso Root em todos os IRCds e no Services.
+# Deve possuir acesso Root em cada IRCd e no Services.
 #
 
 <oper
