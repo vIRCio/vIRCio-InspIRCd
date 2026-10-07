@@ -11,13 +11,15 @@ Os sources compiláveis ficam em:
 
 ### m_vircio_ircops.cpp
 
-Fornece `/IRCOPS` e exibe IRCops e Helpers da rede conforme OperType,
-nível administrativo e regras de visibilidade.
+Fornece `/IRCOPS` e o usermode não-oper `+h`, exibindo IRCops e Helpers da
+rede conforme OperType, nível administrativo e regras de visibilidade.
 
-### m_vircio_root.cpp
+### m_vircio_admin.cpp
 
-Protege operadores `Services Root` contra ações administrativas forçadas
-de operadores sem autorização equivalente.
+Protege IRC Admins elegíveis contra ações administrativas forçadas por
+operadores sem autorização equivalente. A elegibilidade usa o nível mínimo
+configurado e o privilégio `users/vircio-admin`; não depende do nome literal
+de um OperType.
 
 ### m_vircio_pretenduser.cpp
 

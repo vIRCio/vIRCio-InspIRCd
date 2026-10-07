@@ -16,7 +16,7 @@ Ambiente de referência:
 
 Source:
 
-    /home/vircio/vIRCio-InspIRCd-v2
+    /home/vircio/vIRCio-InspIRCd
 
 Runtime:
 
@@ -69,9 +69,9 @@ contribs, instale também:
     cd /home/vircio
 
     git clone --branch v4 \
-        git@github.com:vIRCio/vIRCio-InspIRCd-v2.git
+        git@github.com:vIRCio/vIRCio-InspIRCd.git
 
-    cd /home/vircio/vIRCio-InspIRCd-v2
+    cd /home/vircio/vIRCio-InspIRCd
 
 
 ## Extras
@@ -148,7 +148,7 @@ Os módulos compiláveis próprios da rede ficam em:
 Atualmente:
 
     m_vircio_ircops.cpp
-    m_vircio_root.cpp
+    m_vircio_admin.cpp
     m_vircio_pretenduser.cpp
     m_vircio_invisible.cpp
     m_vircio_zombie.cpp
@@ -170,7 +170,7 @@ Esperado:
 
 Diretórios:
 
-    source:   /home/vircio/vIRCio-InspIRCd-v2
+    source:   /home/vircio/vIRCio-InspIRCd
     runtime:  /home/vircio/inspircd
     config:   /home/vircio/inspircd/conf
     modules:  /home/vircio/inspircd/modules
@@ -182,7 +182,7 @@ Diretórios:
 
 Templates e arquivos comuns versionados:
 
-    /home/vircio/vIRCio-InspIRCd-v2/vIRCio/conf
+    /home/vircio/vIRCio-InspIRCd/vIRCio/conf
 
 Configuração operacional:
 
@@ -262,7 +262,8 @@ Configuração atual da vIRCio:
     6667    IRC
     6697    IRC/TLS
     7002    WSS
-    7007    link IRCd/TLS
+    7007    exclusivamente IRCd <-> IRCd S2S/TLS
+    7008    exclusivamente Anope <-> InspIRCd em 127.0.0.1, sem TLS
 
 Os valores podem variar por node.
 
@@ -275,7 +276,7 @@ Processo:
 
 Listeners:
 
-    ss -lntp | grep -E ':(6667|6697|7002|7007)\b'
+    ss -lntp | grep -E ':(6667|6697|7002|7007|7008)\b'
 
 Log:
 
@@ -291,7 +292,7 @@ Projeto oficial:
 
 Fork vIRCio:
 
-    https://github.com/vIRCio/vIRCio-InspIRCd-v2
+    https://github.com/vIRCio/vIRCio-InspIRCd
 
 Documentação:
 
