@@ -37,11 +37,14 @@ RECURSOS PROPRIOS DA vIRCio
 /HELP VIRCIO-ZOMBIE
     Explica a quarentena Zombie/Gringo e o usermode +Z.
 
-/HELP VIRCIO-ROOT
-    Explica a protecao aplicada aos Services Root.
+/HELP VIRCIO-ADMIN
+    Explica a protecao aplicada aos IRC Admins.
 
 /HELP PRETENDUSER
     Documenta o comando administrativo PRETENDUSER.
+
+IRC Oper nao recebe DIE, RESTART, comandos de gerenciamento de modulos
+ou controle de links e topologia.
 
 
 SERVIÇOS
@@ -64,9 +67,6 @@ HostServ:
 
 OperServ:
     /OPERSERV HELP
-
-StatServ:
-    /STATSERV HELP
 
 
 IDENTIFICAÇÃO

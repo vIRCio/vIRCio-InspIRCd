@@ -11,7 +11,6 @@
 #                                                          #
 ############################################################
 
-
 # ==========================================================
 # ALIASES DOS SERVICES
 # ==========================================================
@@ -20,7 +19,6 @@
 #
 # O modulo "alias" ja e carregado em vIRCio.modules.
 #
-
 
 # ----------------------------------------------------------
 # Comandos completos
@@ -63,12 +61,6 @@
     service="yes"
     operonly="yes">
 
-<alias text="STATSERV"
-    replace="PRIVMSG $requirement :$2-"
-    requires="StatServ"
-    service="yes">
-
-
 # ----------------------------------------------------------
 # Comandos abreviados
 # ----------------------------------------------------------
@@ -110,12 +102,6 @@
     service="yes"
     operonly="yes">
 
-<alias text="SS"
-    replace="PRIVMSG $requirement :$2-"
-    requires="StatServ"
-    service="yes">
-
-
 # ==========================================================
 # IDENTIFICACAO
 # ==========================================================
@@ -148,7 +134,6 @@
     requires="NickServ"
     service="yes">
 
-
 # ----------------------------------------------------------
 # Logout
 # ----------------------------------------------------------
@@ -158,7 +143,6 @@
     replace="PRIVMSG $requirement :LOGOUT"
     requires="NickServ"
     service="yes">
-
 
 # ==========================================================
 # FANTASY COMMAND CHANSERV
@@ -182,7 +166,6 @@
     replace="PRIVMSG ChanServ :$1 $chan $2-"
     requires="ChanServ"
     service="yes">
-
 
 # ==========================================================
 # RESERVA DOS NICKS DOS SERVICES
@@ -220,11 +203,6 @@
     nick="OperServ"
     reason="Reservado para um servico da Rede vIRCio">
 
-<badnick
-    nick="StatServ"
-    reason="Reservado para um servico da Rede vIRCio">
-
-
 # ==========================================================
 # EXCECOES DO FILTRO
 # ==========================================================
@@ -240,8 +218,6 @@
 <exemptfromfilter target="MemoServ">
 <exemptfromfilter target="NickServ">
 <exemptfromfilter target="OperServ">
-<exemptfromfilter target="StatServ">
-
 
 ############################################################
 #

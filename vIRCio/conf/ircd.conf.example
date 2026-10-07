@@ -58,6 +58,21 @@
     tlsv13="yes">
 
 <sslprofile
+    name="IRCClients"
+    provider="openssl"
+    cafile=""
+    certfile="&tlsCertFile;"
+    keyfile="&tlsKeyFile;"
+    hash="sha256"
+    compression="no"
+    renegotiation="no"
+    requestclientcert="yes"
+    securitylevel="1"
+    tlsv11="no"
+    tlsv12="yes"
+    tlsv13="yes">
+
+<sslprofile
     name="Servers"
     provider="openssl"
     cafile=""
@@ -90,7 +105,7 @@
     address="&bindIPv4;"
     port="&clientTLSPort;"
     type="clients"
-    sslprofile="Clients"
+    sslprofile="IRCClients"
     defer="0"
     free="no">
 
@@ -110,6 +125,14 @@
     port="&serverTLSPort;"
     type="servers"
     sslprofile="Servers"
+    defer="0"
+    free="no">
+
+# Services / Anope local — somente loopback, sem TLS
+<bind
+    address="127.0.0.1"
+    port="&servicesPort;"
+    type="servers"
     defer="0"
     free="no">
 
@@ -210,30 +233,43 @@
 # ==========================================================
 # Link com Services / Anope
 # ==========================================================
-
-# Services locais conectam pelo loopback deste IRCd.
-# As credenciais do link devem ser definidas fora do Git.
+#
+# Para o deployment padrao, Anope e InspIRCd executam no mesmo
+# host. O Anope inicia a conexao em 127.0.0.1:7008.
+#
+# Nao use <autoconnect> para services.vircio.net.
+#
+# As credenciais abaixo sao placeholders. Secrets reais ficam
+# apenas no runtime e nunca entram no Git.
+#
 
 #<link
 #    name="services.vircio.net"
 #    ipaddr="127.0.0.1"
-#    port="&serverTLSPort;"
+#    port="&servicesPort;"
 #    allowmask="127.0.0.1"
 #    timeout="30s"
-#    sslprofile="Servers"
 #    statshidden="yes"
 #    hidden="yes"
-#    sendpass="SENHA_DE_ENVIO"
-#    recvpass="SENHA_DE_RECEBIMENTO">
-
-#<autoconnect
-#    bootperiod="15s"
-#    period="1m"
-#    server="services.vircio.net">
+#    sendpass="SENHA_LINK_SERVICES"
+#    recvpass="SENHA_LINK_SERVICES">
 
 #<services
 #    server="services.vircio.net"
 #    silent="yes">
+
+
+# ----------------------------------------------------------
+# Services em outro servidor
+# ----------------------------------------------------------
+#
+# Se Anope e InspIRCd forem separados futuramente, NAO exponha
+# o listener plaintext acima para a Internet.
+#
+# Nesse caso use um listener dedicado com TLS, adicione
+# sslprofile="Servers" ao <bind> e ao <link>, restrinja
+# allowmask ao IP do host Services e configure o Anope com
+# ssl=yes e um modulo SSL suportado.
 
 
 # ==========================================================
@@ -249,4 +285,4 @@
 #    hash="bcrypt"
 #    host="*@*"
 #    sslonly="yes"
-#    type="NetAdmin">
+#    type="IRC Admin">

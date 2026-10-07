@@ -29,7 +29,11 @@ UNINVITE    USER        USERHOST    VERSION     VHOST       WATCH
 WHO         WHOIS       WHOWAS
 ">
 
-<helptopic key="coper" title="Oper Commands" value="
+<helptopic key="coper" title="Administrative Command Reference" value="
+The commands available to an IRCop depend on its configured OperType.
+IRC Oper does not receive daemon, module, or link-management commands.
+Os comandos disponiveis dependem do OperType configurado.
+
 ALLTIME     CBAN        CHECK       CHGHOST     CHGIDENT    CHGNAME
 CLONES      CLOAK       CONNECT     DIE         DNSBL       ELINE
 FILTER      GLINE       GLOADMODULE GLOBOPS     GRELOADMODULE
@@ -134,8 +138,8 @@ Requires PRETENDUSER command access and users/pretenduser.
 Exige acesso ao comando PRETENDUSER e users/pretenduser.
 
 You cannot target yourself, Services pseudoclients, a higher-level IRCop, or a
-protected Services Root. Recursion is denied and the full payload is not logged.
-Nao aceita autoalvo, pseudoclients, IRCop superior ou Root protegido.
+protected IRC Admin. Recursion is denied and the full payload is not logged.
+Nao aceita autoalvo, pseudoclients, IRCop superior ou IRC Admin protegido.
 ">
 
 <helptopic key="vircio-invisible" title="vIRCio Invisible - user mode +Q" value="
@@ -151,9 +155,9 @@ users/auspex can see the presence. This is a user mode, not channel mode +Q.
 +Q nao silencia o IRCop; Services e users/auspex continuam vendo.
 ">
 
-<helptopic key="vircio-root" title="vIRCio Services Root Protection" value="
-Protects human Services Roots with level 100+ and users/vircio-root.
-Protege Services Roots humanos com nivel 100+ e users/vircio-root.
+<helptopic key="vircio-admin" title="vIRCio IRC Admin Protection" value="
+Protects human IRC Admins with level 100+ and users/vircio-admin.
+Protege IRC Admins humanos com nivel 100+ e users/vircio-admin.
 
 Protection denies KILL, KICK, REMOVE, prefix removal, SAJOIN, SAKICK, SAMODE,
 SANICK, SAPART, SAQUIT and PRETENDUSER by other users.
@@ -229,7 +233,7 @@ Um parametro remove; para adicionar use duracao e motivo quando aplicavel.
 /SANICK nick newnick         Changes a nick. Altera apelido.
 /SAQUIT nick reason          Forces a quit. Forca desconexao.
 /SATOPIC channel topic       Sets a topic. Define topic.
-Protected Services Roots cannot be targets of forced administrative actions.
+Protected IRC Admins cannot be targets of forced administrative actions.
 ">
 
 <helptopic key="stats" title="/STATS <symbol> [<servername>]" value="

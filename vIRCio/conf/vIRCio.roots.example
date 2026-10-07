@@ -136,10 +136,6 @@
     privs="users/flood/increased-buffers users/flood/no-fakelag users/flood/no-throttle">
 
 
-<class
-    name="Helper"
-
-    usermodes="h">
 
 
 # ==========================================================
@@ -184,8 +180,8 @@
 #
 # Controle destrutivo do daemon.
 #
-# Services Administrator NAO recebe esta classe.
-# NetAdmin e Services Root recebem.
+# IRC Admin possui acesso completo atraves de IRCAdminAccess.
+# IRC Oper nao possui controle destrutivo do daemon.
 #
 
 <class
@@ -195,16 +191,16 @@
 
 
 # ==========================================================
-# ROOT ACCESS
+# IRC ADMIN ACCESS
 # ==========================================================
 #
 # Acesso irrestrito.
 #
-# Exclusivo do Services Root.
+# Exclusivo do IRC Admin.
 #
 
 <class
-    name="RootAccess"
+    name="IRCAdminAccess"
 
     commands="*"
     privs="*"
@@ -221,18 +217,23 @@
 
 
 # ==========================================================
-# SERVICES ROOT
+# IRCADMIN
 # ==========================================================
 #
-# Maior nivel administrativo da Rede vIRCio.
+# Maior nivel administrativo do InspIRCd.
 #
-# Equivalente ao Services Root do Anope.
+# Services Root, Services Admin e Services Oper
+# pertencem exclusivamente ao Anope.
 #
 
 <type
-    name="Services Root"
+    name="IRC Admin"
 
-    classes="RootAccess"
+    classes="IRCAdminAccess"
+
+    # Usado por m_vircio_admin para proteger administradores
+    # de nivel maximo da Rede vIRCio.
+    privs="users/vircio-admin"
 
     level="100"
 
@@ -242,95 +243,17 @@
 
 
 # ==========================================================
-# SERVICES ADMINISTRATOR
+# IRC OPER
 # ==========================================================
 #
-# Administracao global da rede.
-#
-# Segue a hierarquia do Anope:
-#
-# Services Administrator > Services Operator
-#
-# Nao recebe DIE/RESTART.
+# IRC Operator global para operacao cotidiana da rede.
+# Nao recebe IRCAdminAccess.
 #
 
 <type
-    name="Services Administrator"
-
-    classes="View UserControl SACommands BanControl OperChat Permissions FloodExempt ServerLink ServerAdmin"
-
-    level="90"
-
-    maxchans="300"
-
-    modes="+s +cCq">
-
-
-# ==========================================================
-# SERVICES OPERATOR
-# ==========================================================
-#
-# Operacao global cotidiana dos Services e da rede.
-#
-# Pode observar, administrar usuarios, aplicar bans e
-# comunicar-se com a equipe.
-#
-# Nao administra modulos, links ou o daemon.
-#
-
-<type
-    name="Services Operator"
+    name="IRC Oper"
 
     classes="View UserControl BanControl OperChat"
-
-    level="80"
-
-    maxchans="300"
-
-    modes="+s +cCq">
-
-
-# ==========================================================
-# NETADMIN
-# ==========================================================
-#
-# Administrador de um IRCd especifico da rede.
-#
-# O-Lines NetAdmin locais ficam no ircd.conf de cada servidor.
-# A equipe Root global fica neste vIRCio.roots.
-#
-# Possui controle completo daquele daemon, incluindo
-# REHASH, modulos, DIE e RESTART.
-#
-
-<type
-    name="NetAdmin"
-
-    classes="View UserControl SACommands BanControl OperChat Permissions FloodExempt ServerLink ServerAdmin Shutdown"
-
-    level="70"
-
-    maxchans="300"
-
-    modes="+s +cCq">
-
-
-# ==========================================================
-# GLOBALOP
-# ==========================================================
-#
-# IRC Operator normal.
-#
-# Mantem aproximadamente o papel historico GlobalOp da
-# Rede vIRCio: operacao, bans, usuarios e links.
-#
-# As O-Lines GlobalOp ficam no ircd.conf de cada servidor.
-#
-
-<type
-    name="GlobalOp"
-
-    classes="View UserControl BanControl OperChat ServerLink"
 
     level="50"
 
@@ -338,25 +261,6 @@
 
     modes="+s +cCq">
 
-
-# ==========================================================
-# HELPER
-# ==========================================================
-#
-# IRCop dedicado ao atendimento, sem comandos ou privilegios de
-# administracao da rede. Usuarios nao-oper continuam podendo ser Helpers.
-#
-
-<type
-    name="Helper"
-
-    classes="Helper"
-
-    level="20"
-
-    maxchans="300"
-
-    modes="+h">
 
 ############################################################
 #
@@ -376,8 +280,8 @@
 # cirinho
 # ==========================================================
 #
-# Root global da Rede vIRCio.
-# Deve possuir acesso Root em cada IRCd e no Services.
+# IRC Admin global da Rede vIRCio.
+# O nivel correspondente no Anope e configurado separadamente.
 #
 
 <oper
@@ -385,7 +289,7 @@
     password="HASH_BCRYPT_CIRINHO"
     host="*@*"
     sslonly="yes"
-    type="Services Root"
+    type="IRC Admin"
     hash="bcrypt">
 
 
@@ -393,17 +297,17 @@
 # rockcavera
 # ==========================================================
 #
-# Root global da Rede vIRCio.
-# Deve possuir acesso Root em cada IRCd e no Services.
+# IRC Admin global da Rede vIRCio.
+# O nivel correspondente no Anope e configurado separadamente.
 #
 
 <oper
     name="rockcavera"
     password="HASH_BCRYPT_ROCKCAVERA"
-    hash="sha256"
+    hash="bcrypt"
     host="*@*"
     sslonly="yes"
-    type="Services Root">
+    type="IRC Admin">
 
 
 ############################################################
@@ -412,7 +316,7 @@
 #
 ############################################################
 #
-# NetAdmins ou GlobalOps que existam apenas em um IRCd
+# IRC Admins ou IRC Opers que existam apenas em um IRCd
 # devem ser declarados no ircd.conf desse servidor.
 #
 ############################################################

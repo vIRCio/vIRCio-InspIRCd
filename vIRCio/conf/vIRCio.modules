@@ -16,6 +16,7 @@
 <module name="sha1">
 <module name="sha2">
 <module name="bcrypt">
+<bcrypt rounds="12">
 <module name="password_hash">
 <mkpasswd operonly="yes">
 
@@ -628,15 +629,10 @@
 
 
 # ==========================================================
-# Ajuda e usermode +h para Helpers.
+# Ajuda e usermode +h para Helpers nao-oper.
 # ==========================================================
 
 <module name="help">
-<module name="helpmode">
-
-<helpmode
-    ignorehideoper="no"
-    markhelpers="yes">
 
 # Topicos de ajuda da Rede vIRCio.
 <include file="vIRCio.helpop" missingokay="yes">
@@ -722,13 +718,13 @@
     helperchannels="#Ajuda #Help #vIRCio">
 
 
-# Protege Services Root humanos com level minimo e privilegio configurado.
+# Protege IRC Admin humanos com level minimo e privilegio configurado.
 # Deve estar carregado em todos os IRCds da rede.
-<module name="vircio_root">
+<module name="vircio_admin">
 
-<vircioroot
+<vircioadmin
     minlevel="100"
-    privilege="users/vircio-root">
+    privilege="users/vircio-admin">
 
 
 # Usermode +Q oculta presenca e membership de usuarios sem users/auspex.
