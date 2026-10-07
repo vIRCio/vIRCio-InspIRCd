@@ -49,7 +49,35 @@ class CommandIRCOps final
 {
 private:
 	UserModeReference hideopermode;
-	UserModeReference helpopmode;
+	SimpleUserMode helpermode;
+
+	unsigned long GetOperLevel(const User* user) const
+	{
+		if (!user || !user->IsOper())
+			return 0;
+
+		/*
+		 * Remote OperAccount objects contain the oper type but do not
+		 * necessarily contain arbitrary local config fields such as level.
+		 * Resolve the type against our shared configuration first so /IRCOPS
+		 * keeps its hierarchy across server links.
+		 */
+		const auto iter =
+			ServerInstance->Config->OperTypes.find(user->oper->GetType());
+
+		if (iter != ServerInstance->Config->OperTypes.end())
+		{
+			return iter->second->GetConfig()
+				->getNum<unsigned long>("level", 0);
+		}
+
+		/*
+		 * Fallback for unusual/local oper types which are not represented in
+		 * the type map available on this server.
+		 */
+		return user->oper->GetConfig()
+			->getNum<unsigned long>("level", 0);
+	}
 
 	bool IsAutomaticHelper(User* user) const
 	{
@@ -80,9 +108,11 @@ private:
 	bool IsHelper(User* user) const
 	{
 		/*
-		 * +h continua sendo a forma explicita de marcar um Helper.
+		 * +h continua sendo a forma explicita de marcar um Helper. This mode is
+		 * deliberately owned here instead of using m_helpmode: its +h is oper-only,
+		 * whereas vIRCio Helpers may be non-opers.
 		 */
-		if (helpopmode && user->IsModeSet(helpopmode))
+		if (user->IsModeSet(helpermode))
 			return true;
 
 		/*
@@ -99,7 +129,7 @@ public:
 	CommandIRCOps(Module* Creator)
 		: Command(Creator, "IRCOPS")
 		, hideopermode(Creator, "hideoper")
-		, helpopmode(Creator, "helpop")
+		, helpermode(Creator, "vircio-helper", 'h')
 	{
 	}
 
@@ -133,17 +163,13 @@ public:
 			if (hidden && !canseehidden && source != oper)
 				continue;
 
-			const auto level =
-				oper->oper->GetConfig()->getNum<unsigned long>("level", 0);
+			const auto level = GetOperLevel(oper);
 
 			/*
 			 * GetType() retorna o tipo administrativo real:
 			 *
-			 * Services Root
-			 * Services Administrator
-			 * Services Operator
-			 * NetAdmin
-			 * GlobalOp
+			 * IRC Admin
+			 * IRC Oper
 			 *
 			 * GetName() retornaria o nome da conta/O-Line,
 			 * por exemplo "cirinho".

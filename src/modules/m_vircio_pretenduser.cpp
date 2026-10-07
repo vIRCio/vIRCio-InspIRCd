@@ -185,8 +185,8 @@ public:
 		 * Preserve the historic oper hierarchy rule:
 		 * an operator may not impersonate an operator with a higher level.
 		 *
-		 * Equal levels retain the legacy behaviour. Services Root receives
-		 * stronger protection separately from m_vircio_root.
+		 * Equal levels retain the legacy behaviour. Protected IRC Admins receive
+		 * stronger protection separately from m_vircio_admin.
 		 */
 		if (target->IsOper())
 		{

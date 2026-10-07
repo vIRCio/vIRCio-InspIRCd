@@ -10,20 +10,47 @@
 
 #include "inspircd.h"
 
-class ModuleVircioRoot final
+class ModuleVircioAdmin final
 	: public Module
 {
 private:
 	unsigned long minlevel = 100;
-	std::string privilege = "users/vircio-root";
+	std::string privilege = "users/vircio-admin";
 
-	bool IsProtectedRoot(const User* user) const
+	unsigned long GetOperLevel(const User* user) const
+	{
+		if (!user || !user->IsOper())
+			return 0;
+
+		/*
+		 * Remote OperAccount objects contain the oper type but do not
+		 * necessarily contain arbitrary local config fields such as level.
+		 * Resolve the type against our shared configuration first so IRC Admin
+		 * protection remains effective across server links.
+		 */
+		const auto iter =
+			ServerInstance->Config->OperTypes.find(user->oper->GetType());
+
+		if (iter != ServerInstance->Config->OperTypes.end())
+		{
+			return iter->second->GetConfig()
+				->getNum<unsigned long>("level", 0);
+		}
+
+		/*
+		 * Fallback for unusual/local oper types which are not represented in
+		 * the type map available on this server.
+		 */
+		return user->oper->GetConfig()
+			->getNum<unsigned long>("level", 0);
+	}
+
+	bool IsProtectedAdmin(const User* user) const
 	{
 		if (!user || !user->IsOper())
 			return false;
 
-		const auto level =
-			user->oper->GetConfig()->getNum<unsigned long>("level", 0);
+		const auto level = GetOperLevel(user);
 
 		if (level < minlevel)
 			return false;
@@ -38,7 +65,7 @@ private:
 			source->WriteNumeric(
 				ERR_NOPRIVILEGES,
 				INSP_FORMAT(
-					"Permission denied - {} is a protected vIRCio Services Root",
+					"Permission denied - {} is a protected vIRCio IRC Admin",
 					target->nick
 				)
 			);
@@ -46,7 +73,7 @@ private:
 
 		ServerInstance->SNO.WriteGlobalSno(
 			'a',
-			"{} attempted {} against protected Services Root {}",
+			"{} attempted {} against protected IRC Admin {}",
 			source->nick,
 			action,
 			target->nick
@@ -95,7 +122,7 @@ private:
 
 			/*
 			 * A channel target is not a user and is outside the scope of
-			 * Services Root protection.
+			 * IRC Admin protection.
 			 */
 			if (ServerInstance->Channels.IsPrefix(parameters[0][0]))
 				return nullptr;
@@ -123,10 +150,10 @@ private:
 	}
 
 public:
-	ModuleVircioRoot()
+	ModuleVircioAdmin()
 		: Module(
 			VF_COMMON,
-			"Protects vIRCio Services Root operators from forced administrative actions."
+			"Protects privileged vIRCio IRC Admins from forced administrative actions."
 		)
 	{
 	}
@@ -134,19 +161,19 @@ public:
 	void ReadConfig(ConfigStatus&) override
 	{
 		const auto& tag =
-			ServerInstance->Config->ConfValue("vircioroot");
+			ServerInstance->Config->ConfValue("vircioadmin");
 
 		minlevel =
 			tag->getNum<unsigned long>("minlevel", 100, 1);
 
 		privilege =
-			tag->getString("privilege", "users/vircio-root");
+			tag->getString("privilege", "users/vircio-admin");
 
 		if (privilege.empty())
 		{
 			throw ModuleException(
 				this,
-				"<vircioroot:privilege> must not be empty"
+				"<vircioadmin:privilege> must not be empty"
 			);
 		}
 	}
@@ -157,7 +184,7 @@ public:
 		const std::string&
 	) override
 	{
-		if (!source || source == dest || !IsProtectedRoot(dest))
+		if (!source || source == dest || !IsProtectedAdmin(dest))
 			return MOD_RES_PASSTHRU;
 
 		ReportDenied(source, dest, "KILL");
@@ -172,7 +199,7 @@ public:
 	{
 		User* target = memb->user;
 
-		if (source == target || !IsProtectedRoot(target))
+		if (source == target || !IsProtectedAdmin(target))
 			return MOD_RES_PASSTHRU;
 
 		ReportDenied(source, target, "KICK");
@@ -198,7 +225,7 @@ public:
 		auto* target =
 			ServerInstance->Users.Find(change.param, true);
 
-		if (!target || source == target || !IsProtectedRoot(target))
+		if (!target || source == target || !IsProtectedAdmin(target))
 			return MOD_RES_PASSTHRU;
 
 		auto* memb = chan->GetUser(target);
@@ -231,7 +258,7 @@ public:
 		auto* target =
 			FindForcedCommandTarget(command, parameters);
 
-		if (!target || source == target || !IsProtectedRoot(target))
+		if (!target || source == target || !IsProtectedAdmin(target))
 			return MOD_RES_PASSTHRU;
 
 		ReportDenied(source, target, command);
@@ -239,4 +266,4 @@ public:
 	}
 };
 
-MODULE_INIT(ModuleVircioRoot)
+MODULE_INIT(ModuleVircioAdmin)
